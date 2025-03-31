@@ -205,8 +205,17 @@ async def standard_tos_finder(variations_to_try, headers, session) -> TosRespons
         try:
             logger.info(f"Trying URL variation: {url} ({variation_type})")
             
+            # Check for known sites that might need longer timeouts
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.lower()
+            is_slow_site = any(slow_domain in domain for slow_domain in ['theverge.com', 'vox.com', 'washingtonpost.com'])
+            
             # First do a HEAD request to check for redirects
-            head_response = session.head(url, headers=headers, timeout=10, allow_redirects=True)
+            # Use longer timeout for known slow sites
+            timeout = 30 if is_slow_site else 10
+            logger.info(f"Using timeout of {timeout}s for HEAD request to {url}")
+            
+            head_response = session.head(url, headers=headers, timeout=timeout, allow_redirects=True)
             head_response.raise_for_status()
             
             # Get the final URL after redirects
@@ -216,7 +225,12 @@ async def standard_tos_finder(variations_to_try, headers, session) -> TosRespons
             
             # Now get the content of the final URL
             logger.info(f"Fetching content from {final_url}")
-            response = session.get(final_url, headers=headers, timeout=15)
+            
+            # Longer timeout for content fetch on slow sites
+            content_timeout = 30 if is_slow_site else 15
+            logger.info(f"Using timeout of {content_timeout}s for GET request to {final_url}")
+            
+            response = session.get(final_url, headers=headers, timeout=content_timeout)
             response.raise_for_status()
             
             # Parse the HTML content
@@ -225,6 +239,21 @@ async def standard_tos_finder(variations_to_try, headers, session) -> TosRespons
             # Find the Terms of Service link from the page
             logger.info(f"Searching for ToS link in {final_url}")
             tos_link = find_tos_link(final_url, soup)
+            
+            # For The Verge or other Vox Media sites, make an extra effort to find the link before falling back
+            if 'theverge.com' in final_url and not tos_link:
+                logger.info("Extra processing for The Verge to find ToS")
+                # Look specifically for footer elements and search for Vox Media links
+                footers = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower()))
+                for footer in footers:
+                    for link in footer.find_all('a', href=True):
+                        href = link.get('href')
+                        if "voxmedia.com" in href and any(term in href.lower() for term in ['/legal', '/terms', '/tos']):
+                            tos_link = href
+                            logger.info(f"Found Vox Media ToS link in footer: {tos_link}")
+                            break
+                    if tos_link:
+                        break
             
             if tos_link:
                 logger.info(f"Found ToS link: {tos_link} in {final_url} ({variation_type})")
@@ -252,10 +281,11 @@ async def standard_tos_finder(variations_to_try, headers, session) -> TosRespons
     try:
         # Try one more time with the original URL for a better error message
         base_url = variations_to_try[0][0]  # Original URL
-        head_response = session.head(base_url, headers=headers, timeout=10, allow_redirects=True)
+        
+        head_response = session.head(base_url, headers=headers, timeout=15, allow_redirects=True)
         final_url = head_response.url
         
-        response = session.get(final_url, headers=headers, timeout=15)
+        response = session.get(final_url, headers=headers, timeout=20)
         response.raise_for_status()
         
         return TosResponse(
@@ -562,11 +592,11 @@ async def playwright_tos_finder(url: str) -> TosResponse:
             page = await context.new_page()
             
             # Set a reasonable timeout for navigation
-            page.set_default_timeout(30000)  # 30 seconds
+            page.set_default_timeout(45000)  # 45 seconds
             
             try:
-                # Navigate to the URL
-                await page.goto(url, wait_until="networkidle")
+                # Navigate to the URL with a longer timeout
+                await page.goto(url, wait_until="networkidle", timeout=60000)
                 
                 # Get the final URL after any redirects
                 final_url = page.url
@@ -579,6 +609,47 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                 
                 # Find links using our existing function
                 tos_link = find_tos_link(final_url, soup)
+                
+                # If The Verge and no ToS link found, try additional strategies before giving up
+                if 'theverge.com' in final_url and not tos_link:
+                    logger.info("Extra processing for The Verge with Playwright")
+                    
+                    # Try scrolling to bottom where footer links usually are
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(2000)  # Wait for any lazy-loaded content
+                    
+                    # Get updated content after scrolling
+                    updated_content = await page.content()
+                    updated_soup = BeautifulSoup(updated_content, 'html.parser')
+                    
+                    # Try to find 'Vox Media' links that might lead to ToS
+                    vox_links = await page.query_selector_all('a:text-matches("Vox Media", "i")')
+                    for link in vox_links:
+                        try:
+                            # Try clicking Vox Media link to see if it reveals more links
+                            await link.click()
+                            await page.wait_for_timeout(2000)
+                            
+                            # Check for ToS links after clicking
+                            post_click_content = await page.content()
+                            post_click_soup = BeautifulSoup(post_click_content, 'html.parser')
+                            tos_link = find_tos_link(final_url, post_click_soup)
+                            if tos_link:
+                                break
+                        except:
+                            continue
+                    
+                    # If still not found, look for footer links directly
+                    if not tos_link:
+                        footers = updated_soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower()))
+                        for footer in footers:
+                            for link in footer.find_all('a', href=True):
+                                href = link.get('href')
+                                if href and "voxmedia.com" in href and any(term in href.lower() for term in ['/legal', '/terms', '/tos']):
+                                    tos_link = href
+                                    break
+                            if tos_link:
+                                break
                 
                 # If standard approach didn't find links, try using Playwright's own selectors
                 if not tos_link:
