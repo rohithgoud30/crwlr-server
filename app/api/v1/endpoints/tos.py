@@ -546,4 +546,132 @@ def is_likely_article_link(href_lower: str, full_url: str) -> bool:
     
     return False
 
+async def playwright_tos_finder(url: str) -> TosResponse:
+    """
+    Find Terms of Service links using Playwright for JavaScript-rendered content.
+    This is a fallback method for when the standard approach fails.
+    """
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+            )
+            
+            page = await context.new_page()
+            
+            # Set a reasonable timeout for navigation
+            page.set_default_timeout(30000)  # 30 seconds
+            
+            try:
+                # Navigate to the URL
+                await page.goto(url, wait_until="networkidle")
+                
+                # Get the final URL after any redirects
+                final_url = page.url
+                
+                # Get the content
+                content = await page.content()
+                
+                # Parse with BeautifulSoup
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # Find links using our existing function
+                tos_link = find_tos_link(final_url, soup)
+                
+                # If standard approach didn't find links, try using Playwright's own selectors
+                if not tos_link:
+                    # Try to find links with text containing ToS terms
+                    tos_keywords = ["terms", "terms of service", "terms of use", "tos", "terms and conditions", "legal terms"]
+                    
+                    for keyword in tos_keywords:
+                        # Use case-insensitive search for links with text containing the keyword
+                        links = await page.query_selector_all(f'a:text-matches("{keyword}", "i")')
+                        
+                        for link in links:
+                            href = await link.get_attribute('href')
+                            if href and not href.startswith('javascript:') and href != '#':
+                                # Check if it's likely to be an article link
+                                if not is_likely_article_link(href.lower(), urljoin(final_url, href)):
+                                    tos_link = urljoin(final_url, href)
+                                    break
+                        
+                        if tos_link:
+                            break
+                    
+                    # If still not found, try clicking "I agree" or cookie consent buttons to reveal TOS links
+                    if not tos_link:
+                        # Try to find and click buttons that might reveal TOS content
+                        consent_buttons = await page.query_selector_all('button:text-matches("(accept|agree|got it|cookie|consent)", "i")')
+                        
+                        for button in consent_buttons:
+                            try:
+                                await button.click()
+                                await page.wait_for_timeout(1000)  # Wait for any changes to take effect
+                                
+                                # Check for new links after clicking
+                                content_after_click = await page.content()
+                                soup_after_click = BeautifulSoup(content_after_click, 'html.parser')
+                                tos_link = find_tos_link(final_url, soup_after_click)
+                                
+                                if tos_link:
+                                    break
+                            except:
+                                continue
+                
+                # Close the browser
+                await browser.close()
+                
+                if tos_link:
+                    return TosResponse(
+                        url=final_url,
+                        tos_url=tos_link,
+                        success=True,
+                        message=f"Terms of Service link found using JavaScript-enabled browser rendering on page: {final_url}",
+                        method_used="playwright"
+                    )
+                else:
+                    return TosResponse(
+                        url=final_url,
+                        success=False,
+                        message=f"No Terms of Service link found even with JavaScript-enabled browser rendering on page: {final_url}",
+                        method_used="playwright_failed"
+                    )
+            
+            except Exception as e:
+                await browser.close()
+                if "Timeout" in str(e) or "timeout" in str(e).lower():
+                    return TosResponse(
+                        url=url,
+                        success=False,
+                        message=f"Timeout while loading page with Playwright: {url}. The site may be slow or blocking automated access.",
+                        method_used="playwright_failed_timeout"
+                    )
+                elif "Navigation failed" in str(e) or "ERR_CONNECTION" in str(e):
+                    return TosResponse(
+                        url=url,
+                        success=False,
+                        message=f"Navigation failed for {url}. The site may be unavailable or blocking automated access.",
+                        method_used="playwright_failed_navigation"
+                    )
+                else:
+                    return TosResponse(
+                        url=url,
+                        success=False,
+                        message=f"Error using Playwright to process URL {url}: {str(e)}",
+                        method_used="playwright_failed"
+                    )
+    
+    except Exception as e:
+        error_msg = f"Error using Playwright to process URL {url}: {str(e)}"
+        logger.error(error_msg)
+        
+        return TosResponse(
+            url=url,
+            success=False,
+            message=error_msg,
+            method_used="playwright_failed"
+        )
+
 # Rest of the file stays the same
