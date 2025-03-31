@@ -1,5 +1,6 @@
 from urllib.parse import urlparse
 import logging
+import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -9,8 +10,21 @@ def normalize_url(url: str) -> str:
     """
     Normalize URLs to ensure they're valid for request processing.
     Ensures URLs begin with http:// or https:// protocol.
+    
+    Returns:
+        str: Normalized URL with proper protocol
     """
     url = url.strip()
+    
+    # Remove any trailing slashes for consistency
+    url = url.rstrip('/')
+    
+    # Handle the "t3.chat" format with dots but no protocol
+    # This is an important special case where domains may be entered without protocol
+    if re.match(r'^[a-zA-Z0-9][\w\.-]+\.[a-zA-Z]{2,}$', url) and not url.startswith(('http://', 'https://')):
+        url = f"https://{url}"
+        logger.info(f"Added protocol to domain name: {url}")
+        return url
     
     # Check if URL has protocol, if not add https://
     if not url.startswith(('http://', 'https://')):
