@@ -1,0 +1,27 @@
+version: '3'
+
+services:
+  crwlr-api:
+    build: .
+    container_name: crwlr-api
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - ENVIRONMENT=production
+      - API_V1_STR=/api/v1
+      - PROJECT_NAME=CRWLR API
+      - BACKEND_CORS_ORIGINS=["*"]
+
+  nginx:
+    image: nginx:alpine
+    container_name: crwlr-nginx
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx:/etc/nginx/conf.d
+    depends_on:
+      - crwlr-api
