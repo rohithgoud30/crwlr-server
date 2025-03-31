@@ -327,79 +327,37 @@ def find_tos_link(url, soup):
     # Get all links from the page
     links = soup.find_all('a', href=True)
     
-    # Common terms used in Terms of Service links
+    # Common terms used in Terms of Service links - ordered by specificity
+    # We want the most specific ones to match first
     tos_keywords = [
-        "terms", "terms of service", "terms of use", "tos", "terms and conditions", 
-        "conditions", "legal", "legal terms"
+        "terms of service",  # Most specific
+        "terms and conditions", 
+        "terms of use",
+        "legal terms",
+        "user agreement",
+        "tos"
     ]
     
-    # First, try to find exact matches in link text or href
-    for link in links:
-        href = link.get('href')
-        if not href or href.startswith('javascript:') or href == '#':
-            continue
-        
-        # Absolute URLs vs relative URLs
-        if not href.startswith('http'):
-            absolute_href = urljoin(original_url, href)
-        else:
-            absolute_href = href
-        
-        # Skip links that point back to the same page
-        if absolute_href == original_url:
-            continue
-        
-        # Check text of the link
-        link_text = link.get_text().lower().strip()
-        
-        # Check for exact matches in link text
-        for keyword in tos_keywords:
-            if keyword == link_text or f"{keyword}." == link_text:
-                logger.info(f"Found exact match for ToS keyword '{keyword}' in link text: {absolute_href}")
-                return absolute_href
-        
-        # Check for keywords in href
-        href_lower = href.lower()
-        for keyword in tos_keywords:
-            # Replace spaces with dashes or underscores for URL format
-            keyword_url = keyword.replace(' ', '-')
-            keyword_url2 = keyword.replace(' ', '_')
-            
-            if f"/{keyword_url}" in href_lower or f"/{keyword_url2}" in href_lower or keyword_url in href_lower or keyword_url2 in href_lower:
-                logger.info(f"Found ToS keyword '{keyword}' in href: {absolute_href}")
-                return absolute_href
+    # Lower priority keywords that should only match as exact phrases
+    # or in specific contexts like footers
+    lower_priority_keywords = [
+        "terms",  # This is too generic for content matching
+        "conditions",
+        "legal"
+    ]
     
-    # If exact matches didn't work, look for terms contained within link text
-    for link in links:
-        href = link.get('href')
-        if not href or href.startswith('javascript:') or href == '#':
-            continue
-        
-        # Absolute URLs vs relative URLs
-        if not href.startswith('http'):
-            absolute_href = urljoin(original_url, href)
-        else:
-            absolute_href = href
-        
-        # Skip links that point back to the same page
-        if absolute_href == original_url:
-            continue
-        
-        link_text = link.get_text().lower().strip()
-        
-        # Check for partial matches in link text
-        for keyword in tos_keywords:
-            if keyword in link_text:
-                logger.info(f"Found partial match for ToS keyword '{keyword}' in link text: {absolute_href}")
-                return absolute_href
-    
-    # Look in page footers specifically (common place for ToS links)
+    # Get the footer and legal areas which are more likely to contain ToS links
     footers = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower() or 'legal' in c.lower() or 'bottom' in c.lower()))
+    legal_sections = soup.find_all(['div', 'section', 'nav'], class_=lambda c: c and ('legal' in c.lower() or 'footer' in c.lower()))
     
-    for footer in footers:
-        footer_links = footer.find_all('a', href=True)
+    # Combine potential areas with legal links
+    legal_areas = footers + legal_sections
+    
+    # APPROACH 1: First try to find links in footer/legal areas with specific ToS keywords
+    for area in legal_areas:
+        area_links = area.find_all('a', href=True)
         
-        for link in footer_links:
+        for link in area_links:
             href = link.get('href')
             if not href or href.startswith('javascript:') or href == '#':
                 continue
@@ -416,13 +374,176 @@ def find_tos_link(url, soup):
             
             link_text = link.get_text().lower().strip()
             
-            # Check for ToS keywords in footer links
-            for keyword in tos_keywords:
-                if keyword in link_text or keyword in href.lower():
-                    logger.info(f"Found ToS keyword '{keyword}' in footer link: {absolute_href}")
+            # Check for exact or near-exact matches in footer/legal areas
+            for keyword in tos_keywords + lower_priority_keywords:
+                # Exact match or with punctuation
+                if (keyword == link_text or 
+                    f"{keyword}." == link_text or
+                    f"{keyword}:" == link_text):
+                    logger.info(f"Found exact ToS keyword '{keyword}' in footer/legal area: {absolute_href}")
                     return absolute_href
+            
+            # Check URL patterns in footer/legal links
+            href_lower = href.lower()
+            if ('terms' in href_lower and ('service' in href_lower or 'use' in href_lower or 'condition' in href_lower)) or 'tos' in href_lower:
+                if not is_likely_article_link(href_lower, absolute_href):
+                    logger.info(f"Found ToS keyword pattern in footer/legal href: {absolute_href}")
+                    return absolute_href
+    
+    # APPROACH 2: Check the entire page for specific ToS patterns in URLs
+    for link in links:
+        href = link.get('href')
+        if not href or href.startswith('javascript:') or href == '#':
+            continue
+        
+        # Absolute URLs vs relative URLs
+        if not href.startswith('http'):
+            absolute_href = urljoin(original_url, href)
+        else:
+            absolute_href = href
+        
+        # Skip links that point back to the same page or to likely article URLs
+        if absolute_href == original_url or is_likely_article_link(href.lower(), absolute_href):
+            continue
+        
+        href_lower = href.lower()
+        
+        # Strong URL patterns that highly indicate ToS
+        if (('/terms-of-service' in href_lower) or 
+            ('/terms-of-use' in href_lower) or 
+            ('/terms-and-conditions' in href_lower) or
+            ('/tos' in href_lower and len(href_lower.split('/tos')) == 2) or  # Exactly "/tos"
+            ('terms_of_service' in href_lower) or
+            ('terms_of_use' in href_lower) or
+            ('/legal/terms' in href_lower)):
+            logger.info(f"Found strong ToS pattern in URL: {absolute_href}")
+            return absolute_href
+    
+    # APPROACH 3: Look for exact text matches anywhere in the page
+    for link in links:
+        href = link.get('href')
+        if not href or href.startswith('javascript:') or href == '#':
+            continue
+        
+        # Absolute URLs vs relative URLs
+        if not href.startswith('http'):
+            absolute_href = urljoin(original_url, href)
+        else:
+            absolute_href = href
+        
+        # Skip links that point back to the same page or to likely article URLs
+        if absolute_href == original_url or is_likely_article_link(href.lower(), absolute_href):
+            continue
+        
+        link_text = link.get_text().lower().strip()
+        
+        # Check for exact text matches with higher-priority keywords
+        for keyword in tos_keywords:
+            if keyword == link_text or f"{keyword}." == link_text:
+                # Verify this doesn't appear to be an article link
+                if not is_likely_article_link(href.lower(), absolute_href):
+                    logger.info(f"Found exact match for ToS keyword '{keyword}' in link text: {absolute_href}")
+                    return absolute_href
+    
+    # APPROACH 4: For sites where all else failed, check using broader heuristics
+    # But be more restrictive to avoid false positives
+    
+    # Get the main navigation menus - these often contain ToS links at the bottom
+    navs = soup.find_all(['nav', 'ul'], class_=lambda c: c and ('nav' in str(c).lower() or 'menu' in str(c).lower()))
+    
+    # Look in navigation elements
+    for nav in navs:
+        nav_links = nav.find_all('a', href=True)
+        
+        for link in nav_links:
+            href = link.get('href')
+            if not href or href.startswith('javascript:') or href == '#':
+                continue
+            
+            # Absolute URLs vs relative URLs
+            if not href.startswith('http'):
+                absolute_href = urljoin(original_url, href)
+            else:
+                absolute_href = href
+            
+            # Skip links that point back to the same page
+            if absolute_href == original_url:
+                continue
+            
+            link_text = link.get_text().lower().strip()
+            
+            # Check for partial matches with higher-priority keywords in navigation only
+            for keyword in tos_keywords:
+                if keyword in link_text and not is_likely_article_link(href.lower(), absolute_href):
+                    link_text_words = link_text.split()
+                    # Ensure "terms" isn't just part of another word (like "determines")
+                    if any(word == "terms" or word == "tos" for word in link_text_words):
+                        logger.info(f"Found ToS keyword '{keyword}' in navigation: {absolute_href}")
+                        return absolute_href
     
     # If we've exhausted all options, return None
     return None
+
+def is_likely_article_link(href_lower: str, full_url: str) -> bool:
+    """
+    Determine if a URL is likely to be a news article rather than a ToS page.
+    
+    Args:
+        href_lower: The lowercase href attribute
+        full_url: The full URL for additional context
+    
+    Returns:
+        bool: True if the URL appears to be an article, False otherwise
+    """
+    # News article patterns in URLs
+    article_indicators = [
+        "/article/", 
+        "/news/",
+        "/story/",
+        "/blog/",
+        "/post/",
+        "/2023/",  # Year patterns
+        "/2024/",
+        "/politics/",
+        "/business/",
+        "/technology/",
+        "/science/",
+        "/health/",
+        ".html",
+        "/watch/",
+        "/video/"
+    ]
+    
+    # Common news domains (partial list)
+    news_domains = [
+        "reuters.com",
+        "nytimes.com",
+        "washingtonpost.com",
+        "cnn.com",
+        "bbc.com",
+        "forbes.com"
+    ]
+    
+    # Check if URL contains article indicators
+    for indicator in article_indicators:
+        if indicator in href_lower:
+            return True
+    
+    # Check if URL is from a known news domain
+    parsed_url = urlparse(full_url)
+    domain = parsed_url.netloc.lower()
+    for news_domain in news_domains:
+        if news_domain in domain:
+            # For news sites, be extra careful
+            # Only consider it a ToS link if it clearly has terms in the path
+            if not any(term in parsed_url.path.lower() for term in ['/terms', '/tos', '/legal']):
+                return True
+    
+    # Check for date patterns in URL paths
+    date_pattern = re.compile(r'/\d{4}/\d{1,2}/\d{1,2}/')
+    if date_pattern.search(href_lower):
+        return True
+    
+    return False
 
 # Rest of the file stays the same
