@@ -751,7 +751,7 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
                     
                     for link in links:
                         href = await link.get_attribute('href')
-                        if href and not href.startswith('javascript:') and href != '#':
+                        if href and not href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
                             privacy_link = urljoin(final_url, href)
                             break
                     
@@ -809,40 +809,44 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
         )
 
 
+def get_domain_score(href: str, base_domain: str) -> float:
+    """Calculate domain relevance score with less dependency on known domains."""
+    try:
+        href_domain = urlparse(href).netloc.lower()
+        if not href_domain:
+            return 0.0
+            
+        # Same domain gets highest score
+        if href_domain == base_domain:
+            return 2.0
+            
+        # Subdomain relationship
+        if href_domain.endswith('.' + base_domain) or base_domain.endswith('.' + href_domain):
+            return 1.5
+            
+        # Check if the domains share a common root
+        href_parts = href_domain.split('.')
+        base_parts = base_domain.split('.')
+        
+        if len(href_parts) >= 2 and len(base_parts) >= 2:
+            href_root = '.'.join(href_parts[-2:])
+            base_root = '.'.join(base_parts[-2:])
+            if href_root == base_root:
+                return 1.0
+                
+        # For external domains, check if they look like legitimate policy hosts
+        if any(term in href_domain for term in ['privacy', 'legal', 'policy', 'terms']):
+            return 0.5
+            
+        # Don't heavily penalize external domains
+        return 0.0
+    except Exception:
+        return -1.0
+
 def find_privacy_link(url, soup):
     """Find and return the Privacy Policy link from a webpage."""
-    # Store the original URL for later validation
-    original_url = url
     base_domain = urlparse(url).netloc.lower()
     
-    def get_domain_score(href: str) -> float:
-        """Calculate domain relevance score."""
-        try:
-            href_domain = urlparse(href).netloc.lower()
-            if href_domain == base_domain:
-                return 2.0  # Highest score for exact domain match
-            elif href_domain.endswith('.' + base_domain) or base_domain.endswith('.' + href_domain):
-                return 1.5  # Good score for subdomain relationship
-            elif any(known_domain in href_domain for known_domain in [
-                'voxmedia.com',  # The Verge and other Vox Media sites
-                'wordpress.com',  # WordPress hosted sites
-                'squarespace.com',  # Squarespace hosted sites
-                'wixsite.com',  # Wix hosted sites
-                'shopify.com',  # Shopify stores
-                'zendesk.com',  # Common help center host
-                'helpscoutdocs.com',  # Help Scout hosted docs
-                'google.com',  # Google services
-                'facebook.com',  # Facebook services
-                'apple.com',  # Apple services
-                'amazon.com',  # Amazon services
-                'github.com',  # GitHub services
-                'microsoft.com'  # Microsoft services
-            ]):
-                return 1.0  # Known trusted domains
-            return 0.0  # Unknown external domain
-        except Exception:
-            return -1.0  # Invalid URL
-
     # Exact match patterns (highest priority)
     exact_patterns = [
         r'\bprivacy[-\s]policy\b',
@@ -887,9 +891,7 @@ def find_privacy_link(url, soup):
         ('/enterprise/', -5.0),
         ('/platform/', -5.0),
         ('/technology/', -5.0),
-        ('/consulting/', -5.0),
-        ('/about/', -3.0),
-        ('/contact/', -3.0)
+        ('/consulting/', -5.0)
     ]
     
     # Process all links
@@ -911,47 +913,51 @@ def find_privacy_link(url, soup):
             # Skip empty or very short link text
             if len(link_text.strip()) < 3:
                 continue
-                
+            
             # Calculate base score
             score = 0.0
             
-            # Domain score
-            domain_score = get_domain_score(absolute_url)
+            # Domain score with less weight
+            domain_score = get_domain_score(absolute_url, base_domain)
             if domain_score < 0:  # Skip invalid URLs
                 continue
             
             # Check for exact matches in text (highest priority)
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                score += 5.0
+                score += 6.0  # Increased weight for exact matches
             
             # Check URL patterns
             href_lower = absolute_url.lower()
             if any(pattern in href_lower for pattern in strong_url_patterns):
-                score += 3.0
+                score += 4.0  # Increased weight for strong URL patterns
             elif '/privacy' in href_lower or '/data' in href_lower or '/gdpr' in href_lower:
-                score += 2.0
+                score += 3.0
                 
             # Check link text for partial matches
             if 'privacy' in link_text.split() or 'gdpr' in link_text.split():
-                score += 2.0
+                score += 3.0
             elif 'data' in link_text or 'cookie' in link_text:
-                score += 1.0
+                score += 2.0
+                
+            # Check for privacy-specific terms in URL path
+            path = urlparse(absolute_url).path.lower()
+            if any(term in path for term in ['privacy', 'data-protection', 'gdpr']):
+                score += 2.0
                 
             # Apply penalties
             for pattern, penalty in penalties:
                 if pattern in href_lower:
                     score += penalty
             
-            # Additional penalties for service/product pages
-            service_indicators = ['service', 'product', 'solution', 'platform', 'technology', 'consulting', 'ai', 'cloud', 'digital']
-            if any(indicator in link_text for indicator in service_indicators):
-                score -= 5.0
+            # Calculate final score with reduced domain weight
+            final_score = (score * 2.0) + (domain_score * 1.0)  # Reduced domain weight
             
-            # Calculate final score with domain weight
-            final_score = (score * 2.0) + (domain_score * 1.5)
+            # Adjust threshold based on strong indicators
+            threshold = 5.0
+            if any(re.search(pattern, link_text) for pattern in exact_patterns):
+                threshold = 4.0  # Lower threshold for exact matches
             
-            # Higher threshold for acceptance
-            if final_score > 5.0:  # Increased from 3.0 to 5.0
+            if final_score > threshold:
                 candidates.append((absolute_url, final_score))
                 
         except Exception:
@@ -960,11 +966,7 @@ def find_privacy_link(url, soup):
     # Return the highest scoring candidate
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
-        highest_score = candidates[0][1]
-        
-        # Only return if the score is significantly high
-        if highest_score > 7.0:  # Added minimum threshold
-            return candidates[0][0]
+        return candidates[0][0]
     
     return None
 

@@ -41,156 +41,89 @@ class TosResponse(BaseModel):
     method_used: str = "standard"  # Indicates which method was used to find the ToS
 
 
+def get_domain_score(href: str, base_domain: str) -> float:
+    """Calculate domain relevance score with less dependency on known domains."""
+    try:
+        href_domain = urlparse(href).netloc.lower()
+        if not href_domain:
+            return 0.0
+            
+        # Same domain gets highest score
+        if href_domain == base_domain:
+            return 2.0
+            
+        # Subdomain relationship
+        if href_domain.endswith('.' + base_domain) or base_domain.endswith('.' + href_domain):
+            return 1.5
+            
+        # Check if the domains share a common root
+        href_parts = href_domain.split('.')
+        base_parts = base_domain.split('.')
+        
+        if len(href_parts) >= 2 and len(base_parts) >= 2:
+            href_root = '.'.join(href_parts[-2:])
+            base_root = '.'.join(base_parts[-2:])
+            if href_root == base_root:
+                return 1.0
+                
+        # For external domains, check if they look like legitimate policy hosts
+        if any(term in href_domain for term in ['legal', 'terms', 'tos', 'policy']):
+            return 0.5
+            
+        # Don't heavily penalize external domains
+        return 0.0
+    except Exception:
+        return -1.0
+
+
 def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
-    """
-    Find Terms of Service link in the soup object using dynamic pattern matching.
-    Uses a hierarchical approach to find the most relevant ToS link.
-    """
-    # Get the base domain for comparison
+    """Find Terms of Service link in the soup object using dynamic pattern matching."""
     base_domain = urlparse(url).netloc.lower()
     
-    def get_domain_score(href: str) -> float:
-        """Calculate domain relevance score."""
-        try:
-            href_domain = urlparse(href).netloc.lower()
-            if href_domain == base_domain:
-                return 2.0  # Highest score for exact domain match
-            elif href_domain.endswith('.' + base_domain) or base_domain.endswith('.' + href_domain):
-                return 1.5  # Good score for subdomain relationship
-            elif any(known_domain in href_domain for known_domain in [
-                'voxmedia.com',  # The Verge and other Vox Media sites
-                'wordpress.com',  # WordPress hosted sites
-                'squarespace.com',  # Squarespace hosted sites
-                'wixsite.com',  # Wix hosted sites
-                'shopify.com',  # Shopify stores
-                'zendesk.com',  # Common help center host
-                'helpscoutdocs.com',  # Help Scout hosted docs
-                'google.com',  # Google services
-                'facebook.com',  # Facebook services
-                'apple.com',  # Apple services
-                'amazon.com',  # Amazon services
-                'github.com',  # GitHub services
-                'microsoft.com'  # Microsoft services
-            ]):
-                return 1.0  # Known trusted domains
-            return 0.0  # Unknown external domain
-        except Exception:
-            return -1.0  # Invalid URL
-
-    def get_link_context_score(link) -> float:
-        """Calculate a score based on the link's context."""
-        score = 0.0
-        
-        # Check parent elements
-        parent = link.parent
-        while parent and parent.name:
-            # Check element classes and IDs
-            classes = ' '.join(parent.get('class', [])).lower()
-            element_id = parent.get('id', '').lower()
-            
-            # Score based on containing elements
-            if parent.name in ['footer', 'nav']:
-                score += 1.0
-            if any(term in classes or term in element_id for term in ['footer', 'legal', 'bottom', 'terms']):
-                score += 1.0
-            if any(term in classes or term in element_id for term in ['menu', 'nav', 'links']):
-                score += 0.5
-                
-            # Look for nearby privacy/legal links
-            siblings = parent.find_all(['a'], recursive=False)
-            for sib in siblings:
-                sib_text = sib.get_text().lower()
-                if 'privacy' in sib_text or 'legal' in sib_text:
-                    score += 0.5
-                    break
-            
-            parent = parent.parent
-        
-        return score
-
-    def get_tos_relevance_score(href: str, link_text: str) -> float:
-        """Calculate how likely a link is to be a ToS link based on its text and URL."""
-        score = 0.0
-        href_lower = href.lower()
-        link_text_lower = link_text.lower()
-        
-        # Exact match patterns (highest priority)
-        exact_patterns = [
-            r'\bterms[-\s]of[-\s]service\b',
-            r'\bterms[-\s]of[-\s]use\b',
-            r'\bterms[-\s]and[-\s]conditions\b',
-            r'\buser[-\s]agreement\b',
-            r'\blegal[-\s]terms\b',
-            r'\btos\b'
-        ]
-        
-        # Strong URL patterns
-        strong_url_patterns = [
-            '/terms-of-service/',
-            '/terms-of-use/',
-            '/terms-and-conditions/',
-            '/legal/terms/',
-            '/tos/',
-            '/terms/'
-        ]
-        
-        # Check for exact matches in text (highest priority)
-        if any(re.search(pattern, link_text_lower) for pattern in exact_patterns):
-            score += 5.0
-        
-        # Check URL patterns
-        if any(pattern in href_lower for pattern in strong_url_patterns):
-            score += 3.0
-        elif '/legal' in href_lower or '/terms' in href_lower or '/tos' in href_lower:
-            score += 2.0
-            
-        # Check link text for partial matches
-        if 'terms' in link_text_lower.split() or 'tos' in link_text_lower.split():
-            score += 2.0
-        elif 'legal' in link_text_lower:
-            score += 1.0
-            
-        # Strong penalties for likely non-ToS content
-        penalties = [
-            ('/blog/', -5.0),
-            ('/news/', -5.0),
-            ('/article/', -5.0),
-            ('/press/', -5.0),
-            ('/2023/', -5.0),
-            ('/2024/', -5.0),
-            ('/posts/', -5.0),
-            ('/category/', -5.0),
-            ('/tag/', -5.0),
-            ('/search/', -5.0),
-            ('/product/', -5.0),
-            ('/services/', -5.0),
-            ('/solutions/', -5.0),
-            ('/ai/', -5.0),
-            ('/cloud/', -5.0),
-            ('/digital/', -5.0),
-            ('/enterprise/', -5.0),
-            ('/platform/', -5.0),
-            ('/technology/', -5.0),
-            ('/consulting/', -5.0),
-            ('/about/', -3.0),
-            ('/contact/', -3.0)
-        ]
-        
-        for pattern, penalty in penalties:
-            if pattern in href_lower:
-                score += penalty
-        
-        # Additional penalties for service/product pages
-        service_indicators = ['service', 'product', 'solution', 'platform', 'technology', 'consulting', 'ai', 'cloud', 'digital']
-        if any(indicator in link_text_lower for indicator in service_indicators):
-            score -= 5.0
-            
-        # Require minimum length for link text to avoid false positives
-        if len(link_text_lower.strip()) < 3:
-            score -= 3.0
-            
-        return score
-
+    # Exact match patterns (highest priority)
+    exact_patterns = [
+        r'\bterms[-\s]of[-\s]service\b',
+        r'\bterms[-\s]of[-\s]use\b',
+        r'\bterms[-\s]and[-\s]conditions\b',
+        r'\buser[-\s]agreement\b',
+        r'\blegal[-\s]terms\b',
+        r'\btos\b'
+    ]
+    
+    # Strong URL patterns
+    strong_url_patterns = [
+        '/terms-of-service/',
+        '/terms-of-use/',
+        '/terms-and-conditions/',
+        '/legal/terms/',
+        '/tos/',
+        '/terms/'
+    ]
+    
+    # Strong penalties for likely non-ToS content
+    penalties = [
+        ('/blog/', -5.0),
+        ('/news/', -5.0),
+        ('/article/', -5.0),
+        ('/press/', -5.0),
+        ('/2023/', -5.0),
+        ('/2024/', -5.0),
+        ('/posts/', -5.0),
+        ('/category/', -5.0),
+        ('/tag/', -5.0),
+        ('/search/', -5.0),
+        ('/product/', -5.0),
+        ('/services/', -5.0),
+        ('/solutions/', -5.0),
+        ('/ai/', -5.0),
+        ('/cloud/', -5.0),
+        ('/digital/', -5.0),
+        ('/enterprise/', -5.0),
+        ('/platform/', -5.0),
+        ('/technology/', -5.0),
+        ('/consulting/', -5.0)
+    ]
+    
     # Process all links
     candidates = []
     
@@ -205,25 +138,56 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 link.get_text().strip(),
                 link.get('title', '').strip(),
                 link.get('aria-label', '').strip()
-            ])
+            ]).lower()
             
             # Skip empty or very short link text
             if len(link_text.strip()) < 3:
                 continue
-                
-            # Calculate scores
-            domain_score = get_domain_score(absolute_url)
+            
+            # Calculate base score
+            score = 0.0
+            
+            # Domain score with less weight
+            domain_score = get_domain_score(absolute_url, base_domain)
             if domain_score < 0:  # Skip invalid URLs
                 continue
+            
+            # Check for exact matches in text (highest priority)
+            if any(re.search(pattern, link_text) for pattern in exact_patterns):
+                score += 6.0  # Increased weight for exact matches
+            
+            # Check URL patterns
+            href_lower = absolute_url.lower()
+            if any(pattern in href_lower for pattern in strong_url_patterns):
+                score += 4.0  # Increased weight for strong URL patterns
+            elif '/terms' in href_lower or '/tos' in href_lower or '/legal' in href_lower:
+                score += 3.0
                 
-            tos_score = get_tos_relevance_score(absolute_url, link_text)
-            context_score = get_link_context_score(link)
+            # Check link text for partial matches
+            if 'terms' in link_text.split() or 'tos' in link_text.split():
+                score += 3.0
+            elif 'legal' in link_text or 'conditions' in link_text:
+                score += 2.0
+                
+            # Check for terms-specific terms in URL path
+            path = urlparse(absolute_url).path.lower()
+            if any(term in path for term in ['terms', 'tos', 'legal-terms']):
+                score += 2.0
+                
+            # Apply penalties
+            for pattern, penalty in penalties:
+                if pattern in href_lower:
+                    score += penalty
             
-            # Calculate final score with adjusted weights
-            final_score = (tos_score * 2.0) + (context_score * 1.0) + (domain_score * 1.5)
+            # Calculate final score with reduced domain weight
+            final_score = (score * 2.0) + (domain_score * 1.0)  # Reduced domain weight
             
-            # Higher threshold for acceptance
-            if final_score > 5.0:  # Increased from 3.0 to 5.0
+            # Adjust threshold based on strong indicators
+            threshold = 5.0
+            if any(re.search(pattern, link_text) for pattern in exact_patterns):
+                threshold = 4.0  # Lower threshold for exact matches
+            
+            if final_score > threshold:
                 candidates.append((absolute_url, final_score))
                 
         except Exception:
@@ -232,11 +196,7 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     # Return the highest scoring candidate
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
-        highest_score = candidates[0][1]
-        
-        # Only return if the score is significantly high
-        if highest_score > 7.0:  # Added minimum threshold
-            return candidates[0][0]
+        return candidates[0][0]
     
     return None
 
@@ -358,64 +318,20 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                 soup = BeautifulSoup(content, 'html.parser')
                 tos_link = find_tos_link(final_url, soup)
                 
-                if 'theverge.com' in final_url and not tos_link:
-                    logger.info("Extra processing for The Verge with Playwright")
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await page.wait_for_timeout(2000)
-                    
-                    updated_content = await page.content()
-                    updated_soup = BeautifulSoup(updated_content, 'html.parser')
-                    
-                    vox_links = await page.query_selector_all('a:text-matches("Vox Media", "i")')
-                    for link in vox_links:
+                if not tos_link:
+                    # Try to find and click buttons that might reveal ToS content
+                    consent_buttons = await page.query_selector_all('button:text-matches("(accept|agree|got it|cookie|consent)", "i")')
+                    for button in consent_buttons:
                         try:
-                            await link.click()
-                            await page.wait_for_timeout(2000)
-                            post_click_content = await page.content()
-                            post_click_soup = BeautifulSoup(post_click_content, 'html.parser')
-                            tos_link = find_tos_link(final_url, post_click_soup)
+                            await button.click()
+                            await page.wait_for_timeout(1000)
+                            content_after_click = await page.content()
+                            soup_after_click = BeautifulSoup(content_after_click, 'html.parser')
+                            tos_link = find_tos_link(final_url, soup_after_click)
                             if tos_link:
                                 break
                         except:
                             continue
-                    
-                    if not tos_link:
-                        footers = updated_soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower()))
-                        for footer in footers:
-                            for link in footer.find_all('a', href=True):
-                                href = link.get('href')
-                                if href and "voxmedia.com" in href and any(term in href.lower() for term in ['/legal', '/terms', '/tos']):
-                                    tos_link = href
-                                    break
-                            if tos_link:
-                                break
-                
-                if not tos_link:
-                    tos_keywords = ["terms", "terms of service", "terms of use", "tos", "terms and conditions", "legal terms"]
-                    for keyword in tos_keywords:
-                        links = await page.query_selector_all(f'a:text-matches("{keyword}", "i")')
-                        for link in links:
-                            href = await link.get_attribute('href')
-                            if href and not href.startswith('javascript:') and href != '#':
-                                if not is_likely_article_link(href.lower(), urljoin(final_url, href)):
-                                    tos_link = urljoin(final_url, href)
-                                    break
-                        if tos_link:
-                            break
-                    
-                    if not tos_link:
-                        consent_buttons = await page.query_selector_all('button:text-matches("(accept|agree|got it|cookie|consent)", "i")')
-                        for button in consent_buttons:
-                            try:
-                                await button.click()
-                                await page.wait_for_timeout(1000)
-                                content_after_click = await page.content()
-                                soup_after_click = BeautifulSoup(content_after_click, 'html.parser')
-                                tos_link = find_tos_link(final_url, soup_after_click)
-                                if tos_link:
-                                    break
-                            except:
-                                continue
                 
                 await browser.close()
                 
