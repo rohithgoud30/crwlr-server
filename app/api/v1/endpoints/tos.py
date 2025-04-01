@@ -76,6 +76,40 @@ def get_domain_score(href: str, base_domain: str) -> float:
         return -1.0
 
 
+def get_footer_score(link) -> float:
+    """Calculate a score based on whether the link is in a footer or similar bottom section."""
+    score = 0.0
+    
+    # Check if the link itself is in a footer-like element
+    parent = link.parent
+    depth = 0
+    max_depth = 5  # Don't go too far up the tree
+    
+    while parent and parent.name and depth < max_depth:
+        # Check element name
+        if parent.name in ['footer', 'tfoot']:
+            score += 3.0
+            break
+            
+        # Check classes and IDs
+        classes = ' '.join(parent.get('class', [])).lower()
+        element_id = parent.get('id', '').lower()
+        
+        # Strong footer indicators
+        if any(term in classes or term in element_id for term in ['footer', 'bottom', 'btm']):
+            score += 3.0
+            break
+            
+        # Secondary footer indicators
+        if any(term in classes or term in element_id for term in ['legal', 'copyright', 'links']):
+            score += 1.5
+        
+        parent = parent.parent
+        depth += 1
+    
+    return score
+
+
 def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     """Find Terms of Service link in the soup object using dynamic pattern matching."""
     base_domain = urlparse(url).netloc.lower()
@@ -147,12 +181,15 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             # Calculate base score
             score = 0.0
             
+            # Get footer score first (highest priority)
+            footer_score = get_footer_score(link)
+            
             # Domain score with less weight
             domain_score = get_domain_score(absolute_url, base_domain)
             if domain_score < 0:  # Skip invalid URLs
                 continue
             
-            # Check for exact matches in text (highest priority)
+            # Check for exact matches in text (high priority)
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 score += 6.0  # Increased weight for exact matches
             
@@ -179,11 +216,13 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 if pattern in href_lower:
                     score += penalty
             
-            # Calculate final score with reduced domain weight
-            final_score = (score * 2.0) + (domain_score * 1.0)  # Reduced domain weight
+            # Calculate final score with footer priority
+            final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
             
             # Adjust threshold based on strong indicators
             threshold = 5.0
+            if footer_score > 0:
+                threshold = 4.0  # Lower threshold for footer links
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 threshold = 4.0  # Lower threshold for exact matches
             
