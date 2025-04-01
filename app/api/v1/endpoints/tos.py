@@ -20,7 +20,8 @@ from .utils import (
     get_root_domain,
     get_policy_patterns,
     get_policy_score,
-    find_policy_by_class_id
+    find_policy_by_class_id,
+    is_likely_false_positive
 )
 
 # Filter out the XML parsed as HTML warning
@@ -69,74 +70,76 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         href = link.get('href', '').strip()
         if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
             continue
-            
+        
         try:
             absolute_url = urljoin(url, href)
+            
+            # Skip likely false positives 
+            if is_likely_false_positive(absolute_url, 'tos'):
+                continue
+                
             link_text = ' '.join([
-                link.get_text().strip(),
-                link.get('title', '').strip(),
+                link.get_text().strip(), 
+                link.get('title', '').strip(), 
                 link.get('aria-label', '').strip()
             ]).lower()
             
-            # Skip empty or very short link text
             if len(link_text.strip()) < 3:
                 continue
             
-            # Calculate base score
-            score = 0.0
-            
-            # Get footer score first (highest priority)
-            footer_score = get_footer_score(link)
-            
-            # Domain score with less weight
-            domain_score = get_domain_score(absolute_url, base_domain)
-            if domain_score < 0:  # Skip invalid URLs
+            # Skip likely article links
+            if is_likely_article_link(absolute_url, link_text):
                 continue
-                
-            # If we're on a legal/terms page, heavily penalize external domains
+            
+            score = 0.0
+            footer_score = get_footer_score(link)
+            domain_score = get_domain_score(absolute_url, base_domain)
+            
+            if domain_score < 0:
+                continue
+            
             href_domain = urlparse(absolute_url).netloc.lower()
             if is_legal_page and href_domain != base_domain:
-                # If we're already on a legal/terms page, we should strongly prefer same-domain links
                 continue
             
-            # Check for exact matches in text (high priority)
+            # Check for exact pattern matches in link text
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                score += 6.0  # Increased weight for exact matches
-            
-            # Check URL patterns
+                score += 6.0
+                
+            # Check for strong URL patterns
             href_lower = absolute_url.lower()
             if any(pattern in href_lower for pattern in strong_url_patterns):
-                score += 4.0  # Increased weight for strong URL patterns
+                score += 4.0
                 
-            # Get policy-specific score
+            # Add the general policy score
             score += get_policy_score(link_text, href_lower, 'tos')
-                
-            # Apply penalties from shared utilities
+            
+            # Apply common penalties
             for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
                     score += penalty
             
-            # Calculate final score with footer priority
+            # Calculate final score
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
             
-            # Adjust threshold based on strong indicators
+            # Determine threshold based on context
             threshold = 5.0
             if footer_score > 0:
-                threshold = 4.0  # Lower threshold for footer links
+                threshold = 4.0
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                threshold = 4.0  # Lower threshold for exact matches
+                threshold = 4.0
                 
-            # If we're on a legal/terms page, increase threshold for external domains
             if is_legal_page and href_domain != base_domain:
                 threshold += 3.0
-            
+                
+            # Add to candidates if score exceeds threshold
             if final_score > threshold:
                 candidates.append((absolute_url, final_score))
-                
+        
         except Exception:
             continue
     
-    # Return the highest scoring candidate
+    # Return the highest scoring candidate, if any
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[0][0]
@@ -150,30 +153,52 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
     """
     for url, variation_type in variations_to_try:
         try:
-            # Make the request with a longer timeout
-            response = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+            logger.info(f"Trying URL variation: {url} ({variation_type})")
+            
+            # First do a HEAD request to check for redirects
+            head_response = session.head(url, headers=headers, timeout=10, allow_redirects=True)
+            head_response.raise_for_status()
+            
+            # Get the final URL after redirects
+            final_url = head_response.url
+            if final_url != url:
+                logger.info(f"Followed redirect: {url} -> {final_url}")
+            
+            # Now get the content of the final URL
+            logger.info(f"Fetching content from {final_url}")
+            response = session.get(final_url, headers=headers, timeout=15)
             response.raise_for_status()
             
-            # Get the final URL after any redirects
-            final_url = response.url
-            
-            # Parse the HTML
+            # Parse the HTML content
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Try to find ToS link
-            tos_url = find_tos_link(str(final_url), soup)
+            # Find the ToS link from the page
+            logger.info(f"Searching for ToS link in {final_url}")
+            tos_link = find_tos_link(final_url, soup)
             
-            if tos_url:
+            if tos_link:
+                # Additional check for false positives
+                if is_likely_false_positive(tos_link, 'tos'):
+                    logger.warning(f"Found link {tos_link} appears to be a false positive, skipping")
+                    continue
+                    
+                logger.info(f"Found ToS link: {tos_link} in {final_url} ({variation_type})")
                 return TosResponse(
-                    url=url,
-                    tos_url=tos_url,
+                    url=final_url,  # Return the actual URL after redirects
+                    tos_url=tos_link,
                     success=True,
-                    message=f"Terms of Service link found on final destination page: {final_url} (Found at {variation_type})",
+                    message=f"Terms of Service link found on final destination page: {final_url}" + 
+                            (f" (Found at {variation_type})" if variation_type != "original exact url" else ""),
                     method_used="standard"
                 )
-                
+            else:
+                logger.info(f"No ToS link found in {final_url} ({variation_type})")
+                    
+        except requests.RequestException as e:
+            logger.error(f"RequestException for {url} ({variation_type}): {str(e)}")
+            continue
         except Exception as e:
-            logger.error(f"Error processing {url}: {str(e)}")
+            logger.error(f"Exception for {url} ({variation_type}): {str(e)}")
             continue
     
     return TosResponse(
@@ -279,6 +304,16 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                 await browser.close()
                 
                 if tos_link:
+                    # Additional check for false positives
+                    if is_likely_false_positive(tos_link, 'tos'):
+                        logger.warning(f"Found link {tos_link} appears to be a false positive, skipping")
+                        return TosResponse(
+                            url=final_url,
+                            success=False,
+                            message=f"Found ToS link was a false positive: {tos_link}",
+                            method_used="playwright_false_positive"
+                        )
+                        
                     return TosResponse(
                         url=final_url,
                         tos_url=tos_link,

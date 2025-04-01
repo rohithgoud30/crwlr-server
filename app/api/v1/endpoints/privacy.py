@@ -9,7 +9,7 @@ from typing import Optional, Any, List, Tuple
 import asyncio
 from playwright.async_api import async_playwright
 import logging
-from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id
+from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id, is_likely_false_positive
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -592,6 +592,11 @@ async def standard_privacy_finder(variations_to_try, headers, session) -> Privac
             privacy_link = find_privacy_link(final_url, soup)
             
             if privacy_link:
+                # Additional check for false positives
+                if is_likely_false_positive(privacy_link, 'privacy'):
+                    logger.warning(f"Found link {privacy_link} appears to be a false positive, skipping")
+                    continue
+                    
                 logger.info(f"Found privacy link: {privacy_link} in {final_url} ({variation_type})")
                 return PrivacyResponse(
                     url=final_url,  # Return the actual URL after redirects
@@ -746,6 +751,16 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
             await browser.close()
             
             if privacy_link:
+                # Additional check for false positives
+                if is_likely_false_positive(privacy_link, 'privacy'):
+                    logger.warning(f"Found link {privacy_link} appears to be a false positive, skipping")
+                    return PrivacyResponse(
+                        url=final_url,
+                        success=False,
+                        message=f"Found privacy link was a false positive: {privacy_link}",
+                        method_used="playwright_false_positive"
+                    )
+                    
                 return PrivacyResponse(
                     url=final_url,
                     pp_url=privacy_link,
@@ -792,6 +807,11 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
         try:
             absolute_url = urljoin(url, href)
+            
+            # Skip likely false positives
+            if is_likely_false_positive(absolute_url, 'privacy'):
+                continue
+                
             link_text = ' '.join([
                 link.get_text().strip(),
                 link.get('title', '').strip(),

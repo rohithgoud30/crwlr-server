@@ -382,6 +382,44 @@ def get_policy_score(link_text: str, href_lower: str, policy_type: str) -> float
     
     return score
 
+def is_likely_false_positive(url: str, policy_type: str) -> bool:
+    """
+    Checks if a URL is likely to be a false positive match for a policy page.
+    
+    Args:
+        url: The URL to check
+        policy_type: Either 'privacy' or 'tos'
+        
+    Returns:
+        True if the URL is likely a false positive, False otherwise
+    """
+    parsed_url = urlparse(url)
+    path = parsed_url.path.lower()
+    
+    # Common false positive patterns
+    false_positive_patterns = [
+        '/comments', 
+        '/questions',
+        '/comments-and-questions',
+        '/contact',
+        '/contact-us',
+        '/feedback',
+        '/about',
+        '/about-us',
+        '/faq',
+        '/help',
+        '/support'
+    ]
+    
+    # Check if the path matches any false positive pattern
+    for pattern in false_positive_patterns:
+        if pattern in path:
+            # For exact matches or patterns at the end of the path
+            if path.endswith(pattern) or path.endswith(f"{pattern}/"):
+                return True
+    
+    return False
+
 def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
     """
     Find policy links by analyzing HTML class and ID attributes.
@@ -442,6 +480,11 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
                 continue
                 
+            # Skip likely false positives
+            absolute_url = urljoin(base_url, href) if base_url else href
+            if is_likely_false_positive(absolute_url, policy_type):
+                continue
+                
             # Check link text for keywords
             link_text = ' '.join([
                 link.get_text().strip(),
@@ -460,8 +503,9 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                any(keyword in link_text for keyword in keywords) or \
                any(keyword in href.lower() for keyword in keywords):
                 try:
-                    # Make the URL absolute
-                    absolute_url = urljoin(base_url, href) if base_url else href
+                    # Skip likely false positives
+                    if is_likely_false_positive(absolute_url, policy_type):
+                        continue
                     return absolute_url
                 except Exception:
                     continue
@@ -488,6 +532,11 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                             if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
                                 continue
                                 
+                            # Skip likely false positives
+                            absolute_url = urljoin(base_url, href) if base_url else href
+                            if is_likely_false_positive(absolute_url, policy_type):
+                                continue
+                                
                             link_text = ' '.join([
                                 link.get_text().strip(),
                                 link.get('title', '').strip(),
@@ -502,7 +551,9 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                             if (policy_type == 'privacy' and any(pattern in url_path for pattern in privacy_path_patterns)) or \
                                any(keyword in link_text for keyword in keywords):
                                 try:
-                                    absolute_url = urljoin(base_url, href) if base_url else href
+                                    # Skip likely false positives
+                                    if is_likely_false_positive(absolute_url, policy_type):
+                                        continue
                                     return absolute_url
                                 except Exception:
                                     continue
@@ -514,11 +565,15 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
                 continue
             
+            # Skip likely false positives
+            absolute_url = urljoin(base_url, href) if base_url else href
+            if is_likely_false_positive(absolute_url, policy_type):
+                continue
+            
             url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
             
             if any(pattern in url_path for pattern in ['/privacy', '/privacy-policy', '/policy']):
                 try:
-                    absolute_url = urljoin(base_url, href) if base_url else href
                     return absolute_url
                 except Exception:
                     continue
@@ -526,7 +581,6 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             link_text = link.get_text().strip().lower()
             if link_text in ['privacy', 'privacy policy', 'privacy-policy', 'policy']:
                 try:
-                    absolute_url = urljoin(base_url, href) if base_url else href
                     return absolute_url
                 except Exception:
                     continue
