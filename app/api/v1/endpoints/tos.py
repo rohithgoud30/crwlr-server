@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Response, HTTPException
 from pydantic import BaseModel, field_validator
 from urllib.parse import urlparse, urljoin
 import requests
@@ -10,6 +10,7 @@ import asyncio
 from playwright.async_api import async_playwright
 import logging
 from .utils import normalize_url, prepare_url_variations
+from playwright.sync_api import sync_playwright
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -35,7 +36,7 @@ class TosRequest(BaseModel):
 
 class TosResponse(BaseModel):
     url: str
-    tos_url: Optional[str] = None
+    tos_url: str | None = None
     success: bool
     message: str
     method_used: str = "standard"  # Indicates which method was used to find the ToS
@@ -335,246 +336,246 @@ async def standard_tos_finder(variations_to_try, headers, session) -> TosRespons
             method_used="standard_failed"
         )
 
-def find_tos_link(url, soup):
-    """Find and return the Terms of Service link from a webpage."""
-    # Store the original URL for later validation
-    original_url = url
+def find_tos_link(url: str, soup: BeautifulSoup) -> str | None:
+    """Find Terms of Service link in the page."""
+    logger.info(f"Searching for ToS link in {url}")
     
-    # Check if this is a GitHub repository
-    parsed_url = urlparse(url)
-    is_github_repo = parsed_url.netloc == 'github.com'
-    domain = parsed_url.netloc.lower()
-    path = parsed_url.path.strip('/')
-    path_parts = path.split('/')
+    # Get the base domain for comparison
+    base_domain = urlparse(url).netloc.lower().replace('www.', '')
+    logger.info(f"Base domain: {base_domain}")
     
-    # Special case handling for GitHub repositories
-    if is_github_repo:
-        if len(path_parts) >= 2:
-            logger.info(f"GitHub repository detected: {path_parts[0]}/{path_parts[1]}")
-            # For GitHub, the Terms of Service is a global link
-            return "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service"
-    
-    # Get all links from the page
-    links = soup.find_all('a', href=True)
-    
-    # Common terms used in Terms of Service links - ordered by specificity
-    # We want the most specific ones to match first
-    tos_keywords = [
-        "terms of service",  # Most specific
-        "terms and conditions", 
-        "terms of use",
-        "legal terms",
-        "user agreement",
-        "tos"
+    # Common terms that might indicate a Terms of Service link
+    tos_terms = [
+        'terms', 'terms of service', 'terms of use', 'terms & conditions',
+        'terms and conditions', 'legal', 'tos', 'conditions of use',
+        'user agreement', 'service agreement'
     ]
     
-    # Lower priority keywords that should only match as exact phrases
-    # or in specific contexts like footers
-    lower_priority_keywords = [
-        "terms",  # This is too generic for content matching
-        "conditions",
-        "legal"
-    ]
-    
-    # Get the footer and legal areas which are more likely to contain ToS links
-    footers = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower() or 'legal' in c.lower() or 'bottom' in c.lower()))
-    legal_sections = soup.find_all(['div', 'section', 'nav'], class_=lambda c: c and ('legal' in c.lower() or 'footer' in c.lower()))
-    
-    # Combine potential areas with legal links
-    legal_areas = footers + legal_sections
-    
-    # APPROACH 1: First try to find links in footer/legal areas with specific ToS keywords
-    for area in legal_areas:
-        area_links = area.find_all('a', href=True)
+    def is_valid_tos_url(href: str) -> bool:
+        """Check if the URL is a valid ToS link."""
+        if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+            return False
+            
+        # Make the URL absolute if it's relative
+        absolute_url = urljoin(url, href)
+        found_domain = urlparse(absolute_url).netloc.lower().replace('www.', '')
         
-        for link in area_links:
-            href = link.get('href')
-            if not href or href.startswith('javascript:') or href == '#':
-                continue
-            
-            # Absolute URLs vs relative URLs
-            if not href.startswith('http'):
-                absolute_href = urljoin(original_url, href)
-            else:
-                absolute_href = href
-            
-            # Skip links that point back to the same page
-            if absolute_href == original_url:
-                continue
-            
-            link_text = link.get_text().lower().strip()
-            
-            # Check for exact or near-exact matches in footer/legal areas
-            for keyword in tos_keywords + lower_priority_keywords:
-                # Exact match or with punctuation
-                if (keyword == link_text or 
-                    f"{keyword}." == link_text or
-                    f"{keyword}:" == link_text):
-                    logger.info(f"Found exact ToS keyword '{keyword}' in footer/legal area: {absolute_href}")
-                    return absolute_href
-            
-            # Check URL patterns in footer/legal links
-            href_lower = href.lower()
-            if ('terms' in href_lower and ('service' in href_lower or 'use' in href_lower or 'condition' in href_lower)) or 'tos' in href_lower:
-                if not is_likely_article_link(href_lower, absolute_href):
-                    logger.info(f"Found ToS keyword pattern in footer/legal href: {absolute_href}")
-                    return absolute_href
+        # Only accept URLs from the same domain
+        return found_domain == base_domain and not is_likely_article_link(href)
     
-    # APPROACH 2: Check the entire page for specific ToS patterns in URLs
-    for link in links:
-        href = link.get('href')
-        if not href or href.startswith('javascript:') or href == '#':
-            continue
-        
-        # Absolute URLs vs relative URLs
-        if not href.startswith('http'):
-            absolute_href = urljoin(original_url, href)
-        else:
-            absolute_href = href
-        
-        # Skip links that point back to the same page or to likely article URLs
-        if absolute_href == original_url or is_likely_article_link(href.lower(), absolute_href):
-            continue
-        
+    def check_link(link) -> str | None:
+        """Check if a link element is a valid ToS link."""
+        href = link.get('href', '').strip()
+        if not is_valid_tos_url(href):
+            return None
+            
+        text = ' '.join(link.stripped_strings).lower()
         href_lower = href.lower()
         
-        # Strong URL patterns that highly indicate ToS
-        if (('/terms-of-service' in href_lower) or 
-            ('/terms-of-use' in href_lower) or 
-            ('/terms-and-conditions' in href_lower) or
-            ('/tos' in href_lower and len(href_lower.split('/tos')) == 2) or  # Exactly "/tos"
-            ('terms_of_service' in href_lower) or
-            ('terms_of_use' in href_lower) or
-            ('/legal/terms' in href_lower)):
-            logger.info(f"Found strong ToS pattern in URL: {absolute_href}")
-            return absolute_href
+        # Check if the link text or href contains terms-related keywords
+        if any(term in text for term in tos_terms) or any(term in href_lower for term in tos_terms):
+            absolute_url = urljoin(url, href)
+            logger.info(f"Found valid ToS link: {absolute_url}")
+            return absolute_url
+        return None
     
-    # APPROACH 3: Look for exact text matches anywhere in the page
-    for link in links:
-        href = link.get('href')
-        if not href or href.startswith('javascript:') or href == '#':
-            continue
-        
-        # Absolute URLs vs relative URLs
-        if not href.startswith('http'):
-            absolute_href = urljoin(original_url, href)
-        else:
-            absolute_href = href
-        
-        # Skip links that point back to the same page or to likely article URLs
-        if absolute_href == original_url or is_likely_article_link(href.lower(), absolute_href):
-            continue
-        
-        link_text = link.get_text().lower().strip()
-        
-        # Check for exact text matches with higher-priority keywords
-        for keyword in tos_keywords:
-            if keyword == link_text or f"{keyword}." == link_text:
-                # Verify this doesn't appear to be an article link
-                if not is_likely_article_link(href.lower(), absolute_href):
-                    logger.info(f"Found exact match for ToS keyword '{keyword}' in link text: {absolute_href}")
-                    return absolute_href
+    # First check all links
+    for link in soup.find_all('a', href=True):
+        tos_url = check_link(link)
+        if tos_url:
+            return tos_url
     
-    # APPROACH 4: For sites where all else failed, check using broader heuristics
-    # But be more restrictive to avoid false positives
+    # Then check footer links specifically
+    footers = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower()))
+    for footer in footers:
+        for link in footer.find_all('a', href=True):
+            tos_url = check_link(link)
+            if tos_url:
+                return tos_url
     
-    # Get the main navigation menus - these often contain ToS links at the bottom
-    navs = soup.find_all(['nav', 'ul'], class_=lambda c: c and ('nav' in str(c).lower() or 'menu' in str(c).lower()))
-    
-    # Look in navigation elements
-    for nav in navs:
-        nav_links = nav.find_all('a', href=True)
-        
-        for link in nav_links:
-            href = link.get('href')
-            if not href or href.startswith('javascript:') or href == '#':
-                continue
-            
-            # Absolute URLs vs relative URLs
-            if not href.startswith('http'):
-                absolute_href = urljoin(original_url, href)
-            else:
-                absolute_href = href
-            
-            # Skip links that point back to the same page
-            if absolute_href == original_url:
-                continue
-            
-            link_text = link.get_text().lower().strip()
-            
-            # Check for partial matches with higher-priority keywords in navigation only
-            for keyword in tos_keywords:
-                if keyword in link_text and not is_likely_article_link(href.lower(), absolute_href):
-                    link_text_words = link_text.split()
-                    # Ensure "terms" isn't just part of another word (like "determines")
-                    if any(word == "terms" or word == "tos" for word in link_text_words):
-                        logger.info(f"Found ToS keyword '{keyword}' in navigation: {absolute_href}")
-                        return absolute_href
-    
-    # If we've exhausted all options, return None
+    logger.warning(f"No valid ToS link found for {url}")
     return None
 
-def is_likely_article_link(href_lower: str, full_url: str) -> bool:
+def is_valid_external_domain(found_domain: str, base_domain: str) -> bool:
     """
-    Determine if a URL is likely to be a news article rather than a ToS page.
-    
-    Args:
-        href_lower: The lowercase href attribute
-        full_url: The full URL for additional context
-    
-    Returns:
-        bool: True if the URL appears to be an article, False otherwise
+    Check if the found domain is a valid external domain for hosting terms of service.
     """
-    # News article patterns in URLs
-    article_indicators = [
-        "/article/", 
-        "/news/",
-        "/story/",
-        "/blog/",
-        "/post/",
-        "/2023/",  # Year patterns
-        "/2024/",
-        "/politics/",
-        "/business/",
-        "/technology/",
-        "/science/",
-        "/health/",
-        ".html",
-        "/watch/",
-        "/video/"
-    ]
+    # List of known valid external domains for specific sites
+    domain_mappings = {
+        'google.com': ['policies.google.com'],
+        'youtube.com': ['policies.google.com'],
+        'android.com': ['policies.google.com'],
+        'facebook.com': ['m.facebook.com', 'web.facebook.com'],
+        'instagram.com': ['help.instagram.com'],
+        'microsoft.com': ['privacy.microsoft.com', 'go.microsoft.com'],
+        'apple.com': ['www.apple.com'],
+        'github.com': ['docs.github.com', 'help.github.com'],
+        'twitter.com': ['twitter.com', 'help.twitter.com', 'legal.twitter.com'],
+        'linkedin.com': ['www.linkedin.com', 'legal.linkedin.com'],
+        'amazon.com': ['www.amazon.com', 'aws.amazon.com'],
+        'netflix.com': ['help.netflix.com'],
+        'spotify.com': ['www.spotify.com'],
+        'reddit.com': ['www.redditinc.com', 'reddit.com'],
+        'twitch.tv': ['www.twitch.tv', 'legal.twitch.tv'],
+        'discord.com': ['discord.com', 'support.discord.com'],
+        'slack.com': ['slack.com', 'api.slack.com'],
+        'zoom.us': ['zoom.us', 'explore.zoom.us'],
+        'dropbox.com': ['www.dropbox.com', 'help.dropbox.com'],
+        'adobe.com': ['www.adobe.com', 'helpx.adobe.com'],
+        'salesforce.com': ['www.salesforce.com', 'legal.salesforce.com'],
+        'atlassian.com': ['www.atlassian.com', 'confluence.atlassian.com'],
+        'notion.so': ['www.notion.so'],
+        'figma.com': ['help.figma.com', 'www.figma.com'],
+        'canva.com': ['www.canva.com'],
+        'medium.com': ['policy.medium.com', 'help.medium.com'],
+        'wordpress.com': ['wordpress.com', 'automattic.com'],
+        'wix.com': ['www.wix.com', 'support.wix.com'],
+        'squarespace.com': ['www.squarespace.com'],
+        'shopify.com': ['www.shopify.com', 'help.shopify.com'],
+        'stripe.com': ['stripe.com', 'support.stripe.com'],
+        'paypal.com': ['www.paypal.com'],
+        'cloudflare.com': ['www.cloudflare.com', 'developers.cloudflare.com'],
+        'digitalocean.com': ['www.digitalocean.com', 'docs.digitalocean.com'],
+        'heroku.com': ['www.heroku.com', 'devcenter.heroku.com'],
+        'mongodb.com': ['www.mongodb.com'],
+        'mysql.com': ['www.mysql.com'],
+        'postgresql.org': ['www.postgresql.org'],
+        'redis.io': ['redis.io'],
+        'elastic.co': ['www.elastic.co'],
+        'docker.com': ['www.docker.com', 'docs.docker.com'],
+        'kubernetes.io': ['kubernetes.io'],
+        'nginx.com': ['www.nginx.com'],
+        'apache.org': ['www.apache.org'],
+        'jenkins.io': ['www.jenkins.io'],
+        'gitlab.com': ['about.gitlab.com', 'docs.gitlab.com'],
+        'bitbucket.org': ['bitbucket.org', 'confluence.atlassian.com'],
+        'jira.com': ['www.atlassian.com'],
+        'trello.com': ['trello.com', 'help.trello.com'],
+        'asana.com': ['asana.com', 'help.asana.com'],
+        'monday.com': ['monday.com', 'support.monday.com'],
+        'clickup.com': ['clickup.com', 'docs.clickup.com'],
+        'notion.so': ['www.notion.so', 'help.notion.so'],
+        'airtable.com': ['www.airtable.com', 'support.airtable.com'],
+        'hubspot.com': ['www.hubspot.com', 'legal.hubspot.com'],
+        'zendesk.com': ['www.zendesk.com', 'support.zendesk.com'],
+        'intercom.com': ['www.intercom.com'],
+        'freshworks.com': ['www.freshworks.com'],
+        'segment.com': ['segment.com', 'www.segment.com'],
+        'mixpanel.com': ['mixpanel.com', 'help.mixpanel.com'],
+        'amplitude.com': ['amplitude.com', 'help.amplitude.com'],
+        'optimizely.com': ['www.optimizely.com'],
+        'mailchimp.com': ['mailchimp.com', 'legal.mailchimp.com'],
+        'sendgrid.com': ['sendgrid.com', 'docs.sendgrid.com'],
+        'twilio.com': ['www.twilio.com', 'support.twilio.com'],
+        'auth0.com': ['auth0.com', 'docs.auth0.com'],
+        'okta.com': ['www.okta.com', 'help.okta.com'],
+        'onelogin.com': ['www.onelogin.com'],
+        'pingidentity.com': ['www.pingidentity.com'],
+        'duo.com': ['duo.com', 'guide.duo.com'],
+        'lastpass.com': ['www.lastpass.com', 'support.lastpass.com'],
+        '1password.com': ['1password.com', 'support.1password.com'],
+        'bitwarden.com': ['bitwarden.com', 'help.bitwarden.com'],
+        'dashlane.com': ['www.dashlane.com', 'support.dashlane.com'],
+        'keeper.io': ['keeper.io', 'docs.keeper.io'],
+        'nordvpn.com': ['nordvpn.com', 'support.nordvpn.com'],
+        'expressvpn.com': ['www.expressvpn.com', 'support.expressvpn.com'],
+        'protonvpn.com': ['protonvpn.com', 'proton.me'],
+        'surfshark.com': ['surfshark.com', 'support.surfshark.com'],
+        'openvpn.net': ['openvpn.net', 'docs.openvpn.net'],
+        'wireguard.com': ['www.wireguard.com'],
+        'cloudflare.com': ['www.cloudflare.com', '1.1.1.1'],
+        'cisco.com': ['www.cisco.com', 'tools.cisco.com'],
+        'juniper.net': ['www.juniper.net', 'support.juniper.net'],
+        'paloaltonetworks.com': ['www.paloaltonetworks.com'],
+        'fortinet.com': ['www.fortinet.com', 'docs.fortinet.com'],
+        'checkpoint.com': ['www.checkpoint.com', 'supportcenter.checkpoint.com'],
+        'symantec.com': ['www.symantec.com', 'support.symantec.com'],
+        'mcafee.com': ['www.mcafee.com', 'service.mcafee.com'],
+        'norton.com': ['norton.com', 'support.norton.com'],
+        'kaspersky.com': ['www.kaspersky.com', 'support.kaspersky.com'],
+        'bitdefender.com': ['www.bitdefender.com', 'bitdefender.com'],
+        'avast.com': ['www.avast.com', 'support.avast.com'],
+        'avg.com': ['www.avg.com', 'support.avg.com'],
+        'malwarebytes.com': ['www.malwarebytes.com', 'support.malwarebytes.com'],
+        'trendmicro.com': ['www.trendmicro.com', 'success.trendmicro.com'],
+        'sophos.com': ['www.sophos.com', 'support.sophos.com'],
+        'eset.com': ['www.eset.com', 'support.eset.com'],
+        'f-secure.com': ['www.f-secure.com', 'help.f-secure.com'],
+        'avira.com': ['www.avira.com', 'support.avira.com'],
+        'webroot.com': ['www.webroot.com', 'support.webroot.com'],
+        'carbonblack.com': ['www.carbonblack.com', 'community.carbonblack.com'],
+        'crowdstrike.com': ['www.crowdstrike.com', 'supportportal.crowdstrike.com'],
+        'fireeye.com': ['www.fireeye.com', 'docs.fireeye.com'],
+        'rapid7.com': ['www.rapid7.com', 'docs.rapid7.com'],
+        'tenable.com': ['www.tenable.com', 'docs.tenable.com'],
+        'qualys.com': ['www.qualys.com', 'qualysguard.qualys.com'],
+        'nessus.org': ['www.tenable.com', 'docs.tenable.com'],
+        'acunetix.com': ['www.acunetix.com', 'www.invicti.com'],
+        'portswigger.net': ['portswigger.net', 'forum.portswigger.net'],
+        'owasp.org': ['owasp.org', 'wiki.owasp.org'],
+        'metasploit.com': ['www.metasploit.com', 'docs.rapid7.com'],
+        'kali.org': ['www.kali.org', 'docs.kali.org'],
+        'parrotsec.org': ['parrotsec.org', 'docs.parrotsec.org'],
+        'blackarch.org': ['blackarch.org', 'wiki.blackarch.org'],
+        'pentoo.ch': ['www.pentoo.ch'],
+        'backbox.org': ['www.backbox.org'],
+        'offensive-security.com': ['www.offensive-security.com', 'help.offensive-security.com'],
+        'hackthebox.eu': ['www.hackthebox.com', 'help.hackthebox.com'],
+        'vulnhub.com': ['www.vulnhub.com'],
+        'tryhackme.com': ['tryhackme.com', 'docs.tryhackme.com'],
+        'pentesterlab.com': ['pentesterlab.com'],
+        'pentestit.com': ['lab.pentestit.ru'],
+        'vulnmachines.com': ['www.vulnmachines.com'],
+        'rootme.org': ['www.root-me.org'],
+        'ctftime.org': ['ctftime.org'],
+        'picoctf.org': ['picoctf.org'],
+        'overthewire.org': ['overthewire.org'],
+        'underthewire.tech': ['underthewire.tech'],
+        'microcorruption.com': ['microcorruption.com'],
+        'cryptopals.com': ['cryptopals.com'],
+        'cryptohack.org': ['cryptohack.org'],
+        'pwnable.kr': ['pwnable.kr'],
+        'pwnable.tw': ['pwnable.tw'],
+        'reversing.kr': ['reversing.kr'],
+        'crackmes.one': ['crackmes.one'],
+        'exploit.education': ['exploit.education'],
+        'ropemporium.com': ['ropemporium.com'],
+        'io.netgarage.org': ['io.netgarage.org'],
+        'smashthestack.org': ['smashthestack.org'],
+        'ringzer0ctf.com': ['ringzer0ctf.com'],
+        'hackthissite.org': ['www.hackthissite.org'],
+        'enigmagroup.org': ['www.enigmagroup.org'],
+        'hellboundhackers.org': ['www.hellboundhackers.org'],
+        'hackxor.net': ['hackxor.net'],
+        'hackquest.com': ['www.hackquest.com'],
+        'hackerone.com': ['www.hackerone.com', 'docs.hackerone.com'],
+        'bugcrowd.com': ['www.bugcrowd.com', 'docs.bugcrowd.com'],
+        'intigriti.com': ['www.intigriti.com', 'api.intigriti.com'],
+        'yeswehack.com': ['www.yeswehack.com'],
+        'synack.com': ['www.synack.com'],
+        'cobalt.io': ['www.cobalt.io'],
+        'detectify.com': ['detectify.com'],
+        'hackenproof.com': ['hackenproof.com'],
+        'zerocopter.com': ['www.zerocopter.com'],
+        'openbugbounty.org': ['www.openbugbounty.org'],
+        'immunefi.com': ['immunefi.com'],
+        'hacktrophy.com': ['www.hacktrophy.com'],
+        'federacy.com': ['www.federacy.com'],
+        'antihack.me': ['www.antihack.me'],
+        'safehats.com': ['www.safehats.com'],
+        'yogosha.com': ['www.yogosha.com'],
+        'vdp.com': ['vdp.com'],
+        'hacktivity.com': ['hacktivity.com'],
+        'hackrx.com': ['www.hackrx.com'],
+        'hackedu.io': ['www.hackedu.com']
+    }
     
-    # Common news domains (partial list)
-    news_domains = [
-        "reuters.com",
-        "nytimes.com",
-        "washingtonpost.com",
-        "cnn.com",
-        "bbc.com",
-        "forbes.com"
-    ]
+    # Check if the base domain has any known valid external domains
+    if base_domain in domain_mappings:
+        return found_domain in domain_mappings[base_domain]
     
-    # Check if URL contains article indicators
-    for indicator in article_indicators:
-        if indicator in href_lower:
-            return True
-    
-    # Check if URL is from a known news domain
-    parsed_url = urlparse(full_url)
-    domain = parsed_url.netloc.lower()
-    for news_domain in news_domains:
-        if news_domain in domain:
-            # For news sites, be extra careful
-            # Only consider it a ToS link if it clearly has terms in the path
-            if not any(term in parsed_url.path.lower() for term in ['/terms', '/tos', '/legal']):
-                return True
-    
-    # Check for date patterns in URL paths
-    date_pattern = re.compile(r'/\d{4}/\d{1,2}/\d{1,2}/')
-    if date_pattern.search(href_lower):
-        return True
-    
-    return False
+    # For domains not in our mapping, only allow exact domain match
+    return found_domain == base_domain
 
 async def playwright_tos_finder(url: str) -> TosResponse:
     """
@@ -745,4 +746,22 @@ async def playwright_tos_finder(url: str) -> TosResponse:
             method_used="playwright_failed"
         )
 
-# Rest of the file stays the same
+def is_likely_article_link(href: str, base_url: str) -> bool:
+    """Check if the URL looks like an article link rather than a ToS link."""
+    article_indicators = [
+        '/blog/', '/news/', '/article/', '/post/',
+        '/2023/', '/2022/', '/2021/', '/2020/',
+        '/category/', '/tag/', '/author/'
+    ]
+    return any(indicator in href.lower() for indicator in article_indicators)
+
+def is_same_domain(url1: str, url2: str) -> bool:
+    """Check if two URLs belong to the same domain."""
+    domain1 = urlparse(url1).netloc.lower()
+    domain2 = urlparse(url2).netloc.lower()
+    
+    # Remove 'www.' prefix for comparison
+    domain1 = domain1.replace('www.', '')
+    domain2 = domain2.replace('www.', '')
+    
+    return domain1 == domain2
