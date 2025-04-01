@@ -2,7 +2,7 @@ from urllib.parse import urlparse, urljoin
 import logging
 import re
 from bs4 import BeautifulSoup
-from typing import Optional
+from typing import Optional, Tuple, List
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -277,48 +277,62 @@ def is_on_policy_page(url: str, policy_type: str) -> bool:
         # Do not check legal terms for privacy - we want to be strict
     return False
 
-def get_policy_patterns(policy_type: str) -> tuple:
-    """
-    Get exact match patterns and URL patterns based on policy type.
-    Returns tuple of (exact_patterns, strong_url_patterns).
-    """
-    if policy_type == 'tos':
-        # ToS-specific patterns first, then legal terms
+def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
+    """Returns exact match patterns and strong URL patterns based on policy type."""
+    if policy_type == 'privacy':
+        # Exact match patterns for privacy
         exact_patterns = [
-            r'\bterms[-\s]of[-\s]service\b',
-            r'\bterms[-\s]of[-\s]use\b',
-            r'\bterms[-\s]and[-\s]conditions\b',
-            r'\buser[-\s]agreement\b',
-            r'\btos\b',
-            r'\blegal[-\s]terms\b'
+            r'(?:^|\s)privacy(?:\s|$)', 
+            r'(?:^|\s)privacy(?:\s|-)policy(?:\s|$)', 
+            r'(?:^|\s)data(?:\s|-)protection(?:\s|$)',
+            r'(?:^|\s)your(?:\s|-)privacy(?:\s|$)',
+            r'(?:^|\s)pp(?:\s|$)',
+            r'(?:^|\s)privacy(?:\s|-|_)notice(?:\s|$)',
+            r'(?:^|\s)privacy(?:\s|-|_)policy(?:\s|$)',
+            r'(?:^|\s)policy(?:\s|$)'
         ]
         
+        # Strong URL patterns for privacy
         strong_url_patterns = [
-            '/terms-of-service/',
-            '/terms-of-use/',
-            '/terms-and-conditions/',
-            '/terms/',
-            '/tos/',
-            '/legal/terms/'
-        ]
-    else:  # privacy
-        # Privacy-specific patterns first, then legal terms
-        exact_patterns = [
-            r'\bprivacy[-\s]policy\b',
-            r'\bdata[-\s]protection\b',
-            r'\bprivacy[-\s]notice\b',
-            r'\bprivacy[-\s]statement\b',
-            r'\bgdpr\b',
-            r'\bdata[-\s]privacy\b'
+            '/privacy',
+            '/privacy-policy',
+            '/policy',
+            '/privacy_policy',
+            '/privacypolicy',
+            '/privacy-notice',
+            '/gdpr',
+            '/data-protection',
+            '/datenschutz'  # German privacy
         ]
         
+    else:  # tos patterns
+        # Exact match patterns for ToS
+        exact_patterns = [
+            r'(?:^|\s)terms(?:\s|$)',
+            r'(?:^|\s)terms(?:\s|-)of(?:\s|-)(?:service|use)(?:\s|$)',
+            r'(?:^|\s)(?:service|use)(?:\s|-)terms(?:\s|$)',
+            r'(?:^|\s)terms(?:\s|-)and(?:\s|-)conditions(?:\s|$)',
+            r'(?:^|\s)(?:user(?:\s|-)|)agreement(?:\s|$)',
+            r'(?:^|\s)legal(?:\s|$)',
+            r'(?:^|\s)conditions(?:\s|-)of(?:\s|-)use(?:\s|$)',
+            r'(?:^|\s)tos(?:\s|$)'
+        ]
+        
+        # Strong URL patterns for ToS
         strong_url_patterns = [
-            '/privacy-policy/',
-            '/privacy/',
-            '/data-protection/',
-            '/privacy-notice/',
-            '/gdpr/',
-            '/legal/privacy/'
+            '/terms',
+            '/tos',
+            '/terms-of-service',
+            '/terms-of-use',
+            '/terms_of_service',
+            '/termsofservice',
+            '/termsofuse',
+            '/terms_of_use',
+            '/terms-and-conditions',
+            '/legal',
+            '/conditions',
+            '/eula',
+            '/user-agreement'
         ]
     
     return exact_patterns, strong_url_patterns
@@ -389,7 +403,16 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
     
     # Determine keywords based on policy type
     if policy_type == 'privacy':
-        keywords = ['privacy', 'data protection', 'gdpr', 'data policy', 'personal data']
+        keywords = [
+            'privacy', 
+            'privacy policy', 
+            'privacy-policy',
+            'policy',
+            'data protection', 
+            'gdpr', 
+            'data policy', 
+            'personal data'
+        ]
     else:  # tos
         keywords = ['terms', 'conditions', 'terms of service', 'terms of use', 'legal']
     
@@ -426,8 +449,16 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                 link.get('aria-label', '').strip()
             ]).lower()
             
+            # Check URL path for specific patterns
+            url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
+            
+            # Exact path matches for privacy
+            privacy_path_patterns = ['/privacy', '/privacy-policy', '/policy']
+            
             # Check if any keyword is in the link text or href
-            if any(keyword in link_text for keyword in keywords) or any(keyword in href.lower() for keyword in keywords):
+            if (policy_type == 'privacy' and any(pattern in url_path for pattern in privacy_path_patterns)) or \
+               any(keyword in link_text for keyword in keywords) or \
+               any(keyword in href.lower() for keyword in keywords):
                 try:
                     # Make the URL absolute
                     absolute_url = urljoin(base_url, href) if base_url else href
@@ -436,7 +467,10 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                     continue
     
     # If nothing found in footer elements, look for elements with policy-related classes/IDs
-    policy_class_patterns = ['privacy', 'legal', 'terms', 'tos', 'policy']
+    if policy_type == 'privacy':
+        policy_class_patterns = ['privacy', 'privacy-policy', 'policy', 'legal', 'data-protection']
+    else:
+        policy_class_patterns = ['terms', 'tos', 'legal', 'conditions']
     
     for pattern in policy_class_patterns:
         for element in soup.find_all(attrs=True):
@@ -460,12 +494,41 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                                 link.get('aria-label', '').strip()
                             ]).lower()
                             
+                            # URL path patterns check
+                            url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
+                            privacy_path_patterns = ['/privacy', '/privacy-policy', '/policy']
+                            
                             # For this match, we'll be more strict about relevant keywords
-                            if any(keyword in link_text for keyword in keywords):
+                            if (policy_type == 'privacy' and any(pattern in url_path for pattern in privacy_path_patterns)) or \
+                               any(keyword in link_text for keyword in keywords):
                                 try:
                                     absolute_url = urljoin(base_url, href) if base_url else href
                                     return absolute_url
                                 except Exception:
                                     continue
+    
+    # Look for any links with very specific privacy policy paths or text
+    if policy_type == 'privacy':
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                continue
+            
+            url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
+            
+            if any(pattern in url_path for pattern in ['/privacy', '/privacy-policy', '/policy']):
+                try:
+                    absolute_url = urljoin(base_url, href) if base_url else href
+                    return absolute_url
+                except Exception:
+                    continue
+                
+            link_text = link.get_text().strip().lower()
+            if link_text in ['privacy', 'privacy policy', 'privacy-policy', 'policy']:
+                try:
+                    absolute_url = urljoin(base_url, href) if base_url else href
+                    return absolute_url
+                except Exception:
+                    continue
     
     return None
