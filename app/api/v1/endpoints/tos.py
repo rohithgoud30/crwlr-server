@@ -114,24 +114,29 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         href_lower = href.lower()
         link_text_lower = link_text.lower()
         
-        # Strong ToS indicators in URL
-        strong_url_patterns = [
-            '/terms-of-service',
-            '/terms-of-use',
-            '/terms-and-conditions',
-            '/legal/terms',
-            '/tos/',
-            '/terms/',
+        # Exact match patterns (highest priority)
+        exact_patterns = [
+            r'\bterms[-\s]of[-\s]service\b',
+            r'\bterms[-\s]of[-\s]use\b',
+            r'\bterms[-\s]and[-\s]conditions\b',
+            r'\buser[-\s]agreement\b',
+            r'\blegal[-\s]terms\b',
+            r'\btos\b'
         ]
         
-        # Strong ToS indicators in text
-        strong_text_patterns = [
-            'terms of service',
-            'terms of use',
-            'terms and conditions',
-            'user agreement',
-            'legal terms'
+        # Strong URL patterns
+        strong_url_patterns = [
+            '/terms-of-service/',
+            '/terms-of-use/',
+            '/terms-and-conditions/',
+            '/legal/terms/',
+            '/tos/',
+            '/terms/'
         ]
+        
+        # Check for exact matches in text (highest priority)
+        if any(re.search(pattern, link_text_lower) for pattern in exact_patterns):
+            score += 5.0
         
         # Check URL patterns
         if any(pattern in href_lower for pattern in strong_url_patterns):
@@ -139,19 +144,50 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         elif '/legal' in href_lower or '/terms' in href_lower or '/tos' in href_lower:
             score += 2.0
             
-        # Check link text
-        if any(pattern in link_text_lower for pattern in strong_text_patterns):
-            score += 3.0
-        elif 'terms' in link_text_lower.split() or 'tos' in link_text_lower.split():
+        # Check link text for partial matches
+        if 'terms' in link_text_lower.split() or 'tos' in link_text_lower.split():
             score += 2.0
         elif 'legal' in link_text_lower:
             score += 1.0
             
-        # Penalize likely non-ToS content
-        penalties = ['/blog/', '/news/', '/article/', '/press/', '/2023/', '/2024/', 
-                    '/posts/', '/category/', '/tag/', '/search/', '/product/']
-        if any(penalty in href_lower for penalty in penalties):
+        # Strong penalties for likely non-ToS content
+        penalties = [
+            ('/blog/', -5.0),
+            ('/news/', -5.0),
+            ('/article/', -5.0),
+            ('/press/', -5.0),
+            ('/2023/', -5.0),
+            ('/2024/', -5.0),
+            ('/posts/', -5.0),
+            ('/category/', -5.0),
+            ('/tag/', -5.0),
+            ('/search/', -5.0),
+            ('/product/', -5.0),
+            ('/services/', -5.0),
+            ('/solutions/', -5.0),
+            ('/ai/', -5.0),
+            ('/cloud/', -5.0),
+            ('/digital/', -5.0),
+            ('/enterprise/', -5.0),
+            ('/platform/', -5.0),
+            ('/technology/', -5.0),
+            ('/consulting/', -5.0),
+            ('/about/', -3.0),
+            ('/contact/', -3.0)
+        ]
+        
+        for pattern, penalty in penalties:
+            if pattern in href_lower:
+                score += penalty
+        
+        # Additional penalties for service/product pages
+        service_indicators = ['service', 'product', 'solution', 'platform', 'technology', 'consulting', 'ai', 'cloud', 'digital']
+        if any(indicator in link_text_lower for indicator in service_indicators):
             score -= 5.0
+            
+        # Require minimum length for link text to avoid false positives
+        if len(link_text_lower.strip()) < 3:
+            score -= 3.0
             
         return score
 
@@ -171,6 +207,10 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 link.get('aria-label', '').strip()
             ])
             
+            # Skip empty or very short link text
+            if len(link_text.strip()) < 3:
+                continue
+                
             # Calculate scores
             domain_score = get_domain_score(absolute_url)
             if domain_score < 0:  # Skip invalid URLs
@@ -179,11 +219,11 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             tos_score = get_tos_relevance_score(absolute_url, link_text)
             context_score = get_link_context_score(link)
             
-            # Calculate final score with domain weight
-            final_score = (tos_score * 1.5) + (context_score * 1.0) + (domain_score * 2.0)
+            # Calculate final score with adjusted weights
+            final_score = (tos_score * 2.0) + (context_score * 1.0) + (domain_score * 1.5)
             
-            # Only consider links with significant positive scores
-            if final_score > 3.0:
+            # Higher threshold for acceptance
+            if final_score > 5.0:  # Increased from 3.0 to 5.0
                 candidates.append((absolute_url, final_score))
                 
         except Exception:
@@ -192,7 +232,11 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     # Return the highest scoring candidate
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
-        return candidates[0][0]
+        highest_score = candidates[0][1]
+        
+        # Only return if the score is significantly high
+        if highest_score > 7.0:  # Added minimum threshold
+            return candidates[0][0]
     
     return None
 
