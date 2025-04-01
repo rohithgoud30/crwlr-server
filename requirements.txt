@@ -7,4 +7,4 @@ requests==2.31.0
 beautifulsoup4==4.12.3
 pytest==7.4.0
 httpx==0.25.0
-playwright==1.42.0 
+playwright==1.42.0 Requirement already satisfied: html2text in /opt/homebrew/Caskroom/miniforge/base/lib/python3.12/site-packages (2024.2.26)
