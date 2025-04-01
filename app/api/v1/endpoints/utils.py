@@ -420,6 +420,73 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
     
     return False
 
+def is_correct_policy_type(url: str, policy_type: str) -> bool:
+    """
+    Strictly checks if a URL matches the expected policy type.
+    Prevents confusing privacy policy URLs with ToS URLs and vice versa.
+    
+    Args:
+        url: The URL to check
+        policy_type: Either 'privacy' or 'tos'
+        
+    Returns:
+        True if the URL matches the policy type, False otherwise
+    """
+    parsed_url = urlparse(url)
+    path = parsed_url.path.lower()
+    
+    # Get keywords for opposite policy type to exclude
+    opposing_keywords = []
+    
+    if policy_type == 'privacy':
+        # For privacy links, exclude URLs with clear ToS indicators
+        opposing_keywords = [
+            '/terms', 
+            '/tos',
+            '/terms-of-service',
+            '/terms-of-use',
+            'terms_of_service',
+            'termsofservice',
+            'termsofuse',
+            'terms_of_use',
+            'terms-and-conditions',
+            'eula',
+            'user-agreement'
+        ]
+    else:  # tos
+        # For ToS links, exclude URLs with clear privacy indicators
+        opposing_keywords = [
+            '/privacy',
+            '/privacy-policy',
+            'privacy_policy',
+            'privacypolicy',
+            '/gdpr',
+            '/data-protection',
+            'datenschutz'
+        ]
+    
+    # If URL contains opposing keywords, it's not the correct policy type
+    for keyword in opposing_keywords:
+        if keyword in path:
+            return False
+    
+    # For stricter checking, also examine the link text if available
+    link_text = ''
+    
+    # If URL contains expected keywords, it's probably the right type
+    if policy_type == 'privacy':
+        expected_keywords = ['/privacy', '/privacy-policy', '/gdpr', '/data-protection']
+        if any(keyword in path for keyword in expected_keywords):
+            return True
+    else:  # tos
+        expected_keywords = ['/terms', '/tos', '/terms-of-service', '/terms-of-use', '/legal']
+        if any(keyword in path for keyword in expected_keywords):
+            return True
+    
+    # If we couldn't determine from the URL alone, default to true
+    # The scoring system should handle the rest
+    return True
+
 def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
     """
     Find policy links by analyzing HTML class and ID attributes.
@@ -485,6 +552,10 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             if is_likely_false_positive(absolute_url, policy_type):
                 continue
                 
+            # Check if this URL matches the expected policy type
+            if not is_correct_policy_type(absolute_url, policy_type):
+                continue
+                
             # Check link text for keywords
             link_text = ' '.join([
                 link.get_text().strip(),
@@ -506,6 +577,11 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                     # Skip likely false positives
                     if is_likely_false_positive(absolute_url, policy_type):
                         continue
+                    
+                    # Double-check policy type
+                    if not is_correct_policy_type(absolute_url, policy_type):
+                        continue
+                        
                     return absolute_url
                 except Exception:
                     continue
@@ -537,6 +613,10 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                             if is_likely_false_positive(absolute_url, policy_type):
                                 continue
                                 
+                            # Check if this URL matches the expected policy type
+                            if not is_correct_policy_type(absolute_url, policy_type):
+                                continue
+                                
                             link_text = ' '.join([
                                 link.get_text().strip(),
                                 link.get('title', '').strip(),
@@ -554,6 +634,11 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                                     # Skip likely false positives
                                     if is_likely_false_positive(absolute_url, policy_type):
                                         continue
+                                    
+                                    # Double-check policy type
+                                    if not is_correct_policy_type(absolute_url, policy_type):
+                                        continue
+                                        
                                     return absolute_url
                                 except Exception:
                                     continue
@@ -570,6 +655,10 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             if is_likely_false_positive(absolute_url, policy_type):
                 continue
             
+            # Ensure this URL is not a ToS URL
+            if not is_correct_policy_type(absolute_url, policy_type):
+                continue
+                
             url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
             
             if any(pattern in url_path for pattern in ['/privacy', '/privacy-policy', '/policy']):

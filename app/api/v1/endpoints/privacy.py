@@ -9,7 +9,7 @@ from typing import Optional, Any, List, Tuple
 import asyncio
 from playwright.async_api import async_playwright
 import logging
-from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id, is_likely_false_positive
+from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id, is_likely_false_positive, is_correct_policy_type
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -597,6 +597,11 @@ async def standard_privacy_finder(variations_to_try, headers, session) -> Privac
                     logger.warning(f"Found link {privacy_link} appears to be a false positive, skipping")
                     continue
                     
+                # Check if this is a correct policy type
+                if not is_correct_policy_type(privacy_link, 'privacy'):
+                    logger.warning(f"Found link {privacy_link} appears to be a ToS, not privacy policy, skipping")
+                    continue
+                    
                 logger.info(f"Found privacy link: {privacy_link} in {final_url} ({variation_type})")
                 return PrivacyResponse(
                     url=final_url,  # Return the actual URL after redirects
@@ -761,6 +766,16 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
                         method_used="playwright_false_positive"
                     )
                     
+                # Check if this is a correct policy type
+                if not is_correct_policy_type(privacy_link, 'privacy'):
+                    logger.warning(f"Found link {privacy_link} appears to be a ToS, not privacy policy")
+                    return PrivacyResponse(
+                        url=final_url,
+                        success=False,
+                        message=f"Found link appears to be Terms of Service, not Privacy Policy: {privacy_link}",
+                        method_used="playwright_wrong_policy_type"
+                    )
+                    
                 return PrivacyResponse(
                     url=final_url,
                     pp_url=privacy_link,
@@ -810,6 +825,10 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             # Skip likely false positives
             if is_likely_false_positive(absolute_url, 'privacy'):
+                continue
+                
+            # Ensure this is not a ToS URL
+            if not is_correct_policy_type(absolute_url, 'privacy'):
                 continue
                 
             link_text = ' '.join([

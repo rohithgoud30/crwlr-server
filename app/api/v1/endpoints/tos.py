@@ -21,7 +21,8 @@ from .utils import (
     get_policy_patterns,
     get_policy_score,
     find_policy_by_class_id,
-    is_likely_false_positive
+    is_likely_false_positive,
+    is_correct_policy_type
 )
 
 # Filter out the XML parsed as HTML warning
@@ -76,6 +77,10 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             # Skip likely false positives 
             if is_likely_false_positive(absolute_url, 'tos'):
+                continue
+                
+            # Ensure this is not a privacy policy URL
+            if not is_correct_policy_type(absolute_url, 'tos'):
                 continue
                 
             link_text = ' '.join([
@@ -180,6 +185,11 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
                 # Additional check for false positives
                 if is_likely_false_positive(tos_link, 'tos'):
                     logger.warning(f"Found link {tos_link} appears to be a false positive, skipping")
+                    continue
+                    
+                # Check if this is a correct policy type
+                if not is_correct_policy_type(tos_link, 'tos'):
+                    logger.warning(f"Found link {tos_link} appears to be a privacy policy, not ToS, skipping")
                     continue
                     
                 logger.info(f"Found ToS link: {tos_link} in {final_url} ({variation_type})")
@@ -312,6 +322,16 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                             success=False,
                             message=f"Found ToS link was a false positive: {tos_link}",
                             method_used="playwright_false_positive"
+                        )
+                        
+                    # Check if this is a correct policy type
+                    if not is_correct_policy_type(tos_link, 'tos'):
+                        logger.warning(f"Found link {tos_link} appears to be a privacy policy, not ToS")
+                        return TosResponse(
+                            url=final_url,
+                            success=False,
+                            message=f"Found link appears to be a privacy policy, not Terms of Service: {tos_link}",
+                            method_used="playwright_wrong_policy_type"
                         )
                         
                     return TosResponse(
