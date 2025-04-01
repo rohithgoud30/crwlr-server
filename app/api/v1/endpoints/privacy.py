@@ -813,543 +813,160 @@ def find_privacy_link(url, soup):
     """Find and return the Privacy Policy link from a webpage."""
     # Store the original URL for later validation
     original_url = url
+    base_domain = urlparse(url).netloc.lower()
     
-    # Check if this is a GitHub repository
-    parsed_url = urlparse(url)
-    is_github_repo = parsed_url.netloc == 'github.com'
-    domain = parsed_url.netloc.lower()
-    path = parsed_url.path.strip('/')
-    path_parts = path.split('/')
-    
-    # Special case handling for GitHub repositories
-    if is_github_repo:
-        if len(path_parts) >= 2:
-            logger.info(f"GitHub repository detected: {path_parts[0]}/{path_parts[1]}")
-            
-            # Special case for GitHub repository root - look for policy files in repo
-            if len(path_parts) == 2:
-                logger.info("GitHub repository root page - checking for policy files in repo")
-                
-                # Look for common privacy policy files in repo
-                common_privacy_filenames = [
-                    'privacy', 'privacy.md', 'privacy-policy', 'privacy-policy.md', 
-                    'privacy_policy.md', 'data-policy', 'data-policy.md', 'data-protection'
-                ]
-                
-                # Check repository files listing
-                repo_files = soup.find_all('a', class_='js-navigation-open')
-                for file_link in repo_files:
-                    href = file_link['href'].lower()
-                    text = file_link.text.lower().strip()
-                    
-                    logger.info(f"Repository file: {text} ({href})")
-                    
-                    # Check for privacy policy files by name
-                    if any(filename in text for filename in common_privacy_filenames) or "privacy" in text:
-                        policy_link = urljoin(url, href)
-                        logger.info(f"Found privacy policy file in repository: {policy_link}")
-                        return policy_link
-                
-                # Also check the README.md for privacy policy links or sections
-                readme_link = soup.find('a', string=lambda s: s and s.lower() == 'readme.md')
-                if readme_link:
-                    logger.info("Found README.md, checking for privacy links")
-                    # We've found the README, now check if it has a privacy section
-                    readme_content = soup.find('article', class_='markdown-body')
-                    if readme_content:
-                        # Look for headers about privacy
-                        headers = readme_content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-                        for header in headers:
-                            header_text = header.get_text().lower()
-                            if 'privacy' in header_text or 'data' in header_text:
-                                logger.info(f"Found privacy section in README: {header_text}")
-                                # If the README itself has a privacy section, return the README URL
-                                return urljoin(url, readme_link['href'])
-                        
-                        # Also check for links to privacy policy files
-                        for link in readme_content.find_all('a', href=True):
-                            href = link['href'].lower()
-                            text = link.text.lower().strip()
-                            
-                            if 'privacy' in text or 'privacy' in href:
-                                policy_link = urljoin(url, link['href'])
-                                logger.info(f"Found privacy policy link in README: {policy_link}")
-                                return policy_link
-            
-            # For specific GitHub paths like security/policy
-            if len(path_parts) >= 4 and path_parts[2] == 'security' and path_parts[3] == 'policy':
-                logger.info(f"GitHub security policy page detected")
-                
-                # Special case for nodejs/node repository
-                if path_parts[0].lower() == 'nodejs' and path_parts[1].lower() == 'node':
-                    logger.info("Special case: NodeJS security policy page")
-                    
-                    # For NodeJS security policy, look for specific content patterns
-                    # Including the page content itself as a privacy document if it mentions data handling
-                    page_text = soup.get_text().lower()
-                    if 'security' in page_text and any(term in page_text for term in 
-                                               ['personal data', 'data handling', 'privacy', 'confidential']):
-                        logger.info(f"NodeJS security policy contains privacy information - treating page itself as privacy content")
-                        return url  # Return the current URL as it contains privacy policy info
-                
-                # For security policy pages, try to find specific content
-                # Look for links containing 'security' or 'report' in the content
-                security_keywords = ['vulnerability', 'report', 'security', 'disclose', 'disclosure', 'security policy']
-                
-                # First check if the page itself contains privacy information
-                page_text = soup.get_text().lower()
-                
-                if any(term in page_text for term in ['personal data', 'data handling', 'privacy', 'confidential']):
-                    # If the security policy itself mentions privacy, return the URL
-                    logger.info(f"Security policy page contains privacy information - treating as privacy content")
-                    return url
-                
-                # Otherwise look for links to privacy policy or guidance
-                for link in soup.find_all('a', href=True):
-                    href = link['href'].lower()
-                    text = link.text.lower().strip()
-                    
-                    if 'privacy' in text or 'privacy' in href:
-                        policy_link = urljoin(url, link['href'])
-                        logger.info(f"Found privacy link in security policy: {policy_link}")
-                        return policy_link
-            
-            # For GitHub repository SECURITY.md file
-            if len(path_parts) == 4 and path_parts[2] == 'blob' and path_parts[3].lower() == 'main':
-                logger.info(f"Checking if this is a SECURITY.md file")
-                
-                file_name_elem = soup.find('strong', {'data-testid': 'file-name'})
-                if file_name_elem and file_name_elem.text.lower() == 'security.md':
-                    logger.info(f"SECURITY.md file detected")
-                    
-                    # Check if it contains privacy information
-                    page_text = soup.get_text().lower()
-                    if any(term in page_text for term in ['personal data', 'data handling', 'privacy', 'confidential']):
-                        logger.info(f"SECURITY.md contains privacy information - treating as privacy content")
-                        return url
-            
-            # Special case for repository "Settings" pages
-            if len(path_parts) >= 3 and path_parts[2] == 'settings':
-                logger.info(f"GitHub repository settings page detected")
-                
-                # Look for specific sections in settings
-                headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-                for heading in headings:
-                    heading_text = heading.get_text().lower()
-                    if 'security' in heading_text or 'privacy' in heading_text:
-                        logger.info(f"Found heading related to security or privacy: {heading_text}")
-                        
-                        # Check surrounding links
-                        for link in heading.parent.find_all('a', href=True) if heading.parent else []:
-                            href = link['href'].lower()
-                            text = link.text.lower().strip()
-                            
-                            if 'privacy' in text or 'privacy' in href:
-                                policy_link = urljoin(url, link['href'])
-                                logger.info(f"Found privacy link in settings: {policy_link}")
-                                return policy_link
-            
-            # Try to find repository-specific containers (like .Layout-sidebar)
-            repo_containers = soup.select('.Layout-sidebar')
-            
-            logger.info(f"Found {len(repo_containers)} repository-specific containers")
-            
-            for container in repo_containers:
-                for link in container.find_all('a', href=True):
-                    href = link['href'].lower()
-                    text = link.text.lower().strip()
-                    
-                    # Log all links in repo containers for debugging
-                    logger.info(f"Repository container link: text='{text}', href='{href}'")
-                    
-                    # Check for privacy-related keywords
-                    if ('privacy' in text or 'privacy' in href or 'data protection' in text) and not href.startswith('https://docs.github.com/'):
-                        github_repo_specific_link = urljoin(url, link['href'])
-                        logger.info(f"Found repository-specific privacy link: {github_repo_specific_link}")
-                        # If we find a repo-specific link, use it immediately
-                        return github_repo_specific_link
-
-    # Common terms for Privacy Policy links with more specific matching
-    privacy_terms = [
-        'privacy', 'privacy policy', 'data policy', 'data protection', 
-        'privacy notice', 'cookie policy', 'personal data', 'data processing',
-        'privacy statement', 'data protection policy', 'privacy & cookies',
-        'privacy and cookies', 'cookie notice', 'gdpr', 'confidentiality',
-        'information security', 'privacy preferences', 'privacy settings',
-        'private policy', 'privacy rights', 'privacy choices'
-    ]
-
-    # Common CSS selectors for footers and legal sections
-    footer_selectors = [
-        'footer', '.footer', '#footer', '.site-footer', '.global-footer',
-        '.legal-footer', '.bottom', '.bottom-links', '.legal-links',
-        '.legal-section', '.copyright-section', 'div[role="contentinfo"]',
-        '.nav__legal', '.links', '.legal', '.legal-links', '.legal-container',
-        '.legal-wrapper', '.copyright', '.copyright-section', '.copyrights',
-        'nav', '.nav', 'menu', '.menu', '.social-links', '.meta-links',
-        '.bottom-nav', '.nav-links', '#privacy-footer', '.footer-links',
-        'div.footer', 'div.foot', 'div[class*="footer"]', 'div[class*="foot"]',
-        'div[id*="footer"]', 'div[id*="foot"]'
-    ]
-    
-    # Collect all candidate links
-    candidate_links = []
-    
-    # First check for standalone "Privacy" links in the page
-    for link in soup.find_all('a', href=True):
-        if link.text.lower().strip() == 'privacy':
-            # Check if this is a GitHub global privacy link
-            if is_github_repo and 'docs.github.com' in link['href']:
-                # Store but don't immediately return GitHub's global privacy policy for repos
-                candidate_links.append((urljoin(url, link['href']), 1, "global_footer"))
-            else:
-                privacy_link = urljoin(url, link['href'])
-                candidate_links.append((privacy_link, 10, "exact_match"))
-    
-    # Check specific "your privacy" or "data" phrases pattern - look for text, then nearby links
-    privacy_elements = []
-    
-    # Find all elements with variations of privacy-related text
-    for element in soup.find_all(text=lambda text: text and ('privacy' in text.lower() or 'data protection' in text.lower())):
-        privacy_elements.append(element.parent)
-        # Also check parent elements
-        if element.parent:
-            privacy_elements.append(element.parent)
-            if element.parent.parent:
-                privacy_elements.append(element.parent.parent)
-    
-    # For each element containing privacy text, check nearby links
-    for element in privacy_elements:
-        # Check direct child links
-        for link in element.find_all('a', href=True):
-            href = link['href'].lower()
-            text = link.text.lower().strip()
-            
-            # Look for privacy-related links
-            if 'privacy' in text or any(term in href for term in privacy_terms):
-                # Check if this is a GitHub global privacy link
-                if is_github_repo and 'docs.github.com' in link['href']:
-                    candidate_links.append((urljoin(url, link['href']), 2, "global_privacy"))
-                else:
-                    privacy_link = urljoin(url, link['href'])
-                    candidate_links.append((privacy_link, 9, "contextual_link"))
-                    
-        # Check sibling elements for links
-        if element.next_sibling:
-            for link in element.next_sibling.find_all('a', href=True) if hasattr(element.next_sibling, 'find_all') else []:
-                href = link['href'].lower()
-                text = link.text.lower().strip()
-                
-                if 'privacy' in text or any(term in href for term in privacy_terms):
-                    if is_github_repo and 'docs.github.com' in link['href']:
-                        candidate_links.append((urljoin(url, link['href']), 2, "global_privacy"))
-                    else:
-                        candidate_links.append((urljoin(url, link['href']), 8, "sibling_link"))
-    
-    # Check footers for "your privacy" pattern
-    footers = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in str(c).lower() or 'bottom' in str(c).lower()))
-    for footer in footers:
-        footer_text = footer.get_text().lower()
-        if 'privacy' in footer_text:
-            # Look for a link with "privacy" text
-            for link in footer.find_all('a', href=True):
-                if link.text.lower().strip() == 'privacy':
-                    if is_github_repo and 'docs.github.com' in link['href']:
-                        candidate_links.append((urljoin(url, link['href']), 1, "global_footer"))
-                    else:
-                        candidate_links.append((urljoin(url, link['href']), 7, "footer_link"))
-    
-    # Check the absolute bottom of the page (last few elements) where legal links often appear
-    all_elements = list(soup.find_all())
-    bottom_elements = all_elements[-30:] if len(all_elements) > 30 else all_elements
-    
-    for element in bottom_elements:
-        for link in element.find_all('a', href=True) if hasattr(element, 'find_all') else []:
-            href = link['href'].lower()
-            text = link.text.lower().strip()
-            
-            if text == 'privacy' or (any(term == text for term in privacy_terms)) or any(term in href for term in privacy_terms):
-                if is_github_repo and 'docs.github.com' in link['href']:
-                    candidate_links.append((urljoin(url, link['href']), 1, "global_footer"))
-                else:
-                    candidate_links.append((urljoin(url, link['href']), 6, "bottom_link"))
-    
-    # Look for form elements with "agree to" or "data" phrases, and nearby links
-    for form in soup.find_all('form'):
-        form_text = form.get_text().lower()
-        if ('privacy' in form_text or 'data' in form_text) and 'agree' in form_text:
-            for link in form.find_all('a', href=True):
-                if 'privacy' in link.text.lower() or any(term in link['href'].lower() for term in privacy_terms):
-                    candidate_links.append((urljoin(url, link['href']), 8, "form_link"))
-    
-    # First priority: Look for links with exact matches in text or href
-    for link in soup.find_all('a', href=True):
-        href = link['href'].lower()
-        text = link.text.lower().strip()
-        
-        # Skip empty links or javascript links
-        if not href or href.startswith('javascript:') or href == '#':
-            continue
-            
-        # Check for exact matches in text
-        if any(text == term for term in privacy_terms):
-            if is_github_repo and 'docs.github.com' in link['href']:
-                candidate_links.append((urljoin(url, link['href']), 1, "global_footer"))
-            else:
-                candidate_links.append((urljoin(url, link['href']), 7, "exact_text_match"))
-            
-        # Check for exact matches in href
-        if any(term in href.split('/') for term in privacy_terms) or any(term in href.split('-') for term in privacy_terms):
-            if is_github_repo and 'docs.github.com' in link['href']:
-                candidate_links.append((urljoin(url, link['href']), 1, "global_footer"))
-            else:
-                candidate_links.append((urljoin(url, link['href']), 6, "href_match"))
-    
-    # Second priority: Look for partial matches if no exact match found
-    for link in soup.find_all('a', href=True):
-        href = link['href'].lower()
-        text = link.text.lower().strip()
-        
-        # Skip empty links or javascript links
-        if not href or href.startswith('javascript:') or href == '#':
-            continue
-            
-        # Check for Privacy terms in text or href
-        if any(term in text for term in privacy_terms) or any(term in href for term in privacy_terms):
-            # Avoid false positives like "financial privacy" or "private repositories"
-            if not any(false_term in href for false_term in ['financial privacy', 'private repo']):
-                if is_github_repo and 'docs.github.com' in link['href']:
-                    candidate_links.append((urljoin(url, link['href']), 1, "global_footer"))
-                else:
-                    candidate_links.append((urljoin(url, link['href']), 5, "partial_match"))
-    
-    # Third priority: Look specifically in footer and legal sections
-    for selector in footer_selectors:
+    def get_domain_score(href: str) -> float:
+        """Calculate domain relevance score."""
         try:
-            footer_elements = soup.select(selector)
-            for footer in footer_elements:
-                for link in footer.find_all('a', href=True):
-                    href = link['href'].lower()
-                    text = link.text.lower().strip()
-                    
-                    if any(term in text for term in privacy_terms) or any(term in href for term in privacy_terms):
-                        if is_github_repo and 'docs.github.com' in link['href']:
-                            candidate_links.append((urljoin(url, link['href']), 1, "global_footer"))
-                        else:
-                            candidate_links.append((urljoin(url, link['href']), 4, "footer_area"))
-        except:
-            # Skip any CSS selector errors
-            continue
+            href_domain = urlparse(href).netloc.lower()
+            if href_domain == base_domain:
+                return 2.0  # Highest score for exact domain match
+            elif href_domain.endswith('.' + base_domain) or base_domain.endswith('.' + href_domain):
+                return 1.5  # Good score for subdomain relationship
+            elif any(known_domain in href_domain for known_domain in [
+                'voxmedia.com',  # The Verge and other Vox Media sites
+                'wordpress.com',  # WordPress hosted sites
+                'squarespace.com',  # Squarespace hosted sites
+                'wixsite.com',  # Wix hosted sites
+                'shopify.com',  # Shopify stores
+                'zendesk.com',  # Common help center host
+                'helpscoutdocs.com',  # Help Scout hosted docs
+                'google.com',  # Google services
+                'facebook.com',  # Facebook services
+                'apple.com',  # Apple services
+                'amazon.com',  # Amazon services
+                'github.com',  # GitHub services
+                'microsoft.com'  # Microsoft services
+            ]):
+                return 1.0  # Known trusted domains
+            return 0.0  # Unknown external domain
+        except Exception:
+            return -1.0  # Invalid URL
+
+    # Exact match patterns (highest priority)
+    exact_patterns = [
+        r'\bprivacy[-\s]policy\b',
+        r'\bdata[-\s]protection\b',
+        r'\bprivacy[-\s]notice\b',
+        r'\bdata[-\s]policy\b',
+        r'\bcookie[-\s]policy\b',
+        r'\bprivacy[-\s]statement\b',
+        r'\bgdpr\b'
+    ]
     
-    # Fourth priority: Look for links near "Terms of Service" mentions
-    tos_links = []
+    # Strong URL patterns
+    strong_url_patterns = [
+        '/privacy-policy/',
+        '/privacy/',
+        '/data-protection/',
+        '/data-privacy/',
+        '/privacy-notice/',
+        '/cookie-policy/',
+        '/gdpr/',
+        '/data-policy/'
+    ]
+    
+    # Strong penalties for likely non-privacy content
+    penalties = [
+        ('/blog/', -5.0),
+        ('/news/', -5.0),
+        ('/article/', -5.0),
+        ('/press/', -5.0),
+        ('/2023/', -5.0),
+        ('/2024/', -5.0),
+        ('/posts/', -5.0),
+        ('/category/', -5.0),
+        ('/tag/', -5.0),
+        ('/search/', -5.0),
+        ('/product/', -5.0),
+        ('/services/', -5.0),
+        ('/solutions/', -5.0),
+        ('/ai/', -5.0),
+        ('/cloud/', -5.0),
+        ('/digital/', -5.0),
+        ('/enterprise/', -5.0),
+        ('/platform/', -5.0),
+        ('/technology/', -5.0),
+        ('/consulting/', -5.0),
+        ('/about/', -3.0),
+        ('/contact/', -3.0)
+    ]
+    
+    # Process all links
+    candidates = []
+    
     for link in soup.find_all('a', href=True):
-        text = link.text.lower().strip()
-        href = link['href'].lower()
-        if 'terms' in text or 'terms' in href or 'tos' in href:
-            tos_links.append(link)
-    
-    # If we found terms links, check for privacy links near them (siblings or within same parent)
-    for tos_link in tos_links:
-        # Check siblings
-        for sibling in tos_link.parent.find_all('a', href=True):
-            if sibling == tos_link:
+        href = link.get('href', '').strip()
+        if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+            continue
+            
+        try:
+            absolute_url = urljoin(url, href)
+            link_text = ' '.join([
+                link.get_text().strip(),
+                link.get('title', '').strip(),
+                link.get('aria-label', '').strip()
+            ]).lower()
+            
+            # Skip empty or very short link text
+            if len(link_text.strip()) < 3:
                 continue
-            text = sibling.text.lower().strip()
-            href = sibling['href'].lower()
-            
-            if (any(term == text for term in privacy_terms) or 
-                any(term in href for term in privacy_terms)):
-                if is_github_repo and 'docs.github.com' in sibling['href']:
-                    candidate_links.append((urljoin(url, sibling['href']), 2, "global_near_tos"))
-                else:
-                    candidate_links.append((urljoin(url, sibling['href']), 6, "near_tos"))
-            
-        # Check parent's siblings (for multi-level structures)
-        try:
-            for parent_sibling in tos_link.parent.parent.find_all('a', href=True):
-                if parent_sibling == tos_link:
-                    continue
-                text = parent_sibling.text.lower().strip()
-                href = parent_sibling['href'].lower()
                 
-                if (any(term == text for term in privacy_terms) or 
-                    any(term in href for term in privacy_terms)):
-                    if is_github_repo and 'docs.github.com' in parent_sibling['href']:
-                        candidate_links.append((urljoin(url, parent_sibling['href']), 2, "global_near_tos"))
-                    else:
-                        candidate_links.append((urljoin(url, parent_sibling['href']), 5, "parent_sibling_tos"))
-        except:
-            pass
+            # Calculate base score
+            score = 0.0
             
-        # Check in surrounding elements
-        try:
-            parent_element = tos_link.parent
+            # Domain score
+            domain_score = get_domain_score(absolute_url)
+            if domain_score < 0:  # Skip invalid URLs
+                continue
             
-            # Check previous and next elements
-            for element in [parent_element.previous_sibling, parent_element.next_sibling]:
-                if element and hasattr(element, 'find_all'):
-                    for link in element.find_all('a', href=True):
-                        text = link.text.lower().strip()
-                        href = link['href'].lower()
-                        
-                        if (any(term == text for term in privacy_terms) or 
-                            any(term in href for term in privacy_terms)):
-                            if is_github_repo and 'docs.github.com' in link['href']:
-                                candidate_links.append((urljoin(url, link['href']), 2, "global_near_tos"))
-                            else:
-                                candidate_links.append((urljoin(url, link['href']), 5, "surrounding_tos"))
-        except:
-            pass
-    
-    # Fifth priority: Look for typical links that contain words related to privacy or GDPR
-    for link in soup.find_all('a', href=True):
-        href = link['href'].lower()
-        
-        if re.search(r'/(privacy|data|cookies|confidential|gdpr)(/|$)', href):
-            if is_github_repo and 'docs.github.com' in link['href']:
-                candidate_links.append((urljoin(url, link['href']), 1, "global_regex"))
-            else:
-                candidate_links.append((urljoin(url, link['href']), 3, "regex_match"))
-    
-    # NEW: Filter out links that are likely news articles or blog posts rather than privacy policies
-    filtered_candidates = []
-    for link_url, score, method in candidate_links:
-        parsed_link = urlparse(link_url)
-        path = parsed_link.path.lower()
-        
-        # Check for date patterns in URL path (common in news/blog URLs)
-        has_date_pattern = re.search(r'/20\d\d/\d\d?/|/\d{4}-\d{2}-\d{2}|/news/\d+/', path)
-        
-        # Check for news/article indicators in URL
-        news_indicators = ['article', 'post', 'blog', 'news', '/story/', '/stories/', 
-                          'press-release', '/report/', '/posts/', '/tag/']
-        is_likely_news = any(indicator in path for indicator in news_indicators)
-        
-        # If it's a news/blog URL, significantly reduce its score
-        if has_date_pattern or is_likely_news:
-            # Still include it, but with a much lower score
-            filtered_candidates.append((link_url, score - 8, f"{method}_filtered"))
-            logger.info(f"Filtered likely news/blog URL: {link_url}")
-        else:
-            # Not a news URL, keep the original score
-            filtered_candidates.append((link_url, score, method))
-    
-    # Sort the candidates by score (highest first)
-    sorted_candidates = sorted(filtered_candidates, key=lambda x: x[1], reverse=True)
-    
-    # For debugging, log the top candidates
-    for i, (candidate_url, score, method) in enumerate(sorted_candidates[:5]):
-        logger.info(f"Candidate {i+1}: {candidate_url} (score: {score}, method: {method})")
-    
-    # Choose the highest scoring candidate
-    privacy_link = sorted_candidates[0][0] if sorted_candidates else None
-    
-    # Validate the URL
-    if privacy_link:
-        # Make sure it's not pointing to a different domain (unless it's a privacy subdomain)
-        privacy_domain = urlparse(privacy_link).netloc
-        original_domain = urlparse(original_url).netloc
-        
-        if privacy_domain and original_domain:
-            base_domain = original_domain
-            if base_domain.startswith('www.'):
-                base_domain = base_domain[4:]
+            # Check for exact matches in text (highest priority)
+            if any(re.search(pattern, link_text) for pattern in exact_patterns):
+                score += 5.0
             
-            root_domain = get_root_domain(original_domain)
-            privacy_root_domain = get_root_domain(privacy_domain)
-            
-            # Allow certain scenarios:
-            # 1. Same domain
-            # 2. Privacy subdomain (privacy.example.com)
-            # 3. Legal subdomain (legal.example.com)
-            # 4. Policies subdomain (policies.example.com)
-            # 5. Same root domain (different subdomains but same base)
-            # 6. Special case for GitHub to allow docs.github.com from github.com
-            # 7. Domain likely for privacy policies based on path structure
-            # 8. If the link text explicitly mentions the site (suggesting it's legitimate)
-            
-            allowed = False
-            
-            if privacy_domain == original_domain:
-                allowed = True
-                logger.info(f"Privacy link on same domain: {privacy_domain}")
-            elif privacy_domain.startswith('privacy.') and original_domain.endswith(privacy_domain[8:]):
-                allowed = True
-                logger.info(f"Privacy link on privacy subdomain: {privacy_domain}")
-            elif privacy_domain.startswith('legal.') and original_domain.endswith(privacy_domain[6:]):
-                allowed = True
-                logger.info(f"Privacy link on legal subdomain: {privacy_domain}")
-            elif privacy_domain.startswith('policies.') and original_domain.endswith(privacy_domain[9:]):
-                allowed = True
-                logger.info(f"Privacy link on policies subdomain: {privacy_domain}")
-            elif root_domain and privacy_root_domain and root_domain == privacy_root_domain:
-                allowed = True
-                logger.info(f"Privacy link on same root domain: {root_domain}")
-            # Special case for GitHub
-            elif 'github.com' in original_domain and privacy_domain == 'docs.github.com':
-                allowed = True
-                logger.info(f"GitHub special case: docs.github.com")
-            # Special case for NodeJS
-            elif 'nodejs.org' in original_domain and 'openjsf.org' in privacy_domain:
-                allowed = True
-                logger.info(f"NodeJS special case: {privacy_domain} is allowed for nodejs.org")
-            # Allow domains that clearly indicate privacy policies in their name
-            elif any(term in privacy_domain for term in ['privacy-policy', 'privacypolicy', 'privacy.', 'gdpr.', 'legal.']):
-                allowed = True
-                logger.info(f"Privacy link domain contains clear privacy indicators: {privacy_domain}")
-            # Check for conventional privacy policy paths
-            elif re.search(r'/(privacy|legal|terms|privacypolicy|privacy-policy|policies)(/|$)', urlparse(privacy_link).path.lower()):
-                allowed = True
-                logger.info(f"Privacy link follows conventional privacy policy URL structure: {privacy_link}")
-            # Check for foundation connections
-            elif any(foundation in privacy_domain for foundation in ['foundation.', '.foundation', 'openjsf', 'apache.org']):
-                # Many projects use foundation domains for their official policies
-                allowed = True
-                logger.info(f"Privacy link on likely foundation domain: {privacy_domain}")
-            # Check if it's a .org domain which often host policies for other domains
-            elif privacy_domain.endswith('.org') and 'policy' in urlparse(privacy_link).path.lower():
-                allowed = True
-                logger.info(f"Privacy link on .org domain with policy in path: {privacy_domain}")
-            
-            # If the link is still not allowed but looks like a corporate domain for a parent company, allow it
-            if not allowed:
-                # Count link occurrences to see if it's likely an official corporate domain
-                link_count = 0
-                corporate_indicators = ['terms', 'legal', 'about', 'contact', 'policy']
+            # Check URL patterns
+            href_lower = absolute_url.lower()
+            if any(pattern in href_lower for pattern in strong_url_patterns):
+                score += 3.0
+            elif '/privacy' in href_lower or '/data' in href_lower or '/gdpr' in href_lower:
+                score += 2.0
                 
-                for link in soup.find_all('a', href=True):
-                    href = link.get('href')
-                    if href and privacy_domain in href:
-                        link_count += 1
-                        # If there are many links to this domain, it's likely legitimate
-                        if link_count >= 3:
-                            allowed = True
-                            logger.info(f"Privacy link domain appears multiple times in page, likely legitimate: {privacy_domain}")
-                            break
-                    
-                    # Check if any link text suggests this is a parent company
-                    link_text = link.text.lower().strip()
-                    if 'vox media' in link_text or 'parent company' in link_text or 'our company' in link_text:
-                        if re.search(privacy_domain, href, re.IGNORECASE):
-                            allowed = True
-                            logger.info(f"Privacy link domain matched text suggesting a parent company: {privacy_domain}")
-                            break
+            # Check link text for partial matches
+            if 'privacy' in link_text.split() or 'gdpr' in link_text.split():
+                score += 2.0
+            elif 'data' in link_text or 'cookie' in link_text:
+                score += 1.0
                 
-                # Check if domain appears to be corporate/company domain
-                if not allowed and re.search(r'(media|inc|corp|company|digital|group|holdings)', privacy_domain):
-                    # Look for other corporate indicators in the URL
-                    if any(indicator in urlparse(privacy_link).path.lower() for indicator in corporate_indicators):
-                        allowed = True
-                        logger.info(f"Privacy link appears to be on a corporate domain with policy indicators: {privacy_domain}")
+            # Apply penalties
+            for pattern, penalty in penalties:
+                if pattern in href_lower:
+                    score += penalty
             
-            if not allowed:
-                logger.warning(f"Rejecting privacy link with different domain: {privacy_domain} (original: {original_domain})")
-                privacy_link = None  # Reject links to unrelated domains
-            else:
-                logger.info(f"Accepted privacy link: {privacy_link}")
+            # Additional penalties for service/product pages
+            service_indicators = ['service', 'product', 'solution', 'platform', 'technology', 'consulting', 'ai', 'cloud', 'digital']
+            if any(indicator in link_text for indicator in service_indicators):
+                score -= 5.0
+            
+            # Calculate final score with domain weight
+            final_score = (score * 2.0) + (domain_score * 1.5)
+            
+            # Higher threshold for acceptance
+            if final_score > 5.0:  # Increased from 3.0 to 5.0
+                candidates.append((absolute_url, final_score))
+                
+        except Exception:
+            continue
     
-    return privacy_link
+    # Return the highest scoring candidate
+    if candidates:
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        highest_score = candidates[0][1]
+        
+        # Only return if the score is significantly high
+        if highest_score > 7.0:  # Added minimum threshold
+            return candidates[0][0]
+    
+    return None
 
 def get_root_domain(domain: str) -> str:
     """Extract root domain from a domain name."""
