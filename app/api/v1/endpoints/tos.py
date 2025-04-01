@@ -49,29 +49,33 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     # Get the base domain for comparison
     base_domain = urlparse(url).netloc.lower()
     
-    def is_same_domain_or_subdomain(href: str) -> bool:
-        """Check if a URL is from the same domain or its subdomain."""
+    def get_domain_score(href: str) -> float:
+        """Calculate domain relevance score."""
         try:
             href_domain = urlparse(href).netloc.lower()
-            return href_domain == base_domain or href_domain.endswith('.' + base_domain)
-        except:
-            return False
-
-    def is_valid_tos_path(path: str) -> bool:
-        """Check if a URL path is likely to be a ToS page."""
-        path = path.lower()
-        valid_patterns = [
-            '/terms',
-            '/tos',
-            '/terms-of-service',
-            '/terms-of-use',
-            '/terms-and-conditions',
-            '/legal/terms',
-            '/legal',
-            '/user-agreement',
-            '/conditions'
-        ]
-        return any(pattern in path for pattern in valid_patterns)
+            if href_domain == base_domain:
+                return 2.0  # Highest score for exact domain match
+            elif href_domain.endswith('.' + base_domain) or base_domain.endswith('.' + href_domain):
+                return 1.5  # Good score for subdomain relationship
+            elif any(known_domain in href_domain for known_domain in [
+                'voxmedia.com',  # The Verge and other Vox Media sites
+                'wordpress.com',  # WordPress hosted sites
+                'squarespace.com',  # Squarespace hosted sites
+                'wixsite.com',  # Wix hosted sites
+                'shopify.com',  # Shopify stores
+                'zendesk.com',  # Common help center host
+                'helpscoutdocs.com',  # Help Scout hosted docs
+                'google.com',  # Google services
+                'facebook.com',  # Facebook services
+                'apple.com',  # Apple services
+                'amazon.com',  # Amazon services
+                'github.com',  # GitHub services
+                'microsoft.com'  # Microsoft services
+            ]):
+                return 1.0  # Known trusted domains
+            return 0.0  # Unknown external domain
+        except Exception:
+            return -1.0  # Invalid URL
 
     def get_link_context_score(link) -> float:
         """Calculate a score based on the link's context."""
@@ -104,25 +108,54 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         
         return score
 
-    # First pass: Look for exact matches in common ToS paths
-    for link in soup.find_all('a', href=True):
-        href = link.get('href', '').strip()
-        if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-            continue
+    def get_tos_relevance_score(href: str, link_text: str) -> float:
+        """Calculate how likely a link is to be a ToS link based on its text and URL."""
+        score = 0.0
+        href_lower = href.lower()
+        link_text_lower = link_text.lower()
+        
+        # Strong ToS indicators in URL
+        strong_url_patterns = [
+            '/terms-of-service',
+            '/terms-of-use',
+            '/terms-and-conditions',
+            '/legal/terms',
+            '/tos/',
+            '/terms/',
+        ]
+        
+        # Strong ToS indicators in text
+        strong_text_patterns = [
+            'terms of service',
+            'terms of use',
+            'terms and conditions',
+            'user agreement',
+            'legal terms'
+        ]
+        
+        # Check URL patterns
+        if any(pattern in href_lower for pattern in strong_url_patterns):
+            score += 3.0
+        elif '/legal' in href_lower or '/terms' in href_lower or '/tos' in href_lower:
+            score += 2.0
             
-        try:
-            absolute_url = urljoin(url, href)
-            parsed_url = urlparse(absolute_url)
+        # Check link text
+        if any(pattern in link_text_lower for pattern in strong_text_patterns):
+            score += 3.0
+        elif 'terms' in link_text_lower.split() or 'tos' in link_text_lower.split():
+            score += 2.0
+        elif 'legal' in link_text_lower:
+            score += 1.0
             
-            # Check if it's a valid ToS path on the same domain
-            if is_same_domain_or_subdomain(absolute_url) and is_valid_tos_path(parsed_url.path):
-                link_text = link.get_text().strip().lower()
-                if any(term in link_text for term in ['terms', 'tos', 'conditions']):
-                    return absolute_url
-        except:
-            continue
+        # Penalize likely non-ToS content
+        penalties = ['/blog/', '/news/', '/article/', '/press/', '/2023/', '/2024/', 
+                    '/posts/', '/category/', '/tag/', '/search/', '/product/']
+        if any(penalty in href_lower for penalty in penalties):
+            score -= 5.0
+            
+        return score
 
-    # Second pass: Score-based approach for less obvious matches
+    # Process all links
     candidates = []
     
     for link in soup.find_all('a', href=True):
@@ -132,46 +165,28 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
         try:
             absolute_url = urljoin(url, href)
-            if not is_same_domain_or_subdomain(absolute_url):
+            link_text = ' '.join([
+                link.get_text().strip(),
+                link.get('title', '').strip(),
+                link.get('aria-label', '').strip()
+            ])
+            
+            # Calculate scores
+            domain_score = get_domain_score(absolute_url)
+            if domain_score < 0:  # Skip invalid URLs
                 continue
                 
-            score = 0.0
-            link_text = link.get_text().strip().lower()
+            tos_score = get_tos_relevance_score(absolute_url, link_text)
+            context_score = get_link_context_score(link)
             
-            # Score based on link text
-            if 'terms of service' in link_text or 'terms of use' in link_text:
-                score += 3.0
-            elif 'terms and conditions' in link_text:
-                score += 2.5
-            elif 'terms' in link_text.split() or 'tos' in link_text.split():
-                score += 2.0
-            elif 'legal' in link_text:
-                score += 1.0
-                
-            # Score based on URL path
-            path = urlparse(absolute_url).path.lower()
-            if '/terms-of-service' in path or '/terms-of-use' in path:
-                score += 3.0
-            elif '/terms-and-conditions' in path:
-                score += 2.5
-            elif '/terms' in path or '/tos' in path:
-                score += 2.0
-            elif '/legal' in path:
-                score += 1.0
-                
-            # Add context score
-            score += get_link_context_score(link)
+            # Calculate final score with domain weight
+            final_score = (tos_score * 1.5) + (context_score * 1.0) + (domain_score * 2.0)
             
-            # Penalize if the path suggests it's not a ToS page
-            penalties = ['/blog/', '/news/', '/article/', '/press/', '/2023/', '/2024/', 
-                       '/posts/', '/category/', '/tag/', '/search/', '/product/']
-            if any(penalty in path for penalty in penalties):
-                score -= 5.0
+            # Only consider links with significant positive scores
+            if final_score > 3.0:
+                candidates.append((absolute_url, final_score))
                 
-            if score > 2.0:  # Only consider high-scoring candidates
-                candidates.append((absolute_url, score))
-                
-        except:
+        except Exception:
             continue
     
     # Return the highest scoring candidate
@@ -278,9 +293,9 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
     logger.info(f"No ToS link found for {original_url} with any method")
     response.status_code = 404
     
-    return TosResponse(
-        url=original_url,
-        success=False,
+        return TosResponse(
+            url=original_url,
+            success=False,
         message=f"No Terms of Service link found. Tried both standard scraping and JavaScript-enabled browser rendering.",
         method_used="both_failed"
     )
@@ -430,13 +445,13 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                         method_used="playwright_failed_timeout"
                     )
                 elif "Navigation failed" in str(e) or "ERR_CONNECTION" in str(e):
-                    return TosResponse(
+        return TosResponse(
                         url=url,
-                        success=False,
+            success=False,
                         message=f"Navigation failed for {url}. The site may be unavailable or blocking automated access.",
                         method_used="playwright_failed_navigation"
-                    )
-                else:
+        )
+    else:
                     return TosResponse(
                         url=url,
                         success=False,
