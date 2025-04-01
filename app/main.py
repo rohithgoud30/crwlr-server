@@ -18,10 +18,6 @@ origins = [
     "http://127.0.0.1:8000",
 ]
 
-# Add any origins from settings
-if settings.BACKEND_CORS_ORIGINS:
-    origins.extend([str(origin) for origin in settings.BACKEND_CORS_ORIGINS])
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,

@@ -17,22 +17,35 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     
     # BACKEND_CORS_ORIGINS is a comma-separated list of origins
-    BACKEND_CORS_ORIGINS: List[str] = []
+    BACKEND_CORS_ORIGINS: Union[List[str], str] = []
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
         if isinstance(v, str):
-            # Handle JSON format
-            if v.startswith("[") and v.endswith("]"):
-                try:
+            try:
+                # First try comma-separated format which is safer
+                if "," in v:
+                    return [i.strip() for i in v.split(",") if i.strip()]
+                
+                # Then try JSON format
+                if v.startswith("[") and v.endswith("]"):
                     import json
-                    return json.loads(v)
-                except Exception:
-                    pass
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return parsed
+            except Exception:
+                # If all parsing fails, return as single item
+                return [v] if v else []
             
-            # Handle comma-separated format
-            return [i.strip() for i in v.split(",") if i.strip()]
-        return v or []
+            # If string but no comma or brackets, treat as single origin
+            return [v]
+            
+        # If it's already a list, use it
+        if isinstance(v, list):
+            return v
+            
+        # Fallback to empty list
+        return []
 
 
 settings = Settings() 
