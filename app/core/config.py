@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "CRWLR API"
     ENVIRONMENT: str = "development"
     
+    # API Keys
+    GEMINI_API_KEY: str = ""
+    
     # BACKEND_CORS_ORIGINS is a comma-separated list of origins
     BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
 
