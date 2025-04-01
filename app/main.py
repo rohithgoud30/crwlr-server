@@ -10,15 +10,25 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
 )
 
-# Set up CORS middleware
+# Set up CORS middleware with explicit origins
+origins = [
+    "http://localhost:3000",  # React app
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",  # API docs
+    "http://127.0.0.1:8000",
+]
+
+# Add any origins from settings
 if settings.BACKEND_CORS_ORIGINS:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[str(origin) for origin in settings.BACKEND_CORS_ORIGINS],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    origins.extend([str(origin) for origin in settings.BACKEND_CORS_ORIGINS])
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_STR)
