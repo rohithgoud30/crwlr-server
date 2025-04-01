@@ -6,6 +6,24 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def get_root_domain(domain: str) -> str:
+    """
+    Extract the root domain from a domain string.
+    Example: 'www.example.co.uk' -> 'example.co.uk'
+            'sub.example.com' -> 'example.com'
+    """
+    parts = domain.split('.')
+    if len(parts) <= 2:
+        return domain
+        
+    # Handle special cases like co.uk, com.au, etc.
+    if parts[-2] in ['co', 'com', 'org', 'gov', 'edu'] and len(parts[-1]) == 2:
+        if len(parts) > 3:
+            return '.'.join(parts[-3:])
+        return domain
+        
+    return '.'.join(parts[-2:])
+
 def normalize_url(url: str) -> str:
     """
     Normalize URLs to ensure they're valid for request processing.
