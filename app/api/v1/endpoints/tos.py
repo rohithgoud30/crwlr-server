@@ -9,7 +9,16 @@ from typing import Optional, Any, List, Tuple
 import asyncio
 from playwright.async_api import async_playwright
 import logging
-from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page
+from .utils import (
+    normalize_url, 
+    prepare_url_variations, 
+    get_footer_score, 
+    get_domain_score, 
+    get_common_penalties, 
+    is_on_policy_page,
+    is_likely_article_link,
+    get_root_domain
+)
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -343,67 +352,5 @@ async def playwright_tos_finder(url: str) -> TosResponse:
             message=error_msg,
             method_used="playwright_failed"
         )
-
-def is_likely_article_link(href_lower: str, full_url: str) -> bool:
-    """
-    Determine if a URL is likely to be a news article rather than a ToS page.
-    
-    Args:
-        href_lower: The lowercase href attribute
-        full_url: The full URL for additional context
-    
-    Returns:
-        bool: True if the URL appears to be an article, False otherwise
-    """
-    # News article patterns in URLs
-    article_indicators = [
-        "/article/", 
-        "/news/",
-        "/story/",
-        "/blog/",
-        "/post/",
-        "/2023/",  # Year patterns
-        "/2024/",
-        "/politics/",
-        "/business/",
-        "/technology/",
-        "/science/",
-        "/health/",
-        ".html",
-        "/watch/",
-        "/video/"
-    ]
-    
-    # Common news domains (partial list)
-    news_domains = [
-        "reuters.com",
-        "nytimes.com",
-        "washingtonpost.com",
-        "cnn.com",
-        "bbc.com",
-        "forbes.com"
-    ]
-    
-    # Check if URL contains article indicators
-    for indicator in article_indicators:
-        if indicator in href_lower:
-            return True
-    
-    # Check if URL is from a known news domain
-    parsed_url = urlparse(full_url)
-    domain = parsed_url.netloc.lower()
-    for news_domain in news_domains:
-        if news_domain in domain:
-            # For news sites, be extra careful
-            # Only consider it a ToS link if it clearly has terms in the path
-            if not any(term in parsed_url.path.lower() for term in ['/terms', '/tos', '/legal']):
-                return True
-    
-    # Check for date patterns in URL paths
-    date_pattern = re.compile(r'/\d{4}/\d{1,2}/\d{1,2}/')
-    if date_pattern.search(href_lower):
-        return True
-    
-    return False
 
 # Rest of the file stays the same

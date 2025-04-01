@@ -172,6 +172,73 @@ def get_common_penalties() -> list:
         ('/consulting/', -5.0)
     ]
 
+def is_likely_article_link(href_lower: str, full_url: str) -> bool:
+    """
+    Determine if a URL is likely to be a news article rather than a policy page.
+    
+    Args:
+        href_lower: The lowercase href attribute
+        full_url: The full URL for additional context
+    
+    Returns:
+        bool: True if the URL appears to be an article, False otherwise
+    """
+    # News article patterns in URLs
+    article_indicators = [
+        "/article/", 
+        "/news/",
+        "/story/",
+        "/blog/",
+        "/post/",
+        "/2023/",  # Year patterns
+        "/2024/",
+        "/politics/",
+        "/business/",
+        "/technology/",
+        "/science/",
+        "/health/",
+        ".html",
+        "/watch/",
+        "/video/"
+    ]
+    
+    # Check if URL contains article indicators
+    for indicator in article_indicators:
+        if indicator in href_lower:
+            return True
+    
+    # Check for date patterns in URL paths
+    date_pattern = re.compile(r'/\d{4}/\d{1,2}/\d{1,2}/')
+    if date_pattern.search(href_lower):
+        return True
+    
+    # Check if URL is from a known news domain
+    parsed_url = urlparse(full_url)
+    domain = parsed_url.netloc.lower()
+    
+    # Get the root domain for comparison
+    root_domain = get_root_domain(domain)
+    
+    # Only consider it a policy link if it clearly has policy terms in the path
+    if root_domain in [
+        'reuters.com',
+        'nytimes.com',
+        'washingtonpost.com',
+        'cnn.com',
+        'bbc.com',
+        'forbes.com',
+        'bloomberg.com',
+        'wsj.com',
+        'ft.com',
+        'economist.com'
+    ]:
+        # For news sites, be extra careful
+        # Only consider it a policy link if it clearly has policy terms in the path
+        if not any(term in parsed_url.path.lower() for term in ['/privacy', '/terms', '/tos', '/legal']):
+            return True
+    
+    return False
+
 def is_on_policy_page(url: str, policy_type: str) -> bool:
     """Check if we're already on a policy page."""
     base_url_path = urlparse(url).path.lower()
