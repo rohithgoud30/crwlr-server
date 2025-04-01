@@ -262,7 +262,98 @@ def is_on_policy_page(url: str, policy_type: str) -> bool:
     base_url_path = urlparse(url).path.lower()
     
     if policy_type == 'tos':
-        return any(term in base_url_path for term in ['/legal', '/terms', '/tos'])
+        # Check ToS-specific terms first
+        if any(term in base_url_path for term in ['/terms', '/tos', '/terms-of-service', '/terms-of-use']):
+            return True
+        # Then check general legal terms
+        if any(term in base_url_path for term in ['/legal']):
+            return True
     elif policy_type == 'privacy':
-        return any(term in base_url_path for term in ['/legal', '/privacy', '/data-protection', '/gdpr'])
+        # Check privacy-specific terms first
+        if any(term in base_url_path for term in ['/privacy', '/privacy-policy', '/data-protection', '/gdpr']):
+            return True
+        # Then check general legal terms
+        if any(term in base_url_path for term in ['/legal']):
+            return True
     return False
+
+def get_policy_patterns(policy_type: str) -> tuple:
+    """
+    Get exact match patterns and URL patterns based on policy type.
+    Returns tuple of (exact_patterns, strong_url_patterns).
+    """
+    if policy_type == 'tos':
+        # ToS-specific patterns first, then legal terms
+        exact_patterns = [
+            r'\bterms[-\s]of[-\s]service\b',
+            r'\bterms[-\s]of[-\s]use\b',
+            r'\bterms[-\s]and[-\s]conditions\b',
+            r'\buser[-\s]agreement\b',
+            r'\btos\b',
+            r'\blegal[-\s]terms\b'
+        ]
+        
+        strong_url_patterns = [
+            '/terms-of-service/',
+            '/terms-of-use/',
+            '/terms-and-conditions/',
+            '/terms/',
+            '/tos/',
+            '/legal/terms/'
+        ]
+    else:  # privacy
+        # Privacy-specific patterns first, then legal terms
+        exact_patterns = [
+            r'\bprivacy[-\s]policy\b',
+            r'\bdata[-\s]protection\b',
+            r'\bprivacy[-\s]notice\b',
+            r'\bprivacy[-\s]statement\b',
+            r'\bgdpr\b',
+            r'\bdata[-\s]privacy\b'
+        ]
+        
+        strong_url_patterns = [
+            '/privacy-policy/',
+            '/privacy/',
+            '/data-protection/',
+            '/privacy-notice/',
+            '/gdpr/',
+            '/legal/privacy/'
+        ]
+    
+    return exact_patterns, strong_url_patterns
+
+def get_policy_score(link_text: str, href_lower: str, policy_type: str) -> float:
+    """
+    Calculate score based on policy-specific terms in link text and URL.
+    """
+    score = 0.0
+    
+    if policy_type == 'tos':
+        # Check link text for ToS terms first
+        if any(term in link_text.split() for term in ['terms', 'tos']):
+            score += 3.0
+        # Then check for legal terms
+        elif 'legal' in link_text or 'conditions' in link_text:
+            score += 2.0
+            
+        # Check URL path for ToS terms
+        if any(term in href_lower for term in ['/terms', '/tos']):
+            score += 2.0
+        elif '/legal' in href_lower:
+            score += 1.0
+    else:  # privacy
+        # Check link text for privacy terms first
+        if any(term in link_text.split() for term in ['privacy', 'gdpr']):
+            score += 3.0
+        # Then check for legal/data terms
+        elif 'data' in link_text or 'legal' in link_text:
+            score += 2.0
+            
+        # Check URL path for privacy terms
+        if any(term in href_lower for term in ['/privacy', '/gdpr', '/data-protection']):
+            score += 2.0
+        elif '/legal' in href_lower:
+            score += 1.0
+    
+    return score

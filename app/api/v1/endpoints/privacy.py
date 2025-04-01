@@ -9,7 +9,7 @@ from typing import Optional, Any, List, Tuple
 import asyncio
 from playwright.async_api import async_playwright
 import logging
-from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page
+from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -810,24 +810,8 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     # Check if we're already on a legal/privacy page
     is_legal_page = is_on_policy_page(url, 'privacy')
     
-    # Exact match patterns (highest priority)
-    exact_patterns = [
-        r'\bprivacy[-\s]policy\b',
-        r'\bdata[-\s]protection\b',
-        r'\bprivacy[-\s]notice\b',
-        r'\bprivacy[-\s]statement\b',
-        r'\bgdpr\b'
-    ]
-    
-    # Strong URL patterns
-    strong_url_patterns = [
-        '/privacy-policy/',
-        '/privacy/',
-        '/data-protection/',
-        '/privacy-notice/',
-        '/gdpr/',
-        '/legal/privacy/'
-    ]
+    # Get privacy-specific patterns
+    exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
     
     # Process all links
     candidates = []
@@ -874,19 +858,9 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             href_lower = absolute_url.lower()
             if any(pattern in href_lower for pattern in strong_url_patterns):
                 score += 4.0  # Increased weight for strong URL patterns
-            elif '/privacy' in href_lower or '/gdpr' in href_lower or '/legal' in href_lower:
-                score += 3.0
                 
-            # Check link text for partial matches
-            if 'privacy' in link_text.split() or 'gdpr' in link_text.split():
-                score += 3.0
-            elif 'legal' in link_text or 'data' in link_text:
-                score += 2.0
-                
-            # Check for privacy-specific terms in URL path
-            path = urlparse(absolute_url).path.lower()
-            if any(term in path for term in ['privacy', 'gdpr', 'data-protection']):
-                score += 2.0
+            # Get policy-specific score
+            score += get_policy_score(link_text, href_lower, 'privacy')
                 
             # Apply penalties from shared utilities
             for pattern, penalty in get_common_penalties():

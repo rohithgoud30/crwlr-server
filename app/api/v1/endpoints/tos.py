@@ -17,7 +17,9 @@ from .utils import (
     get_common_penalties, 
     is_on_policy_page,
     is_likely_article_link,
-    get_root_domain
+    get_root_domain,
+    get_policy_patterns,
+    get_policy_score
 )
 
 # Filter out the XML parsed as HTML warning
@@ -57,25 +59,8 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     # Check if we're already on a legal/terms page
     is_legal_page = is_on_policy_page(url, 'tos')
     
-    # Exact match patterns (highest priority)
-    exact_patterns = [
-        r'\bterms[-\s]of[-\s]service\b',
-        r'\bterms[-\s]of[-\s]use\b',
-        r'\bterms[-\s]and[-\s]conditions\b',
-        r'\buser[-\s]agreement\b',
-        r'\blegal[-\s]terms\b',
-        r'\btos\b'
-    ]
-    
-    # Strong URL patterns
-    strong_url_patterns = [
-        '/terms-of-service/',
-        '/terms-of-use/',
-        '/terms-and-conditions/',
-        '/legal/terms/',
-        '/tos/',
-        '/terms/'
-    ]
+    # Get ToS-specific patterns
+    exact_patterns, strong_url_patterns = get_policy_patterns('tos')
     
     # Process all links
     candidates = []
@@ -122,19 +107,9 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             href_lower = absolute_url.lower()
             if any(pattern in href_lower for pattern in strong_url_patterns):
                 score += 4.0  # Increased weight for strong URL patterns
-            elif '/terms' in href_lower or '/tos' in href_lower or '/legal' in href_lower:
-                score += 3.0
                 
-            # Check link text for partial matches
-            if 'terms' in link_text.split() or 'tos' in link_text.split():
-                score += 3.0
-            elif 'legal' in link_text or 'conditions' in link_text:
-                score += 2.0
-                
-            # Check for terms-specific terms in URL path
-            path = urlparse(absolute_url).path.lower()
-            if any(term in path for term in ['terms', 'tos', 'legal-terms']):
-                score += 2.0
+            # Get policy-specific score
+            score += get_policy_score(link_text, href_lower, 'tos')
                 
             # Apply penalties from shared utilities
             for pattern, penalty in get_common_penalties():
