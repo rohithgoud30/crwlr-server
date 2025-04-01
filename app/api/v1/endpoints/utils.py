@@ -262,19 +262,17 @@ def is_on_policy_page(url: str, policy_type: str) -> bool:
     base_url_path = urlparse(url).path.lower()
     
     if policy_type == 'tos':
-        # Check ToS-specific terms first
-        if any(term in base_url_path for term in ['/terms', '/tos', '/terms-of-service', '/terms-of-use']):
+        # Check ToS-specific terms first and ONLY
+        tos_terms = ['/terms', '/tos', '/terms-of-service', '/terms-of-use', '/user-agreement']
+        if any(term in base_url_path for term in tos_terms):
             return True
-        # Then check general legal terms
-        if any(term in base_url_path for term in ['/legal']):
-            return True
+        # Do not check legal terms for ToS - we want to be strict
     elif policy_type == 'privacy':
-        # Check privacy-specific terms first
-        if any(term in base_url_path for term in ['/privacy', '/privacy-policy', '/data-protection', '/gdpr']):
+        # Check privacy-specific terms first and ONLY
+        privacy_terms = ['/privacy', '/privacy-policy', '/data-protection', '/gdpr', '/data-privacy']
+        if any(term in base_url_path for term in privacy_terms):
             return True
-        # Then check general legal terms
-        if any(term in base_url_path for term in ['/legal']):
-            return True
+        # Do not check legal terms for privacy - we want to be strict
     return False
 
 def get_policy_patterns(policy_type: str) -> tuple:
@@ -326,34 +324,44 @@ def get_policy_patterns(policy_type: str) -> tuple:
 def get_policy_score(link_text: str, href_lower: str, policy_type: str) -> float:
     """
     Calculate score based on policy-specific terms in link text and URL.
+    Heavily prioritizes specific terms over general legal terms.
     """
     score = 0.0
     
     if policy_type == 'tos':
-        # Check link text for ToS terms first
-        if any(term in link_text.split() for term in ['terms', 'tos']):
-            score += 3.0
-        # Then check for legal terms
-        elif 'legal' in link_text or 'conditions' in link_text:
-            score += 2.0
+        # Check link text for ToS terms first with very high score
+        tos_terms = ['terms of service', 'terms of use', 'terms', 'tos', 'user agreement']
+        if any(term in link_text.lower() for term in tos_terms):
+            score += 10.0  # Very high score for ToS terms
+        
+        # Check URL path for ToS terms with high score
+        if any(term in href_lower for term in ['/terms', '/tos', '/terms-of-service', '/terms-of-use']):
+            score += 8.0  # High score for ToS URLs
             
-        # Check URL path for ToS terms
-        if any(term in href_lower for term in ['/terms', '/tos']):
-            score += 2.0
-        elif '/legal' in href_lower:
-            score += 1.0
+        # Heavily penalize legal paths when looking for ToS
+        if '/legal' in href_lower and not any(term in href_lower for term in ['/terms', '/tos']):
+            score -= 5.0  # Strong penalty for legal without terms
+            
+        # Small boost for general terms, but much less than ToS terms
+        if 'conditions' in link_text.lower() or 'legal' in link_text.lower():
+            score += 0.5
+            
     else:  # privacy
-        # Check link text for privacy terms first
-        if any(term in link_text.split() for term in ['privacy', 'gdpr']):
-            score += 3.0
-        # Then check for legal/data terms
-        elif 'data' in link_text or 'legal' in link_text:
-            score += 2.0
+        # Check link text for privacy terms first with very high score
+        privacy_terms = ['privacy', 'gdpr', 'data protection', 'data privacy']
+        if any(term in link_text.lower() for term in privacy_terms):
+            score += 10.0  # Very high score for privacy terms
+        
+        # Check URL path for privacy terms with high score
+        if any(term in href_lower for term in ['/privacy', '/gdpr', '/data-protection', '/data-privacy']):
+            score += 8.0  # High score for privacy URLs
             
-        # Check URL path for privacy terms
-        if any(term in href_lower for term in ['/privacy', '/gdpr', '/data-protection']):
-            score += 2.0
-        elif '/legal' in href_lower:
-            score += 1.0
+        # Heavily penalize legal paths when looking for privacy
+        if '/legal' in href_lower and not any(term in href_lower for term in ['/privacy', '/gdpr', '/data-protection']):
+            score -= 5.0  # Strong penalty for legal without privacy
+            
+        # Small boost for data-related terms, but much less than privacy terms
+        if 'data' in link_text.lower():
+            score += 0.5
     
     return score

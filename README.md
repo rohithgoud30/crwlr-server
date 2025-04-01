@@ -181,31 +181,19 @@ app/
   - Response for success:
     ```json
     {
-      "url": "https://example.com/specific/page",
-      "pp_url": "https://example.com/privacy",
-      "success": true,
-      "message": "Privacy Policy link found on final destination page: https://example.com/specific/page",
-      "method_used": "standard" // or "playwright" if JS rendering was used
-    }
-    ```
-  - Response for App Store app success:
-    ```json
-    {
-      "url": "https://apps.apple.com/us/app/app-name/id123456789",
+      "url": "https://developer.com",
       "pp_url": "https://developer.com/privacy",
       "success": true,
-      "message": "Privacy Policy link found for app: App Name",
-      "method_used": "app_store_standard"
+      "message": "Privacy Policy link found on final destination page: https://developer.com"
     }
     ```
   - Response for errors:
     ```json
     {
-      "url": "https://example.com/specific/page",
+      "url": "https://example.com",
       "pp_url": null,
       "success": false,
-      "message": "[Detailed error message explaining what went wrong]",
-      "method_used": "standard_failed" // or other failure type
+      "message": "No Privacy Policy link found with standard method on the final destination page: https://example.com."
     }
     ```
 

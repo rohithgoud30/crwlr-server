@@ -35,7 +35,7 @@ class PrivacyRequest(BaseModel):
 
 class PrivacyResponse(BaseModel):
     url: str
-    privacy_url: Optional[str] = None
+    pp_url: Optional[str] = None
     success: bool
     message: str
     method_used: str = "standard"  # Indicates which method was used to find the privacy policy
@@ -156,7 +156,7 @@ async def find_privacy(request: PrivacyRequest, response: Response) -> PrivacyRe
     # Try the standard method first (requests + BeautifulSoup)
     standard_result = await standard_privacy_finder(variations_to_try, headers, session)
     if standard_result.success:
-        logger.info(f"Found privacy link with standard method: {standard_result.privacy_url}")
+        logger.info(f"Found privacy link with standard method: {standard_result.pp_url}")
         return standard_result
     
     # If standard method fails, try with Playwright
@@ -171,12 +171,12 @@ async def find_privacy(request: PrivacyRequest, response: Response) -> PrivacyRe
         logger.info(f"Playwright failed on exact URL, trying base domain: {base_domain}")
         base_playwright_result = await playwright_privacy_finder(base_domain)
         if base_playwright_result.success:
-            logger.info(f"Found privacy link with Playwright on base domain: {base_playwright_result.privacy_url}")
+            logger.info(f"Found privacy link with Playwright on base domain: {base_playwright_result.pp_url}")
             return base_playwright_result
     
     # Return the Playwright result if it found something, otherwise return the standard result
     if playwright_result.success:
-        logger.info(f"Found privacy link with Playwright: {playwright_result.privacy_url}")
+        logger.info(f"Found privacy link with Playwright: {playwright_result.pp_url}")
         return playwright_result
     
     # If both methods failed, include a message about what was tried
@@ -254,7 +254,7 @@ async def handle_app_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                 
                 return PrivacyResponse(
                     url=url,
-                    privacy_url=pp_url,
+                    pp_url=pp_url,
                     success=True,
                     message=f"Found privacy policy for {app_info} in App Store privacy section",
                     method_used="app_store_privacy_section"
@@ -304,7 +304,7 @@ async def handle_app_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                             
                             return PrivacyResponse(
                                 url=url,
-                                privacy_url=final_url,
+                                pp_url=final_url,
                                 success=True,
                                 message=f"Found privacy policy for {app_info} in App Store privacy section using Playwright",
                                 method_used="app_store_playwright_section"
@@ -327,7 +327,7 @@ async def handle_app_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                         
                         return PrivacyResponse(
                             url=url,
-                            privacy_url=final_url,
+                            pp_url=final_url,
                             success=True,
                             message=f"Found privacy policy for {app_info} using Playwright",
                             method_used="app_store_playwright_general"
@@ -414,7 +414,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
             
             return PrivacyResponse(
                 url=url,
-                privacy_url=pp_url,
+                pp_url=pp_url,
                 success=True,
                 message=f"Found privacy policy for {app_info} on data safety page",
                 method_used="play_store_data_safety_direct"
@@ -450,12 +450,12 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                         logger.info(f"Found app-specific privacy policy link with Playwright: {href}")
                 
                 if app_specific_privacy_elements:
-                    privacy_url = await app_specific_privacy_elements[0].get_attribute("href")
-                    logger.info(f"Found app-specific privacy policy link on data safety page: {privacy_url}")
+                    pp_url = await app_specific_privacy_elements[0].get_attribute("href")
+                    logger.info(f"Found app-specific privacy policy link on data safety page: {pp_url}")
                     
                     # Follow the link to get the final URL after any redirects
                     privacy_page = await context.new_page()
-                    await privacy_page.goto(privacy_url, wait_until="domcontentloaded", timeout=30000)
+                    await privacy_page.goto(pp_url, wait_until="domcontentloaded", timeout=30000)
                     pp_url = privacy_page.url
                     logger.info(f"Final privacy policy URL after redirects: {pp_url}")
                     
@@ -464,41 +464,11 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                     
                     return PrivacyResponse(
                         url=url,
-                        privacy_url=pp_url,
+                        pp_url=pp_url,
                         success=True,
                         message=f"Found privacy policy for {app_info} on data safety page",
                         method_used="play_store_data_safety"
                     )
-                else:
-                    # No direct link found, check for text with URLs
-                    info_element = await page.query_selector("text=/For more information.*privacy policy/i")
-                    if info_element:
-                        # Get the text and try to extract the link using regex
-                        info_text = await info_element.text_content()
-                        # Look for URL-like patterns in the text
-                        url_match = re.search(r'https?://[^\s"\']+', info_text)
-                        if url_match:
-                            privacy_url = url_match.group(0)
-                            # Skip Google's general privacy policy
-                            if not privacy_url.startswith('https://policies.google.com/privacy'):
-                                logger.info(f"Extracted app-specific privacy policy URL from text: {privacy_url}")
-                                
-                                # Follow the link to get the final URL after any redirects
-                                privacy_page = await context.new_page()
-                                await privacy_page.goto(privacy_url, wait_until="domcontentloaded", timeout=30000)
-                                pp_url = privacy_page.url
-                                logger.info(f"Final privacy policy URL after redirects: {pp_url}")
-                                
-                                await privacy_page.close()
-                                await browser.close()
-                                
-                                return PrivacyResponse(
-                                    url=url,
-                                    privacy_url=pp_url,
-                                    success=True,
-                                    message=f"Found privacy policy for {app_info} in text description",
-                                    method_used="play_store_data_safety_text"
-                                )
                 
                 # If not found on data safety page, try the main app page
                 logger.info(f"No app-specific privacy policy found on data safety page, checking app page")
@@ -523,7 +493,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                         
                         return PrivacyResponse(
                             url=url,
-                            privacy_url=pp_url,
+                            pp_url=pp_url,
                             success=True,
                             message=f"Found privacy policy for {app_info} on app page",
                             method_used="play_store_app_page"
@@ -561,7 +531,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                                 
                                 return PrivacyResponse(
                                     url=url,
-                                    privacy_url=pp_url,
+                                    pp_url=pp_url,
                                     success=True,
                                     message=f"Found privacy policy for {app_info} on developer website",
                                     method_used="play_store_developer_site"
@@ -625,7 +595,7 @@ async def standard_privacy_finder(variations_to_try, headers, session) -> Privac
                 logger.info(f"Found privacy link: {privacy_link} in {final_url} ({variation_type})")
                 return PrivacyResponse(
                     url=final_url,  # Return the actual URL after redirects
-                    privacy_url=privacy_link,
+                    pp_url=privacy_link,
                     success=True,
                     message=f"Privacy Policy link found on final destination page: {final_url}" + 
                             (f" (Found at {variation_type})" if variation_type != "original exact url" else ""),
@@ -778,7 +748,7 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
             if privacy_link:
                 return PrivacyResponse(
                     url=final_url,
-                    privacy_url=privacy_link,
+                    pp_url=privacy_link,
                     success=True,
                     message=f"Privacy Policy link found using JavaScript-enabled browser rendering on page: {final_url}",
                     method_used="playwright"
@@ -843,7 +813,7 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             domain_score = get_domain_score(absolute_url, base_domain)
             if domain_score < 0:  # Skip invalid URLs
                 continue
-                
+    
             # If we're on a legal/privacy page, heavily penalize external domains
             href_domain = urlparse(absolute_url).netloc.lower()
             if is_legal_page and href_domain != base_domain:

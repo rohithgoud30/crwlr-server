@@ -9,4 +9,3 @@ pytest==7.4.0
 httpx==0.25.0
 playwright==1.42.0
 html2text==2024.2.26
-aiohttp==3.11.13
