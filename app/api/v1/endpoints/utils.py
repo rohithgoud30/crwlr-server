@@ -1,6 +1,8 @@
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import logging
 import re
+from bs4 import BeautifulSoup
+from typing import Optional
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -365,3 +367,105 @@ def get_policy_score(link_text: str, href_lower: str, policy_type: str) -> float
             score += 0.5
     
     return score
+
+def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
+    """
+    Find policy links by analyzing HTML class and ID attributes.
+    This function focuses on elements with footer-related classes/IDs and
+    checks if they contain policy-related terms.
+    
+    Args:
+        soup: BeautifulSoup object of the page
+        policy_type: Either 'privacy' or 'tos'
+        
+    Returns:
+        URL of the policy page if found, otherwise None
+    """
+    base_url = ""
+    for meta in soup.find_all('meta', {'property': 'og:url'}):
+        if meta.get('content'):
+            base_url = meta.get('content')
+            break
+    
+    # Determine keywords based on policy type
+    if policy_type == 'privacy':
+        keywords = ['privacy', 'data protection', 'gdpr', 'data policy', 'personal data']
+    else:  # tos
+        keywords = ['terms', 'conditions', 'terms of service', 'terms of use', 'legal']
+    
+    # Find elements with footer-related classes or IDs
+    footer_elements = []
+    
+    # Look for actual footer elements
+    footer_elements.extend(soup.find_all('footer'))
+    
+    # Look for elements with footer in class or ID
+    for element in soup.find_all(attrs=True):
+        attrs = element.attrs
+        for attr_name in ['class', 'id']:
+            if attr_name in attrs:
+                attr_value = attrs[attr_name]
+                if isinstance(attr_value, list):
+                    attr_value = ' '.join(attr_value)
+                
+                if attr_value and 'footer' in attr_value.lower():
+                    footer_elements.append(element)
+                    break
+    
+    # Process found footer elements
+    for footer in footer_elements:
+        for link in footer.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                continue
+                
+            # Check link text for keywords
+            link_text = ' '.join([
+                link.get_text().strip(),
+                link.get('title', '').strip(),
+                link.get('aria-label', '').strip()
+            ]).lower()
+            
+            # Check if any keyword is in the link text or href
+            if any(keyword in link_text for keyword in keywords) or any(keyword in href.lower() for keyword in keywords):
+                try:
+                    # Make the URL absolute
+                    absolute_url = urljoin(base_url, href) if base_url else href
+                    return absolute_url
+                except Exception:
+                    continue
+    
+    # If nothing found in footer elements, look for elements with policy-related classes/IDs
+    policy_class_patterns = ['privacy', 'legal', 'terms', 'tos', 'policy']
+    
+    for pattern in policy_class_patterns:
+        for element in soup.find_all(attrs=True):
+            attrs = element.attrs
+            for attr_name in ['class', 'id']:
+                if attr_name in attrs:
+                    attr_value = attrs[attr_name]
+                    if isinstance(attr_value, list):
+                        attr_value = ' '.join(attr_value)
+                    
+                    if attr_value and pattern in attr_value.lower():
+                        # Check if this element contains links with our keywords
+                        for link in element.find_all('a', href=True):
+                            href = link.get('href', '').strip()
+                            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                                continue
+                                
+                            link_text = ' '.join([
+                                link.get_text().strip(),
+                                link.get('title', '').strip(),
+                                link.get('aria-label', '').strip()
+                            ]).lower()
+                            
+                            # For this match, we'll be more strict about relevant keywords
+                            if any(keyword in link_text for keyword in keywords):
+                                try:
+                                    absolute_url = urljoin(base_url, href) if base_url else href
+                                    return absolute_url
+                                except Exception:
+                                    continue
+    
+    return None

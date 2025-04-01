@@ -9,7 +9,7 @@ from typing import Optional, Any, List, Tuple
 import asyncio
 from playwright.async_api import async_playwright
 import logging
-from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score
+from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -774,6 +774,12 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
 
 
 def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
+    # First try the high-priority class/ID based approach
+    class_id_result = find_policy_by_class_id(soup, 'privacy')
+    if class_id_result:
+        return class_id_result
+        
+    # If not found, proceed with the existing approach
     base_domain = urlparse(url).netloc.lower()
     is_legal_page = is_on_policy_page(url, 'privacy')
     exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
@@ -783,7 +789,7 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         href = link.get('href', '').strip()
         if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
             continue
-        
+            
         try:
             absolute_url = urljoin(url, href)
             link_text = ' '.join([
@@ -794,7 +800,7 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             if len(link_text.strip()) < 3:
                 continue
-            
+    
             score = 0.0
             footer_score = get_footer_score(link)
             domain_score = get_domain_score(absolute_url, base_domain)

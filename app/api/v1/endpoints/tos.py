@@ -19,7 +19,8 @@ from .utils import (
     is_likely_article_link,
     get_root_domain,
     get_policy_patterns,
-    get_policy_score
+    get_policy_score,
+    find_policy_by_class_id
 )
 
 # Filter out the XML parsed as HTML warning
@@ -53,16 +54,15 @@ class TosResponse(BaseModel):
 
 
 def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
-    """Find Terms of Service link in the soup object using dynamic pattern matching."""
-    base_domain = urlparse(url).netloc.lower()
-    
-    # Check if we're already on a legal/terms page
+    # First try the high-priority class/ID based approach
+    class_id_result = find_policy_by_class_id(soup, 'tos')
+    if class_id_result:
+        return class_id_result
+        
+    # If not found, proceed with the existing approach
+    base_domain = urlparse(url).netloc
     is_legal_page = is_on_policy_page(url, 'tos')
-    
-    # Get ToS-specific patterns
     exact_patterns, strong_url_patterns = get_policy_patterns('tos')
-    
-    # Process all links
     candidates = []
     
     for link in soup.find_all('a', href=True):
