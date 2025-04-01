@@ -1290,10 +1290,27 @@ def find_privacy_link(url, soup):
             elif 'github.com' in original_domain and privacy_domain == 'docs.github.com':
                 allowed = True
                 logger.info(f"GitHub special case: docs.github.com")
+            # Special case for NodeJS
+            elif 'nodejs.org' in original_domain and 'openjsf.org' in privacy_domain:
+                allowed = True
+                logger.info(f"NodeJS special case: {privacy_domain} is allowed for nodejs.org")
+            # Allow domains that clearly indicate privacy policies in their name
+            elif any(term in privacy_domain for term in ['privacy-policy', 'privacypolicy', 'privacy.', 'gdpr.', 'legal.']):
+                allowed = True
+                logger.info(f"Privacy link domain contains clear privacy indicators: {privacy_domain}")
             # Check for conventional privacy policy paths
             elif re.search(r'/(privacy|legal|terms|privacypolicy|privacy-policy|policies)(/|$)', urlparse(privacy_link).path.lower()):
                 allowed = True
                 logger.info(f"Privacy link follows conventional privacy policy URL structure: {privacy_link}")
+            # Check for foundation connections
+            elif any(foundation in privacy_domain for foundation in ['foundation.', '.foundation', 'openjsf', 'apache.org']):
+                # Many projects use foundation domains for their official policies
+                allowed = True
+                logger.info(f"Privacy link on likely foundation domain: {privacy_domain}")
+            # Check if it's a .org domain which often host policies for other domains
+            elif privacy_domain.endswith('.org') and 'policy' in urlparse(privacy_link).path.lower():
+                allowed = True
+                logger.info(f"Privacy link on .org domain with policy in path: {privacy_domain}")
             
             # If the link is still not allowed but looks like a corporate domain for a parent company, allow it
             if not allowed:
