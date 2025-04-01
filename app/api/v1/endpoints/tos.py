@@ -9,7 +9,7 @@ from typing import Optional, Any, List, Tuple
 import asyncio
 from playwright.async_api import async_playwright
 import logging
-from .utils import normalize_url, prepare_url_variations
+from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -41,78 +41,12 @@ class TosResponse(BaseModel):
     method_used: str = "standard"  # Indicates which method was used to find the ToS
 
 
-def get_domain_score(href: str, base_domain: str) -> float:
-    """Calculate domain relevance score with less dependency on known domains."""
-    try:
-        href_domain = urlparse(href).netloc.lower()
-        if not href_domain:
-            return 0.0
-            
-        # Same domain gets highest score
-        if href_domain == base_domain:
-            return 2.0
-            
-        # Subdomain relationship
-        if href_domain.endswith('.' + base_domain) or base_domain.endswith('.' + href_domain):
-            return 1.5
-            
-        # Check if the domains share a common root
-        href_parts = href_domain.split('.')
-        base_parts = base_domain.split('.')
-        
-        if len(href_parts) >= 2 and len(base_parts) >= 2:
-            href_root = '.'.join(href_parts[-2:])
-            base_root = '.'.join(base_parts[-2:])
-            if href_root == base_root:
-                return 1.0
-                
-        # For external domains, check if they look like legitimate policy hosts
-        if any(term in href_domain for term in ['legal', 'terms', 'tos', 'policy']):
-            return 0.5
-            
-        # Don't heavily penalize external domains
-        return 0.0
-    except Exception:
-        return -1.0
-
-
-def get_footer_score(link) -> float:
-    """Calculate a score based on whether the link is in a footer or similar bottom section."""
-    score = 0.0
-    
-    # Check if the link itself is in a footer-like element
-    parent = link.parent
-    depth = 0
-    max_depth = 5  # Don't go too far up the tree
-    
-    while parent and parent.name and depth < max_depth:
-        # Check element name
-        if parent.name in ['footer', 'tfoot']:
-            score += 3.0
-            break
-            
-        # Check classes and IDs
-        classes = ' '.join(parent.get('class', [])).lower()
-        element_id = parent.get('id', '').lower()
-        
-        # Strong footer indicators
-        if any(term in classes or term in element_id for term in ['footer', 'bottom', 'btm']):
-            score += 3.0
-            break
-            
-        # Secondary footer indicators
-        if any(term in classes or term in element_id for term in ['legal', 'copyright', 'links']):
-            score += 1.5
-        
-        parent = parent.parent
-        depth += 1
-    
-    return score
-
-
 def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     """Find Terms of Service link in the soup object using dynamic pattern matching."""
     base_domain = urlparse(url).netloc.lower()
+    
+    # Check if we're already on a legal/terms page
+    is_legal_page = is_on_policy_page(url, 'tos')
     
     # Exact match patterns (highest priority)
     exact_patterns = [
@@ -132,30 +66,6 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         '/legal/terms/',
         '/tos/',
         '/terms/'
-    ]
-    
-    # Strong penalties for likely non-ToS content
-    penalties = [
-        ('/blog/', -5.0),
-        ('/news/', -5.0),
-        ('/article/', -5.0),
-        ('/press/', -5.0),
-        ('/2023/', -5.0),
-        ('/2024/', -5.0),
-        ('/posts/', -5.0),
-        ('/category/', -5.0),
-        ('/tag/', -5.0),
-        ('/search/', -5.0),
-        ('/product/', -5.0),
-        ('/services/', -5.0),
-        ('/solutions/', -5.0),
-        ('/ai/', -5.0),
-        ('/cloud/', -5.0),
-        ('/digital/', -5.0),
-        ('/enterprise/', -5.0),
-        ('/platform/', -5.0),
-        ('/technology/', -5.0),
-        ('/consulting/', -5.0)
     ]
     
     # Process all links
@@ -188,6 +98,12 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             domain_score = get_domain_score(absolute_url, base_domain)
             if domain_score < 0:  # Skip invalid URLs
                 continue
+                
+            # If we're on a legal/terms page, heavily penalize external domains
+            href_domain = urlparse(absolute_url).netloc.lower()
+            if is_legal_page and href_domain != base_domain:
+                # If we're already on a legal/terms page, we should strongly prefer same-domain links
+                continue
             
             # Check for exact matches in text (high priority)
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
@@ -211,8 +127,8 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if any(term in path for term in ['terms', 'tos', 'legal-terms']):
                 score += 2.0
                 
-            # Apply penalties
-            for pattern, penalty in penalties:
+            # Apply penalties from shared utilities
+            for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
                     score += penalty
             
@@ -225,6 +141,10 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 threshold = 4.0  # Lower threshold for footer links
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 threshold = 4.0  # Lower threshold for exact matches
+                
+            # If we're on a legal/terms page, increase threshold for external domains
+            if is_legal_page and href_domain != base_domain:
+                threshold += 3.0
             
             if final_score > threshold:
                 candidates.append((absolute_url, final_score))

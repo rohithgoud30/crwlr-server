@@ -9,6 +9,7 @@ from typing import Optional, Any, List, Tuple
 import asyncio
 from playwright.async_api import async_playwright
 import logging
+from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -21,27 +22,20 @@ router = APIRouter()
 
 
 class PrivacyRequest(BaseModel):
-    url: str  # Using str to allow any input
+    url: str  # Changed from HttpUrl to str to allow any input
 
     @field_validator('url')
     @classmethod
     def validate_and_transform_url(cls, v: str) -> str:
         """
-        Basic URL validation and normalization.
+        Basic URL validation and normalization using utils.
         """
-        # Strip any trailing slashes to normalize
-        v = v.rstrip('/')
-        
-        # Check if URL has protocol, if not add https://
-        if not v.startswith(('http://', 'https://')):
-            v = f"https://{v}"
-                
-        return v
+        return normalize_url(v)
 
 
 class PrivacyResponse(BaseModel):
     url: str
-    pp_url: Optional[str] = None
+    privacy_url: Optional[str] = None
     success: bool
     message: str
     method_used: str = "standard"  # Indicates which method was used to find the privacy policy
@@ -162,7 +156,7 @@ async def find_privacy(request: PrivacyRequest, response: Response) -> PrivacyRe
     # Try the standard method first (requests + BeautifulSoup)
     standard_result = await standard_privacy_finder(variations_to_try, headers, session)
     if standard_result.success:
-        logger.info(f"Found privacy link with standard method: {standard_result.pp_url}")
+        logger.info(f"Found privacy link with standard method: {standard_result.privacy_url}")
         return standard_result
     
     # If standard method fails, try with Playwright
@@ -177,12 +171,12 @@ async def find_privacy(request: PrivacyRequest, response: Response) -> PrivacyRe
         logger.info(f"Playwright failed on exact URL, trying base domain: {base_domain}")
         base_playwright_result = await playwright_privacy_finder(base_domain)
         if base_playwright_result.success:
-            logger.info(f"Found privacy link with Playwright on base domain: {base_playwright_result.pp_url}")
+            logger.info(f"Found privacy link with Playwright on base domain: {base_playwright_result.privacy_url}")
             return base_playwright_result
     
     # Return the Playwright result if it found something, otherwise return the standard result
     if playwright_result.success:
-        logger.info(f"Found privacy link with Playwright: {playwright_result.pp_url}")
+        logger.info(f"Found privacy link with Playwright: {playwright_result.privacy_url}")
         return playwright_result
     
     # If both methods failed, include a message about what was tried
@@ -260,7 +254,7 @@ async def handle_app_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                 
                 return PrivacyResponse(
                     url=url,
-                    pp_url=pp_url,
+                    privacy_url=pp_url,
                     success=True,
                     message=f"Found privacy policy for {app_info} in App Store privacy section",
                     method_used="app_store_privacy_section"
@@ -310,7 +304,7 @@ async def handle_app_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                             
                             return PrivacyResponse(
                                 url=url,
-                                pp_url=final_url,
+                                privacy_url=final_url,
                                 success=True,
                                 message=f"Found privacy policy for {app_info} in App Store privacy section using Playwright",
                                 method_used="app_store_playwright_section"
@@ -333,7 +327,7 @@ async def handle_app_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                         
                         return PrivacyResponse(
                             url=url,
-                            pp_url=final_url,
+                            privacy_url=final_url,
                             success=True,
                             message=f"Found privacy policy for {app_info} using Playwright",
                             method_used="app_store_playwright_general"
@@ -420,7 +414,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
             
             return PrivacyResponse(
                 url=url,
-                pp_url=pp_url,
+                privacy_url=pp_url,
                 success=True,
                 message=f"Found privacy policy for {app_info} on data safety page",
                 method_used="play_store_data_safety_direct"
@@ -470,7 +464,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                     
                     return PrivacyResponse(
                         url=url,
-                        pp_url=pp_url,
+                        privacy_url=pp_url,
                         success=True,
                         message=f"Found privacy policy for {app_info} on data safety page",
                         method_used="play_store_data_safety"
@@ -500,7 +494,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                                 
                                 return PrivacyResponse(
                                     url=url,
-                                    pp_url=pp_url,
+                                    privacy_url=pp_url,
                                     success=True,
                                     message=f"Found privacy policy for {app_info} in text description",
                                     method_used="play_store_data_safety_text"
@@ -529,7 +523,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                         
                         return PrivacyResponse(
                             url=url,
-                            pp_url=pp_url,
+                            privacy_url=pp_url,
                             success=True,
                             message=f"Found privacy policy for {app_info} on app page",
                             method_used="play_store_app_page"
@@ -567,7 +561,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                                 
                                 return PrivacyResponse(
                                     url=url,
-                                    pp_url=pp_url,
+                                    privacy_url=pp_url,
                                     success=True,
                                     message=f"Found privacy policy for {app_info} on developer website",
                                     method_used="play_store_developer_site"
@@ -631,7 +625,7 @@ async def standard_privacy_finder(variations_to_try, headers, session) -> Privac
                 logger.info(f"Found privacy link: {privacy_link} in {final_url} ({variation_type})")
                 return PrivacyResponse(
                     url=final_url,  # Return the actual URL after redirects
-                    pp_url=privacy_link,
+                    privacy_url=privacy_link,
                     success=True,
                     message=f"Privacy Policy link found on final destination page: {final_url}" + 
                             (f" (Found at {variation_type})" if variation_type != "original exact url" else ""),
@@ -784,7 +778,7 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
             if privacy_link:
                 return PrivacyResponse(
                     url=final_url,
-                    pp_url=privacy_link,
+                    privacy_url=privacy_link,
                     success=True,
                     message=f"Privacy Policy link found using JavaScript-enabled browser rendering on page: {final_url}",
                     method_used="playwright"
@@ -809,84 +803,18 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
         )
 
 
-def get_domain_score(href: str, base_domain: str) -> float:
-    """Calculate domain relevance score with less dependency on known domains."""
-    try:
-        href_domain = urlparse(href).netloc.lower()
-        if not href_domain:
-            return 0.0
-            
-        # Same domain gets highest score
-        if href_domain == base_domain:
-            return 2.0
-            
-        # Subdomain relationship
-        if href_domain.endswith('.' + base_domain) or base_domain.endswith('.' + href_domain):
-            return 1.5
-            
-        # Check if the domains share a common root
-        href_parts = href_domain.split('.')
-        base_parts = base_domain.split('.')
-        
-        if len(href_parts) >= 2 and len(base_parts) >= 2:
-            href_root = '.'.join(href_parts[-2:])
-            base_root = '.'.join(base_parts[-2:])
-            if href_root == base_root:
-                return 1.0
-                
-        # For external domains, check if they look like legitimate policy hosts
-        if any(term in href_domain for term in ['privacy', 'legal', 'policy', 'terms']):
-            return 0.5
-            
-        # Don't heavily penalize external domains
-        return 0.0
-    except Exception:
-        return -1.0
-
-def get_footer_score(link) -> float:
-    """Calculate a score based on whether the link is in a footer or similar bottom section."""
-    score = 0.0
-    
-    # Check if the link itself is in a footer-like element
-    parent = link.parent
-    depth = 0
-    max_depth = 5  # Don't go too far up the tree
-    
-    while parent and parent.name and depth < max_depth:
-        # Check element name
-        if parent.name in ['footer', 'tfoot']:
-            score += 3.0
-            break
-            
-        # Check classes and IDs
-        classes = ' '.join(parent.get('class', [])).lower()
-        element_id = parent.get('id', '').lower()
-        
-        # Strong footer indicators
-        if any(term in classes or term in element_id for term in ['footer', 'bottom', 'btm']):
-            score += 3.0
-            break
-            
-        # Secondary footer indicators
-        if any(term in classes or term in element_id for term in ['legal', 'copyright', 'links']):
-            score += 1.5
-        
-        parent = parent.parent
-        depth += 1
-    
-    return score
-
-def find_privacy_link(url, soup):
-    """Find and return the Privacy Policy link from a webpage."""
+def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
+    """Find Privacy Policy link in the soup object using dynamic pattern matching."""
     base_domain = urlparse(url).netloc.lower()
+    
+    # Check if we're already on a legal/privacy page
+    is_legal_page = is_on_policy_page(url, 'privacy')
     
     # Exact match patterns (highest priority)
     exact_patterns = [
         r'\bprivacy[-\s]policy\b',
         r'\bdata[-\s]protection\b',
         r'\bprivacy[-\s]notice\b',
-        r'\bdata[-\s]policy\b',
-        r'\bcookie[-\s]policy\b',
         r'\bprivacy[-\s]statement\b',
         r'\bgdpr\b'
     ]
@@ -896,35 +824,9 @@ def find_privacy_link(url, soup):
         '/privacy-policy/',
         '/privacy/',
         '/data-protection/',
-        '/data-privacy/',
         '/privacy-notice/',
-        '/cookie-policy/',
         '/gdpr/',
-        '/data-policy/'
-    ]
-    
-    # Strong penalties for likely non-privacy content
-    penalties = [
-        ('/blog/', -5.0),
-        ('/news/', -5.0),
-        ('/article/', -5.0),
-        ('/press/', -5.0),
-        ('/2023/', -5.0),
-        ('/2024/', -5.0),
-        ('/posts/', -5.0),
-        ('/category/', -5.0),
-        ('/tag/', -5.0),
-        ('/search/', -5.0),
-        ('/product/', -5.0),
-        ('/services/', -5.0),
-        ('/solutions/', -5.0),
-        ('/ai/', -5.0),
-        ('/cloud/', -5.0),
-        ('/digital/', -5.0),
-        ('/enterprise/', -5.0),
-        ('/platform/', -5.0),
-        ('/technology/', -5.0),
-        ('/consulting/', -5.0)
+        '/legal/privacy/'
     ]
     
     # Process all links
@@ -957,6 +859,12 @@ def find_privacy_link(url, soup):
             domain_score = get_domain_score(absolute_url, base_domain)
             if domain_score < 0:  # Skip invalid URLs
                 continue
+                
+            # If we're on a legal/privacy page, heavily penalize external domains
+            href_domain = urlparse(absolute_url).netloc.lower()
+            if is_legal_page and href_domain != base_domain:
+                # If we're already on a legal/privacy page, we should strongly prefer same-domain links
+                continue
             
             # Check for exact matches in text (high priority)
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
@@ -966,22 +874,22 @@ def find_privacy_link(url, soup):
             href_lower = absolute_url.lower()
             if any(pattern in href_lower for pattern in strong_url_patterns):
                 score += 4.0  # Increased weight for strong URL patterns
-            elif '/privacy' in href_lower or '/data' in href_lower or '/gdpr' in href_lower:
+            elif '/privacy' in href_lower or '/gdpr' in href_lower or '/legal' in href_lower:
                 score += 3.0
                 
             # Check link text for partial matches
             if 'privacy' in link_text.split() or 'gdpr' in link_text.split():
                 score += 3.0
-            elif 'data' in link_text or 'cookie' in link_text:
+            elif 'legal' in link_text or 'data' in link_text:
                 score += 2.0
                 
             # Check for privacy-specific terms in URL path
             path = urlparse(absolute_url).path.lower()
-            if any(term in path for term in ['privacy', 'data-protection', 'gdpr']):
+            if any(term in path for term in ['privacy', 'gdpr', 'data-protection']):
                 score += 2.0
                 
-            # Apply penalties
-            for pattern, penalty in penalties:
+            # Apply penalties from shared utilities
+            for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
                     score += penalty
             
@@ -994,6 +902,10 @@ def find_privacy_link(url, soup):
                 threshold = 4.0  # Lower threshold for footer links
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 threshold = 4.0  # Lower threshold for exact matches
+                
+            # If we're on a legal/privacy page, increase threshold for external domains
+            if is_legal_page and href_domain != base_domain:
+                threshold += 3.0
             
             if final_score > threshold:
                 candidates.append((absolute_url, final_score))
