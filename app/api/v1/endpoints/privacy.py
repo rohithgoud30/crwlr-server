@@ -468,7 +468,7 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
                         success=True,
                         message=f"Found privacy policy for {app_info} on data safety page",
                         method_used="play_store_data_safety"
-                    )
+                                )
                 
                 # If not found on data safety page, try the main app page
                 logger.info(f"No app-specific privacy policy found on data safety page, checking app page")
@@ -774,23 +774,16 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
 
 
 def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
-    """Find Privacy Policy link in the soup object using dynamic pattern matching."""
     base_domain = urlparse(url).netloc.lower()
-    
-    # Check if we're already on a legal/privacy page
     is_legal_page = is_on_policy_page(url, 'privacy')
-    
-    # Get privacy-specific patterns
     exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
-    
-    # Process all links
     candidates = []
     
     for link in soup.find_all('a', href=True):
         href = link.get('href', '').strip()
         if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
             continue
-            
+        
         try:
             absolute_url = urljoin(url, href)
             link_text = ' '.join([
@@ -799,65 +792,50 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 link.get('aria-label', '').strip()
             ]).lower()
             
-            # Skip empty or very short link text
             if len(link_text.strip()) < 3:
                 continue
             
-            # Calculate base score
             score = 0.0
-            
-            # Get footer score first (highest priority)
             footer_score = get_footer_score(link)
-            
-            # Domain score with less weight
             domain_score = get_domain_score(absolute_url, base_domain)
-            if domain_score < 0:  # Skip invalid URLs
+            
+            if domain_score < 0:
                 continue
-    
-            # If we're on a legal/privacy page, heavily penalize external domains
+            
             href_domain = urlparse(absolute_url).netloc.lower()
             if is_legal_page and href_domain != base_domain:
-                # If we're already on a legal/privacy page, we should strongly prefer same-domain links
                 continue
             
-            # Check for exact matches in text (high priority)
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                score += 6.0  # Increased weight for exact matches
+                score += 6.0
             
-            # Check URL patterns
             href_lower = absolute_url.lower()
             if any(pattern in href_lower for pattern in strong_url_patterns):
-                score += 4.0  # Increased weight for strong URL patterns
-                
-            # Get policy-specific score
+                score += 4.0
+            
             score += get_policy_score(link_text, href_lower, 'privacy')
-                
-            # Apply penalties from shared utilities
+            
             for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
                     score += penalty
             
-            # Calculate final score with footer priority
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
             
-            # Adjust threshold based on strong indicators
             threshold = 5.0
             if footer_score > 0:
-                threshold = 4.0  # Lower threshold for footer links
+                threshold = 4.0
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                threshold = 4.0  # Lower threshold for exact matches
-                
-            # If we're on a legal/privacy page, increase threshold for external domains
+                threshold = 4.0
+            
             if is_legal_page and href_domain != base_domain:
                 threshold += 3.0
             
             if final_score > threshold:
                 candidates.append((absolute_url, final_score))
-                
+        
         except Exception:
             continue
     
-    # Return the highest scoring candidate
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[0][0]
