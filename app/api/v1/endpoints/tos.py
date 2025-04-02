@@ -71,6 +71,13 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     # Get current domain info for domain-matching rules
     current_domain = urlparse(url).netloc.lower()
     
+    # Additional patterns to filter out false positives
+    false_positive_patterns = [
+        '/learn', '/tutorial', '/course', '/education', '/docs', 
+        '/documentation', '/guide', '/start', '/getting-started',
+        '/examples', '/showcase'
+    ]
+    
     # Iterate through all links to find the ToS
     for link in soup.find_all('a', href=True):
         href = link.get('href', '').strip()
@@ -84,6 +91,11 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if is_likely_false_positive(absolute_url, 'tos'):
                 continue
             
+            # Extra check - filter out known false positive patterns
+            if any(pattern in absolute_url.lower() for pattern in false_positive_patterns):
+                logger.warning(f"Skipping likely false positive URL: {absolute_url}")
+                continue
+                
             # Extra check - skip privacy policy URLs when looking for ToS
             url_lower = absolute_url.lower()
             if '/privacy' in url_lower or 'privacy-policy' in url_lower or '/gdpr' in url_lower:
@@ -115,6 +127,12 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if 'privacy' in link_text and not any(term in link_text for term in ['terms', 'tos', 'conditions']):
                 logger.warning(f"Skipping privacy link text in ToS search: {link_text}")
                 continue
+                
+            # Skip educational links with terms like "learn" 
+            if any(edu_term in link_text for edu_term in ['learn', 'tutorial', 'course', 'guide', 'start', 'example']):
+                if not any(term in link_text for term in ['terms', 'legal', 'conditions']):
+                    logger.warning(f"Skipping educational link in ToS search: {link_text}")
+                    continue
                 
             if len(link_text.strip()) < 3:
                 continue
@@ -157,8 +175,16 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             # Apply additional penalty for URLs with privacy terms
             if 'privacy' in url_lower:
                 score -= 10.0
+                
+            # Apply strong penalty for educational content
+            if any(pattern in url_lower for pattern in false_positive_patterns):
+                score -= 20.0
             
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
+            
+            # Big bonus for footer links containing "terms" text
+            if footer_score > 0 and ('terms' in link_text or 'conditions' in link_text):
+                final_score += 10.0
             
             threshold = 5.0
             if footer_score > 0:
@@ -187,7 +213,10 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
 async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers: dict, session: requests.Session) -> TosResponse:
     """
     Try to find ToS link using standard requests + BeautifulSoup method.
+    With fallback to privacy policy page if direct terms detection isn't reliable.
     """
+    all_potential_tos_links = []
+    
     for url, variation_type in variations_to_try:
         try:
             logger.info(f"Trying URL variation: {url} ({variation_type})")
@@ -230,7 +259,14 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
                     base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
                     tos_link = urljoin(base_url, tos_link)
                     logger.info(f"Converted relative URL to absolute URL: {tos_link}")
-                    
+                
+                # Check if this is likely a false positive
+                if tos_link and '/learn' in tos_link.lower():
+                    logger.warning(f"Found link {tos_link} appears to be a learn link, not ToS, collecting for verification")
+                    all_potential_tos_links.append((tos_link, final_url, variation_type, 'learn_page'))
+                    continue
+                
+                # If we make it here, we have a valid ToS link
                 logger.info(f"Found ToS link: {tos_link} in {final_url} ({variation_type})")
                 return TosResponse(
                     url=final_url,  # Return the actual URL after redirects
@@ -242,6 +278,45 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
                 )
             else:
                 logger.info(f"No ToS link found in {final_url} ({variation_type})")
+                
+                # If direct ToS detection failed, try to find a privacy policy link
+                from .privacy import find_privacy_link
+                logger.info(f"Trying to find privacy policy link in {final_url}")
+                privacy_link = find_privacy_link(final_url, soup)
+                
+                if privacy_link:
+                    # Make it absolute if needed
+                    if privacy_link.startswith('/'):
+                        parsed_final_url = urlparse(final_url)
+                        base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
+                        privacy_link = urljoin(base_url, privacy_link)
+                    
+                    logger.info(f"Found privacy link: {privacy_link}, will check this page for ToS")
+                    try:
+                        # Visit the privacy policy page to find ToS link there
+                        privacy_response = session.get(privacy_link, headers=headers, timeout=15)
+                        privacy_soup = BeautifulSoup(privacy_response.text, 'html.parser')
+                        
+                        # Now look for terms links in the privacy page
+                        terms_from_privacy = find_tos_link(privacy_link, privacy_soup)
+                        
+                        if terms_from_privacy:
+                            # Make it absolute if needed
+                            if terms_from_privacy.startswith('/'):
+                                parsed_privacy_url = urlparse(privacy_link)
+                                base_url = f"{parsed_privacy_url.scheme}://{parsed_privacy_url.netloc}"
+                                terms_from_privacy = urljoin(base_url, terms_from_privacy)
+                            
+                            logger.info(f"Found ToS link from privacy page: {terms_from_privacy}")
+                            return TosResponse(
+                                url=final_url,
+                                tos_url=terms_from_privacy,
+                                success=True,
+                                message=f"Terms of Service link found via privacy policy page from: {final_url}",
+                                method_used="privacy_page_to_terms"
+                            )
+                    except Exception as e:
+                        logger.error(f"Error finding ToS via privacy page: {str(e)}")
                     
         except requests.RequestException as e:
             logger.error(f"RequestException for {url} ({variation_type}): {str(e)}")
@@ -249,6 +324,74 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
         except Exception as e:
             logger.error(f"Exception for {url} ({variation_type}): {str(e)}")
             continue
+    
+    # If we get here and have collected potential links, check them in order
+    if all_potential_tos_links:
+        # Check any links that were classified as potential "learn" links
+        for tos_link, final_url, variation_type, reason in all_potential_tos_links:
+            # For each potential link, try to determine if it's a valid terms by looking at its content
+            try:
+                logger.info(f"Verifying potential ToS link: {tos_link}")
+                link_response = session.get(tos_link, headers=headers, timeout=15)
+                link_soup = BeautifulSoup(link_response.text, 'html.parser')
+                
+                # Check page title and headers for terms-related keywords
+                title = link_soup.find('title')
+                title_text = title.get_text().lower() if title else ""
+                
+                h1_elements = link_soup.find_all('h1')
+                h1_texts = [h1.get_text().lower() for h1 in h1_elements]
+                
+                # If the page has terms-related keywords in title or headings
+                terms_keywords = ['terms', 'conditions', 'tos', 'terms of service', 'terms of use', 'legal', 'agreement']
+                
+                if any(keyword in title_text for keyword in terms_keywords) or any(any(keyword in h1 for keyword in terms_keywords) for h1 in h1_texts):
+                    logger.info(f"Verified ToS link based on page content: {tos_link}")
+                    return TosResponse(
+                        url=final_url,
+                        tos_url=tos_link,
+                        success=True,
+                        message=f"Terms of Service link verified by content analysis: {tos_link}",
+                        method_used="content_verification"
+                    )
+            except Exception as e:
+                logger.error(f"Error verifying potential ToS link {tos_link}: {str(e)}")
+    
+    # Try one more fallback - look for terms in the footer of the main page
+    try:
+        original_url = variations_to_try[0][0]
+        response = session.get(original_url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look specifically for footer links with terms-related text
+        footer_elements = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower() if c else False))
+        footer_elements += soup.find_all(['footer', 'div'], id=lambda i: i and ('footer' in i.lower() if i else False))
+        
+        for footer in footer_elements:
+            for link in footer.find_all('a', href=True):
+                href = link.get('href', '').strip()
+                if not href:
+                    continue
+                    
+                link_text = link.get_text().lower().strip()
+                if any(term in link_text for term in ['terms', 'conditions', 'legal']):
+                    # This looks like a terms link in the footer
+                    absolute_url = urljoin(original_url, href)
+                    logger.info(f"Found potential terms link in footer: {absolute_url}")
+                    
+                    # Skip learn pages and other likely false positives
+                    if '/learn' in absolute_url.lower() or is_likely_false_positive(absolute_url, 'tos'):
+                        continue
+                        
+                    return TosResponse(
+                        url=original_url,
+                        tos_url=absolute_url,
+                        success=True,
+                        message=f"Terms of Service link found in footer: {absolute_url}",
+                        method_used="footer_search"
+                    )
+    except Exception as e:
+        logger.error(f"Error in footer fallback search: {str(e)}")
     
     return TosResponse(
         url=variations_to_try[0][0],  # Use the original URL
