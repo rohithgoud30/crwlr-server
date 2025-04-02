@@ -383,6 +383,12 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
         ]):
             return -5.0  # Strong negative score for documentation URLs
     
+    # Strongly penalize support policy when looking for privacy policy
+    if policy_type == 'privacy' and ('/support-policy' in url.lower() or 'support' in url.lower()):
+        # Only add penalty if it doesn't also have privacy in the URL
+        if 'privacy' not in url.lower():
+            return -10.0  # Very strong penalty to prefer actual privacy policies
+    
     # Handle each policy type differently
     if policy_type == 'privacy':
         # Strong positive matches for privacy
@@ -490,6 +496,15 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
         if re.search(term, link_text):
             score += 0.25
             break
+    
+    # Penalty for support policies
+    if '/support-policy' in url or (('/support' in url) and ('/policy' in url)):
+        if policy_type == 'privacy':
+            # Strong penalty for support policy being detected as privacy policy
+            score -= 5.0
+        else:
+            # Small penalty for support policies in ToS
+            score -= 1.0
             
     # Negative patterns specifically for technical documentation
     if '/docs' in url or '/documentation' in url or '/api' in url:
@@ -529,6 +544,10 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
     for domain in common_false_positives:
         if domain in url_lower:
             return True
+    
+    # Check for "support policy" in privacy detection - this is a false positive
+    if policy_type == 'privacy' and ('/support-policy' in url_lower or 'support' in url_lower) and 'privacy' not in url_lower:
+        return True
             
     # Check for documentation links - these are often false positives for ToS
     if policy_type == 'tos' and ('/docs' in url_lower or '/documentation' in url_lower or '/doc/' in url_lower or url_lower.endswith('/doc')):
@@ -558,6 +577,10 @@ def is_correct_policy_type(url: str, expected_type: str) -> bool:
     """
     url_lower = url.lower()
     
+    # Special case for "support-policy" - never classify as privacy policy
+    if expected_type == 'privacy' and '/support-policy' in url_lower and '/privacy' not in url_lower:
+        return False
+    
     # For documentation pages, require very explicit ToS indicators
     if '/docs' in url_lower or '/documentation' in url_lower or '/doc/' in url_lower:
         if expected_type == 'tos':
@@ -580,6 +603,10 @@ def is_correct_policy_type(url: str, expected_type: str) -> bool:
         # If the URL strongly indicates privacy policy, return True
         if any(pattern in url_lower for pattern in privacy_patterns):
             return True
+        
+        # Support policy is not a privacy policy
+        if '/support-policy' in url_lower:
+            return False
             
         # Check for terms patterns - if we're looking for privacy but it's a terms URL, return False
         terms_patterns = [
@@ -658,14 +685,16 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             'privacy', 
             'privacy policy', 
             'privacy-policy',
-            'policy',
             'data protection', 
             'gdpr', 
             'data policy', 
             'personal data'
         ]
+        # For privacy, we want to explicitly exclude support policies
+        negative_keywords = ['support policy', 'support-policy']
     else:  # tos
         keywords = ['terms', 'conditions', 'terms of service', 'terms of use', 'legal']
+        negative_keywords = []
     
     # Find elements with footer-related classes or IDs
     footer_elements = []
@@ -715,11 +744,21 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                 link.get('aria-label', '').strip()
             ]).lower()
             
+            # Skip links containing negative keywords
+            if any(neg_keyword in link_text.lower() for neg_keyword in negative_keywords):
+                continue
+                
+            # Skip links with support-policy in URL path for privacy detection
+            if policy_type == 'privacy' and '/support-policy' in absolute_url.lower():
+                continue
+                
             # Check URL path for specific patterns
             url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
             
             # Exact path matches for privacy
             privacy_path_patterns = ['/privacy', '/privacy-policy', '/policy']
+            if policy_type == 'privacy' and '/support-policy' in url_path:
+                continue  # Skip support policy for privacy detection
             
             # Check if any keyword is in the link text or href
             if (policy_type == 'privacy' and any(pattern in url_path for pattern in privacy_path_patterns)) or \
@@ -769,11 +808,19 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                             if not is_correct_policy_type(absolute_url, policy_type):
                                 continue
                                 
+                            # Skip support-policy for privacy detection
+                            if policy_type == 'privacy' and '/support-policy' in absolute_url.lower():
+                                continue
+                                
                             link_text = ' '.join([
                                 link.get_text().strip(),
                                 link.get('title', '').strip(),
                                 link.get('aria-label', '').strip()
                             ]).lower()
+                            
+                            # Skip links containing negative keywords
+                            if any(neg_keyword in link_text.lower() for neg_keyword in negative_keywords):
+                                continue
                             
                             # URL path patterns check
                             url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
@@ -807,6 +854,10 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             if is_likely_false_positive(absolute_url, policy_type):
                 continue
             
+            # Skip support-policy for privacy detection
+            if '/support-policy' in absolute_url.lower():
+                continue
+            
             # Ensure this URL is not a ToS URL
             if not is_correct_policy_type(absolute_url, policy_type):
                 continue
@@ -814,16 +865,20 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
             
             if any(pattern in url_path for pattern in ['/privacy', '/privacy-policy', '/policy']):
-                try:
-                    return absolute_url
-                except Exception:
-                    continue
+                # Skip support-policy
+                if '/support-policy' not in url_path:
+                    try:
+                        return absolute_url
+                    except Exception:
+                        continue
                 
             link_text = link.get_text().strip().lower()
             if link_text in ['privacy', 'privacy policy', 'privacy-policy', 'policy']:
-                try:
-                    return absolute_url
-                except Exception:
-                    continue
+                # Skip links containing negative keywords
+                if not any(neg_keyword in link_text for neg_keyword in negative_keywords):
+                    try:
+                        return absolute_url
+                    except Exception:
+                        continue
     
     return None
