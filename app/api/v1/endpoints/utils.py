@@ -605,288 +605,87 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
     # Conservative default: if we can't determine the type, consider it a mismatch
     return False
 
-def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
+def find_policy_by_class_id(soup: BeautifulSoup, policy_type: str = 'privacy') -> Optional[str]:
     """
-    Find policy links by analyzing HTML class and ID attributes.
-    This function focuses on elements with footer-related classes/IDs and
-    checks if they contain policy-related terms.
-    
-    Args:
-        soup: BeautifulSoup object of the page
-        policy_type: Either 'privacy' or 'tos'
-        
-    Returns:
-        URL of the policy page if found, otherwise None
+    Find policy links by looking for specific class and ID attributes commonly used for links.
+    This gives higher priority to specific implementation patterns commonly used.
     """
-    base_url = ""
-    for meta in soup.find_all('meta', {'property': 'og:url'}):
-        if meta.get('content'):
-            base_url = meta.get('content')
-            break
+    candidates = []
     
-    # If no og:url found, try to find base tag
-    if not base_url:
-        base_tag = soup.find('base', href=True)
-        if base_tag:
-            base_url = base_tag.get('href')
-    
-    # If still no base URL, use current URL from existing context if available
-    if not base_url:
-        # We'll handle this when returning the URL
-        pass
-    
-    # Determine keywords based on policy type
+    # Define terms to search for based on policy type
     if policy_type == 'privacy':
-        keywords = [
-            'privacy', 
-            'privacy policy', 
-            'privacy-policy',
-            'privacy notice',
-            'Privacy Notice',  # Also match with uppercase
-            'data protection', 
-            'gdpr', 
-            'data policy', 
-            'personal data'
-        ]
-        # For privacy, we want to explicitly exclude support policies
-        negative_keywords = ['support policy', 'support-policy']
-    else:  # tos
-        keywords = [
-            'terms', 
-            'conditions', 
-            'terms of service', 
-            'terms of use',
-            'conditions of use',
-            'Conditions of Use',  # Also match with uppercase
-            'legal'
-        ]
-        negative_keywords = []
+        keywords = ['privacy', 'privacy policy', 'data protection', 'privacy notice', 'Privacy Notice', 'datenschutz']
+    else:  # Terms of service
+        keywords = ['terms', 'terms of service', 'terms of use', 'terms and conditions', 'legal', 'tos', 'conditions of use', 'eula']
+
+    # Look for footer tags
+    footer_elements = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower() if c else False))
+    footer_elements += soup.find_all(['footer', 'div'], id=lambda i: i and ('footer' in i.lower() if i else False))
     
-    # Try finding specific link elements with relevant labels
-    # This will search for elements like <a> with text content of "Privacy Notice" or "Conditions of Use"
-    for link in soup.find_all('a', href=True):
-        href = link.get('href', '').strip()
-        if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-            continue
-            
-        # Make the URL absolute if possible
-        if base_url:
-            absolute_url = urljoin(base_url, href)
-        else:
-            # If no base URL is available, use the href as is
-            absolute_url = href
-            
-        # Skip likely false positives
-        if is_likely_false_positive(absolute_url, policy_type):
-            continue
-            
-        # Check if this URL matches the expected policy type
-        if not is_correct_policy_type(absolute_url, policy_type):
-            continue
-            
-        # Check link text for keywords
-        link_text = ' '.join([
-            link.get_text().strip(),
-            link.get('title', '').strip(),
-            link.get('aria-label', '').strip()
-        ])
-        
-        # Check for exact matches with "Privacy Notice" or "Conditions of Use" in any case
-        if policy_type == 'privacy' and re.search(r'privacy\s+notice', link_text, re.IGNORECASE):
-            try:
-                return absolute_url
-            except Exception:
-                continue
-                
-        if policy_type == 'tos' and re.search(r'conditions\s+of\s+use', link_text, re.IGNORECASE):
-            try:
-                return absolute_url
-            except Exception:
-                continue
-    
-    # Find elements with footer-related classes or IDs
-    footer_elements = []
-    
-    # Look for actual footer elements
-    footer_elements.extend(soup.find_all('footer'))
-    
-    # Look for elements with footer in class or ID
-    for element in soup.find_all(attrs=True):
-        attrs = element.attrs
-        for attr_name in ['class', 'id']:
-            if attr_name in attrs:
-                attr_value = attrs[attr_name]
-                if isinstance(attr_value, list):
-                    attr_value = ' '.join(attr_value)
-                
-                if attr_value and 'footer' in attr_value.lower():
-                    footer_elements.append(element)
-                    break
-    
-    # Process found footer elements
+    # Check links in footer first (these are most reliable)
     for footer in footer_elements:
         for link in footer.find_all('a', href=True):
             href = link.get('href', '').strip()
             if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
                 continue
-                
-            # Make the URL absolute if possible
-            if base_url:
-                absolute_url = urljoin(base_url, href)
-            else:
-                # If no base URL is available, use the href as is
-                absolute_url = href
-                
-            # Skip likely false positives
-            if is_likely_false_positive(absolute_url, policy_type):
-                continue
-                
-            # Check if this URL matches the expected policy type
-            if not is_correct_policy_type(absolute_url, policy_type):
-                continue
-                
-            # Check link text for keywords
-            link_text = ' '.join([
-                link.get_text().strip(),
-                link.get('title', '').strip(),
-                link.get('aria-label', '').strip()
-            ]).lower()
+
+            # Get link text and look for policy keywords
+            link_text = link.get_text().lower().strip()
             
-            # Skip links containing negative keywords
-            if any(neg_keyword in link_text.lower() for neg_keyword in negative_keywords):
-                continue
-                
-            # Skip links with support-policy in URL path for privacy detection
-            if policy_type == 'privacy' and '/support-policy' in absolute_url.lower():
-                continue
-                
-            # Check URL path for specific patterns
-            url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
-            
-            # Exact path matches for privacy
-            privacy_path_patterns = ['/privacy', '/privacy-policy', '/policy']
-            if policy_type == 'privacy' and '/support-policy' in url_path:
-                continue  # Skip support policy for privacy detection
-            
-            # Check if any keyword is in the link text or href
-            if (policy_type == 'privacy' and any(pattern in url_path for pattern in privacy_path_patterns)) or \
-               any(keyword in link_text for keyword in keywords) or \
-               any(keyword in href.lower() for keyword in keywords):
-                try:
-                    # Skip likely false positives
-                    if is_likely_false_positive(absolute_url, policy_type):
-                        continue
+            for keyword in keywords:
+                if keyword.lower() in link_text:
+                    candidates.append((href, 10, "footer_text_match"))  # Higher score for footer links
+                    break
                     
-                    # Double-check policy type
-                    if not is_correct_policy_type(absolute_url, policy_type):
-                        continue
-                        
-                    return absolute_url
-                except Exception:
-                    continue
-    
-    # If nothing found in footer elements, look for elements with policy-related classes/IDs
-    if policy_type == 'privacy':
-        policy_class_patterns = ['privacy', 'privacy-policy', 'policy', 'legal', 'data-protection']
-    else:
-        policy_class_patterns = ['terms', 'tos', 'legal', 'conditions']
+            # Also check href for policy keywords
+            href_lower = href.lower()
+            if policy_type == 'privacy':
+                if any(term in href_lower for term in ['/privacy', 'privacy-policy', 'privacy_policy', 'privacypolicy', 'privacy.html']):
+                    candidates.append((href, 8, "footer_href_match"))
+            else:  # ToS
+                if any(term in href_lower for term in ['/terms', '/tos', 'terms-of-service', 'terms.html', 'legal-terms']):
+                    candidates.append((href, 8, "footer_href_match"))
+
+    # Find elements with common class/id patterns for policies
+    policy_class_patterns = ['privacy-link', 'privacy_link', 'privacyLink', 'privacy-policy', 
+                           'terms-link', 'terms_link', 'termsLink', 'terms-of-service',
+                           'legal-link', 'legal_link', 'legalLink']
     
     for pattern in policy_class_patterns:
-        for element in soup.find_all(attrs=True):
-            attrs = element.attrs
-            for attr_name in ['class', 'id']:
-                if attr_name in attrs:
-                    attr_value = attrs[attr_name]
-                    if isinstance(attr_value, list):
-                        attr_value = ' '.join(attr_value)
-                    
-                    if attr_value and pattern in attr_value.lower():
-                        # Check if this element contains links with our keywords
-                        for link in element.find_all('a', href=True):
-                            href = link.get('href', '').strip()
-                            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-                                continue
-                                
-                            # Skip likely false positives
-                            absolute_url = urljoin(base_url, href) if base_url else href
-                            if is_likely_false_positive(absolute_url, policy_type):
-                                continue
-                                
-                            # Check if this URL matches the expected policy type
-                            if not is_correct_policy_type(absolute_url, policy_type):
-                                continue
-                                
-                            # Skip support-policy for privacy detection
-                            if policy_type == 'privacy' and '/support-policy' in absolute_url.lower():
-                                continue
-                                
-                            link_text = ' '.join([
-                                link.get_text().strip(),
-                                link.get('title', '').strip(),
-                                link.get('aria-label', '').strip()
-                            ]).lower()
-                            
-                            # Skip links containing negative keywords
-                            if any(neg_keyword in link_text.lower() for neg_keyword in negative_keywords):
-                                continue
-                            
-                            # URL path patterns check
-                            url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
-                            privacy_path_patterns = ['/privacy', '/privacy-policy', '/policy']
-                            
-                            # For this match, we'll be more strict about relevant keywords
-                            if (policy_type == 'privacy' and any(pattern in url_path for pattern in privacy_path_patterns)) or \
-                               any(keyword in link_text for keyword in keywords):
-                                try:
-                                    # Skip likely false positives
-                                    if is_likely_false_positive(absolute_url, policy_type):
-                                        continue
-                                    
-                                    # Double-check policy type
-                                    if not is_correct_policy_type(absolute_url, policy_type):
-                                        continue
-                                        
-                                    return absolute_url
-                                except Exception:
-                                    continue
-    
-    # Look for any links with very specific privacy policy paths or text
-    if policy_type == 'privacy':
+        # Check for elements with matching class
+        for element in soup.find_all(class_=lambda c: c and pattern.lower() in c.lower() if c else False):
+            # If it's a link itself
+            if element.name == 'a' and element.has_attr('href'):
+                href = element.get('href', '').strip()
+                if href and not href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                    candidates.append((href, 9, "policy_class"))
+            # If it contains links
+            else:
+                for link in element.find_all('a', href=True):
+                    href = link.get('href', '').strip()
+                    if href and not href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                        candidates.append((href, 7, "policy_container_class"))
+
+    # If no candidates found, look for all links with policy-related text
+    if not candidates:
         for link in soup.find_all('a', href=True):
             href = link.get('href', '').strip()
             if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
                 continue
-            
-            # Skip likely false positives
-            absolute_url = urljoin(base_url, href) if base_url else href
-            if is_likely_false_positive(absolute_url, policy_type):
-                continue
-            
-            # Skip support-policy for privacy detection
-            if '/support-policy' in absolute_url.lower():
-                continue
-            
-            # Ensure this URL is not a ToS URL
-            if not is_correct_policy_type(absolute_url, policy_type):
-                continue
                 
-            url_path = urlparse(href).path.lower() if href.startswith(('http://', 'https://')) else href.lower()
+            link_text = link.get_text().lower().strip()
             
-            if any(pattern in url_path for pattern in ['/privacy', '/privacy-policy', '/policy']):
-                # Skip support-policy
-                if '/support-policy' not in url_path:
-                    try:
-                        return absolute_url
-                    except Exception:
-                        continue
-                
-            link_text = link.get_text().strip().lower()
-            if link_text in ['privacy', 'privacy policy', 'privacy-policy', 'policy']:
-                # Skip links containing negative keywords
-                if not any(neg_keyword in link_text for neg_keyword in negative_keywords):
-                    try:
-                        return absolute_url
-                    except Exception:
-                        continue
+            # Check for policy keywords in link text
+            for keyword in keywords:
+                if keyword.lower() in link_text:
+                    candidates.append((href, 5, "text_match"))
+                    break
+
+    # Sort candidates by score
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    
+    if candidates:
+        # Return the highest-scoring candidate
+        return candidates[0][0]
     
     return None
