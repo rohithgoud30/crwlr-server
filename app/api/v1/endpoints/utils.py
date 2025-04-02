@@ -421,19 +421,29 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
         strong_privacy_matches = [
             'privacy policy', 'privacy notice', 'privacy statement', 
             'data protection', 'privacy', 'privacidad', 'datenschutz',
-            'gdpr', 'ccpa', 'data privacy'
+            'gdpr', 'ccpa', 'data privacy', 'notice',
+            # Amazon specific patterns
+            'privacy', 'notice', 'privacy & cookie notice'
         ]
         
         # Count strong privacy matches in the text
         matches = sum(1 for pattern in strong_privacy_matches if pattern in text_lower)
         score += (matches * 5.0)
         
-        # Additional bonus for explicit matches
+        # Additional bonus for exact matches - Amazon often uses just "Privacy Notice"
         if 'privacy policy' in text_lower:
             score += 8.0
+        elif 'privacy notice' in text_lower:
+            score += 8.0  # Equal score for "Privacy Notice" which Amazon uses
+            
+        # Extra bonus for Amazon domain + privacy notice
+        if 'amazon' in url_lower and ('privacy' in text_lower or 'notice' in text_lower):
+            score += 5.0  # Extra bonus for Amazon-specific patterns
             
         if 'privacy' in text_lower and 'policy' in text_lower:
             score += 4.0
+        elif 'privacy' in text_lower and 'notice' in text_lower:
+            score += 4.0  # Equal score for "privacy notice" pattern
     else:  # ToS
         strong_terms_matches = [
             'terms of service', 'terms of use', 'terms and conditions',
@@ -464,12 +474,12 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
     
     # URL-based scoring
     if policy_type == 'privacy':
-        url_patterns = ['/privacy', 'privacy-policy', 'privacy_policy', 'privacypolicy', 'datenschutz']
+        url_patterns = ['/privacy', 'privacy-policy', 'privacy_policy', 'privacypolicy', 'datenschutz', 'privacy-notice', 'notice']
         url_matches = sum(1 for pattern in url_patterns if pattern in url_lower)
         score += (url_matches * 3.0)
     else:  # ToS
         url_patterns = ['/terms', '/tos', 'terms-of-service', 'terms-of-use', 'termsofservice', 
-                      'conditions-of-use', 'condition-of-use']
+                       'conditions-of-use', 'condition-of-use']
         url_matches = sum(1 for pattern in url_patterns if pattern in url_lower)
         score += (url_matches * 3.0)
     
@@ -487,14 +497,19 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
             score -= 2.0  # Penalty if looking for privacy
     
     # Exact filename matches
-    privacy_filenames = ['privacy.html', 'privacy.php', 'privacy.htm', 'privacy.aspx', 'privacy']
+    privacy_filenames = ['privacy.html', 'privacy.php', 'privacy.htm', 'privacy.aspx', 'privacy', 'notice.html']
     tos_filenames = ['terms.html', 'tos.html', 'terms.php', 'terms.htm', 'terms.aspx', 'tos', 'terms']
     
     if policy_type == 'privacy' and any(url_lower.endswith(fname) for fname in privacy_filenames):
         score += 5.0
     elif policy_type == 'tos' and any(url_lower.endswith(fname) for fname in tos_filenames):
         score += 5.0
-        
+    
+    # Special handling for Amazon
+    if 'amazon' in url_lower:
+        if policy_type == 'privacy' and ('privacy' in url_lower or 'notice' in url_lower):
+            score += 3.0  # Boost Amazon privacy pages
+            
     logger.debug(f"Final score for {policy_type} candidate: {url} = {score}")
     return score
 
@@ -558,7 +573,8 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
     privacy_indicators = [
         '/privacy', 'privacy-policy', 'privacy_policy', 'privacypolicy', 'privacy.htm',
         '/datenschutz', 'privacidad', '/gdpr', 'data-protection', 'data_protection',
-        'privacy-notice', 'privacy_notice', 'privacy-statement', 'privacy_statement'
+        'privacy-notice', 'privacy_notice', 'privacy-statement', 'privacy_statement',
+        'notice', 'notice.html', '/notice/'  # Added notice variations
     ]
     
     # Define strong indicators for terms of service
@@ -568,6 +584,11 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
         'terms_and_conditions', 'termsandconditions', 'terms.html', 'tos.html',
         'eula', 'conditions-of-use', 'condition-of-use', 'user-agreement'
     ]
+    
+    # Special case for Amazon domains
+    if 'amazon' in url:
+        if policy_type == 'privacy' and ('notice' in url or 'privacy' in url):
+            return True
     
     # Special case: Combined "legal" pages might contain both
     if '/legal' in url or '/policies' in url:
@@ -833,3 +854,26 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                         continue
     
     return None
+
+def make_url_absolute(url: str, base_url: str) -> str:
+    """Convert relative URLs to absolute URLs."""
+    if not url:
+        return ""
+        
+    # If the URL starts with a single slash, it's relative to the domain root
+    if url.startswith('/') and not url.startswith('//'):
+        parsed_base = urlparse(base_url)
+        base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+        return urljoin(base_domain, url)
+    
+    # If it starts with // (protocol-relative), add the protocol
+    if url.startswith('//'):
+        parsed_base = urlparse(base_url)
+        return f"{parsed_base.scheme}:{url}"
+        
+    # If it's a relative URL without a leading slash, join with the base URL
+    if not url.startswith(('http://', 'https://', '//')):
+        return urljoin(base_url, url)
+    
+    # It's already an absolute URL
+    return url

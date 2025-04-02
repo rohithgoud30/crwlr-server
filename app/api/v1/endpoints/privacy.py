@@ -824,6 +824,30 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     if class_id_result:
         return class_id_result
         
+    # Special case for Amazon - they use "Privacy Notice" in the footer
+    if 'amazon' in url.lower():
+        # Look specifically for footer links with "Privacy Notice" text
+        for link in soup.find_all('a', href=True):
+            link_text = link.get_text().strip().lower()
+            if (link_text == 'privacy notice' or 
+                link_text == 'privacy' or 
+                'privacy' in link_text and 'notice' in link_text):
+                href = link.get('href')
+                if href:
+                    logger.info(f"Found Amazon privacy notice link: {href}")
+                    return make_url_absolute(href, url)
+                    
+        # Also look for links with just "Privacy" text in footers
+        footer_elements = soup.select('footer, .footer, #footer, [class*="footer"], [id*="footer"], [class*="bottom"], [id*="bottom"]')
+        for footer in footer_elements:
+            for link in footer.find_all('a', href=True):
+                link_text = link.get_text().strip().lower()
+                if link_text == 'privacy' or link_text == 'privacy notice' or 'privacy' in link_text:
+                    href = link.get('href')
+                    if href:
+                        logger.info(f"Found Amazon footer privacy link: {href}")
+                        return make_url_absolute(href, url)
+        
     # If not found, proceed with the existing approach
     base_domain = urlparse(url).netloc.lower()
     is_legal_page = is_on_policy_page(url, 'privacy')
@@ -899,6 +923,10 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if any(pattern in href_lower for pattern in strong_url_patterns):
                 score += 4.0
             
+            # Extra scoring for Amazon "Privacy Notice" pattern
+            if 'amazon' in href_lower and ('notice' in link_text or 'privacy' in link_text):
+                score += 7.0  # Give Amazon privacy notice links a boost
+                
             score += get_policy_score(link_text, absolute_url, 'privacy')
             
             for pattern, penalty in get_common_penalties():
