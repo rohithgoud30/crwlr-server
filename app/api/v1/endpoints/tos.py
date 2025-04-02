@@ -58,12 +58,14 @@ class TosResponse(BaseModel):
 
 def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     """Find Terms of Service link in the HTML soup."""
-    # First try the high-priority class/ID based approach
-    class_id_result = find_policy_by_class_id(soup, 'tos')
+    # First try the structure-aware, high-priority approach
+    class_id_result = find_policy_by_class_id(soup, 'tos', base_url=url)
     if class_id_result:
+        logger.info(f"Found ToS link via structural search: {class_id_result}")
         return class_id_result
         
-    # If not found, proceed with the existing approach
+    # If not found, proceed with the general scoring approach (as fallback)
+    logger.info("Structural search failed, proceeding with general link scoring...")
     base_domain = urlparse(url).netloc.lower()
     is_legal_page = is_on_policy_page(url, 'tos')
     exact_patterns, strong_url_patterns = get_policy_patterns('tos')
@@ -992,16 +994,15 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                             # Extra check: don't return Apple's general terms
                             if "apple.com/legal/terms" in tos_from_pp:
                                 logger.warning(f"Rejecting Apple's general terms: {tos_from_pp}")
-                            else:
-                                # Verify this is actually a ToS link
-                                if verify_tos_link(session, tos_from_pp, headers):
-                                    return TosResponse(
-                                        url=url,
-                                        tos_url=tos_from_pp,
-                                        success=True,
-                                        message=f"Terms of Service found via app's privacy policy page for {app_info}",
-                                        method_used="app_store_pp_to_tos"
-                                    )
+                            # Verify this is actually a ToS link
+                            if verify_tos_link(session, tos_from_pp, headers):
+                                return TosResponse(
+                                    url=url,
+                                    tos_url=tos_from_pp,
+                                    success=True,
+                                    message=f"Terms of Service found via app's privacy policy page for {app_info}",
+                                    method_used="play_store_pp_to_tos"
+                                )
                 
                 except Exception as e:
                     logger.error(f"Error fetching privacy page: {str(e)}")
@@ -1190,16 +1191,15 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                             # Extra check: don't return Apple's general terms
                             if "apple.com/legal/terms" in tos_from_pp:
                                 logger.warning(f"Rejecting Apple's general terms: {tos_from_pp}")
-                            else:
-                                # Verify this is actually a ToS link
-                                if verify_tos_link(session, tos_from_pp, headers):
-                                    return TosResponse(
-                                        url=url,
-                                        tos_url=tos_from_pp,
-                                        success=True,
-                                        message=f"Terms of Service found via app's privacy policy page for {app_info}",
-                                        method_used="play_store_pp_to_tos"
-                                    )
+                            # Verify this is actually a ToS link
+                            if verify_tos_link(session, tos_from_pp, headers):
+                                return TosResponse(
+                                    url=url,
+                                    tos_url=tos_from_pp,
+                                    success=True,
+                                    message=f"Terms of Service found via app's privacy policy page for {app_info}",
+                                    method_used="play_store_pp_to_tos"
+                                )
                 
                 except Exception as e:
                     logger.error(f"Error fetching privacy page: {str(e)}")

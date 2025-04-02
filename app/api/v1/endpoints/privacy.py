@@ -819,12 +819,14 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
 
 def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     """Find privacy policy link in the HTML soup."""
-    # First try the high-priority class/ID based approach
-    class_id_result = find_policy_by_class_id(soup, 'privacy')
+    # First try the structure-aware, high-priority approach
+    class_id_result = find_policy_by_class_id(soup, 'privacy', base_url=url)
     if class_id_result:
+        logger.info(f"Found privacy link via structural search: {class_id_result}")
         return class_id_result
         
-    # If not found, proceed with the existing approach
+    # If not found, proceed with the general scoring approach (as fallback)
+    logger.info("Structural search failed, proceeding with general link scoring...")
     base_domain = urlparse(url).netloc.lower()
     is_legal_page = is_on_policy_page(url, 'privacy')
     exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
