@@ -838,9 +838,9 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         href = link.get('href', '').strip()
         if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
             continue
-            
+        
         try:
-            absolute_url = urljoin(url, href)
+            absolute_url = make_url_absolute(href, url)
             
             # Skip likely false positives
             if is_likely_false_positive(absolute_url, 'privacy'):
@@ -848,30 +848,30 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             # Check if this is a different domain from the original site
             target_domain = urlparse(absolute_url).netloc.lower()
-            is_cross_domain = current_domain != target_domain
+            base_domain = get_base_domain(current_domain)
+            target_base_domain = get_base_domain(target_domain)
             
-            # For cross-domain links, be stricter with privacy policy detection
-            if is_cross_domain:
+            if target_base_domain != base_domain:
                 # For cross-domain links, require explicit privacy references
                 if not any(term in absolute_url.lower() for term in ['/privacy', 'privacy-policy', '/gdpr']):
                     logger.warning(f"Skipping cross-domain non-privacy URL: {absolute_url}")
                     continue
-                
+            
             # Ensure this is not a ToS URL
             if not is_correct_policy_type(absolute_url, 'privacy'):
                 continue
-            
+    
             link_text = ' '.join([
                 link.get_text().strip(),
                 link.get('title', '').strip(),
-                link.get('aria-label', '').strip()
+                absolute_url
             ]).lower()
             
-            if len(link_text.strip()) < 3:
+            score = get_policy_score(link_text, absolute_url, 'privacy')
+            
+            if score <= 0:
                 continue
-    
-            score = 0.0
-            footer_score = get_footer_score(link)
+            
             domain_score = get_domain_score(absolute_url, base_domain)
             
             if domain_score < 0:
@@ -884,7 +884,7 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 # Strongly prefer same-domain links
                 score += 15.0
                 logger.info(f"Applied same-domain bonus for {absolute_url}")
-            elif is_cross_domain:
+            elif target_base_domain != base_domain:
                 # Apply penalty for cross-domain links
                 score -= 8.0
                 logger.info(f"Applied cross-domain penalty for {absolute_url}")
@@ -905,10 +905,10 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 if pattern in href_lower:
                     score += penalty
             
-            final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
+            final_score = (score * 2.0) + (get_footer_score(link) * 3.0) + (domain_score * 1.0)
             
             threshold = 5.0
-            if footer_score > 0:
+            if get_footer_score(link) > 0:
                 threshold = 4.0
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 threshold = 4.0
