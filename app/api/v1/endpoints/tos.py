@@ -56,46 +56,44 @@ class TosResponse(BaseModel):
 
 
 def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
+    """Find Terms of Service link in the HTML soup."""
     # First try the high-priority class/ID based approach
     class_id_result = find_policy_by_class_id(soup, 'tos')
     if class_id_result:
         return class_id_result
         
     # If not found, proceed with the existing approach
-    base_domain = urlparse(url).netloc
+    base_domain = urlparse(url).netloc.lower()
     is_legal_page = is_on_policy_page(url, 'tos')
     exact_patterns, strong_url_patterns = get_policy_patterns('tos')
     candidates = []
     
+    # Iterate through all links to find the ToS
     for link in soup.find_all('a', href=True):
         href = link.get('href', '').strip()
         if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
             continue
-        
+            
         try:
             absolute_url = urljoin(url, href)
             
-            # Skip likely false positives 
+            # Skip likely false positives
             if is_likely_false_positive(absolute_url, 'tos'):
                 continue
-                
-            # Ensure this is not a privacy policy URL
+            
+            # Ensure this is not a Privacy URL
             if not is_correct_policy_type(absolute_url, 'tos'):
                 continue
-                
+            
             link_text = ' '.join([
-                link.get_text().strip(), 
-                link.get('title', '').strip(), 
+                link.get_text().strip(),
+                link.get('title', '').strip(),
                 link.get('aria-label', '').strip()
             ]).lower()
             
             if len(link_text.strip()) < 3:
                 continue
-            
-            # Skip likely article links
-            if is_likely_article_link(absolute_url, link_text):
-                continue
-            
+    
             score = 0.0
             footer_score = get_footer_score(link)
             domain_score = get_domain_score(absolute_url, base_domain)
@@ -107,44 +105,36 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if is_legal_page and href_domain != base_domain:
                 continue
             
-            # Check for exact pattern matches in link text
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 score += 6.0
-                
-            # Check for strong URL patterns
+            
             href_lower = absolute_url.lower()
             if any(pattern in href_lower for pattern in strong_url_patterns):
                 score += 4.0
-                
-            # Add the general policy score
+            
             score += get_policy_score(link_text, href_lower, 'tos')
             
-            # Apply common penalties
             for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
                     score += penalty
             
-            # Calculate final score
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
             
-            # Determine threshold based on context
             threshold = 5.0
             if footer_score > 0:
                 threshold = 4.0
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 threshold = 4.0
-                
+            
             if is_legal_page and href_domain != base_domain:
                 threshold += 3.0
-                
-            # Add to candidates if score exceeds threshold
+            
             if final_score > threshold:
                 candidates.append((absolute_url, final_score))
         
         except Exception:
             continue
     
-    # Return the highest scoring candidate, if any
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[0][0]
