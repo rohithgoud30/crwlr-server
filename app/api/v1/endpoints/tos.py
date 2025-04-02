@@ -742,6 +742,29 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
         'Cache-Control': 'max-age=0',
     }
 
+    # Check if this is an App Store URL
+    is_app_store = False
+    is_play_store = False
+    parsed_url = urlparse(original_url)
+    
+    if 'apps.apple.com' in parsed_url.netloc or 'itunes.apple.com' in parsed_url.netloc:
+        logger.info(f"Detected App Store URL: {original_url}")
+        is_app_store = True
+        # Handle App Store URL differently
+        app_store_result = await handle_app_store_tos(original_url, headers)
+        if app_store_result.success:
+            return app_store_result
+        # If special handling fails, fall back to standard approach
+    
+    if 'play.google.com/store/apps' in original_url:
+        logger.info(f"Detected Google Play Store URL: {original_url}")
+        is_play_store = True
+        # Handle Play Store URL differently
+        play_store_result = await handle_play_store_tos(original_url, headers)
+        if play_store_result.success:
+            return play_store_result
+        # If special handling fails, fall back to standard approach
+
     session = requests.Session()
     variations_with_types = [(original_url, "original exact url")]
     
@@ -771,6 +794,385 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
         message="No Terms of Service link found. Tried both standard scraping and JavaScript-enabled browser rendering.",
         method_used="both_failed"
     )
+
+
+async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
+    """
+    Special handling for App Store URLs - first get the privacy policy link,
+    then try to find the ToS link on the same domain as the privacy policy.
+    """
+    try:
+        logger.info(f"Using specialized App Store ToS handling for: {url}")
+        
+        # First, try to get the app name for better logging
+        session = requests.Session()
+        app_name = None
+        app_id = None
+        
+        # Parse URL to get app ID
+        parsed_url = urlparse(url)
+        if parsed_url.path:
+            id_match = re.search(r'/id(\d+)', parsed_url.path)
+            if id_match:
+                app_id = id_match.group(1)
+                
+        try:
+            response = session.get(url, headers=headers, timeout=15)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Look for app name
+            title_elem = soup.find('title')
+            if title_elem:
+                app_name = title_elem.text.strip().split('-')[0].strip()
+            
+            if not app_name:
+                h1_elem = soup.find('h1')
+                if h1_elem:
+                    app_name = h1_elem.text.strip()
+        except Exception as e:
+            logger.error(f"Error extracting app name: {str(e)}")
+            
+        app_info = f"App {'(' + app_name + ')' if app_name else f'ID {app_id}' if app_id else ''}"
+        
+        # Step 1: First try to get Apple's standard ToS URL as these are most reliable
+        logger.info(f"Checking for Apple standard ToS URL for {app_info}")
+        apple_standard_tos_url = "https://www.apple.com/legal/internet-services/itunes/us/terms.html"
+        
+        # Verify that Apple's ToS URL is valid
+        try:
+            tos_response = session.get(apple_standard_tos_url, headers=headers, timeout=15)
+            if tos_response.status_code == 200:
+                # Verify this is actually a ToS page
+                if verify_tos_link(session, apple_standard_tos_url, headers):
+                    logger.info(f"Verified Apple standard ToS link: {apple_standard_tos_url}")
+                    return TosResponse(
+                        url=url,
+                        tos_url=apple_standard_tos_url,
+                        success=True,
+                        message=f"App Store standard Terms of Service found for {app_info}",
+                        method_used="app_store_standard_tos"
+                    )
+        except Exception as e:
+            logger.error(f"Error checking Apple standard ToS URL: {str(e)}")
+        
+        # Step 2: Try to find alternative Apple ToS URLs
+        apple_alternative_tos_urls = [
+            "https://www.apple.com/legal/internet-services/terms/site.html",
+            "https://www.apple.com/legal/terms/site.html",
+            "https://www.apple.com/legal/terms/",
+        ]
+        
+        for apple_tos_url in apple_alternative_tos_urls:
+            try:
+                tos_response = session.get(apple_tos_url, headers=headers, timeout=15)
+                if tos_response.status_code == 200:
+                    # Verify this is actually a ToS page
+                    if verify_tos_link(session, apple_tos_url, headers):
+                        logger.info(f"Verified Apple alternative ToS link: {apple_tos_url}")
+                        return TosResponse(
+                            url=url,
+                            tos_url=apple_tos_url,
+                            success=True,
+                            message=f"App Store alternative Terms of Service found for {app_info}",
+                            method_used="app_store_alternative_tos"
+                        )
+            except Exception as e:
+                logger.error(f"Error checking Apple alternative ToS URL {apple_tos_url}: {str(e)}")
+        
+        # Step 3: Try to find the privacy policy link and use that to locate ToS
+        logger.info(f"Looking for privacy policy link to derive ToS link for {app_info}")
+        
+        # Import here to avoid circular imports
+        from .privacy import find_privacy_link
+        
+        # First, we find the privacy policy of the app
+        try:
+            response = session.get(url, headers=headers, timeout=15)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Look for privacy policy links
+            privacy_link = find_privacy_link(url, soup)
+            
+            if privacy_link:
+                logger.info(f"Found privacy policy link for App Store item: {privacy_link}")
+                
+                # Make sure the link is absolute
+                if privacy_link.startswith('/'):
+                    privacy_link = urljoin(url, privacy_link)
+                
+                # Get the base domain of the privacy policy
+                pp_parsed = urlparse(privacy_link)
+                pp_base_domain = f"{pp_parsed.scheme}://{pp_parsed.netloc}"
+                
+                # Try to get the ToS from the same domain
+                try:
+                    # First try to visit the privacy page to find ToS links
+                    pp_response = session.get(privacy_link, headers=headers, timeout=15)
+                    pp_soup = BeautifulSoup(pp_response.text, 'html.parser')
+                    
+                    # Search for ToS links on the privacy page
+                    tos_from_pp = find_tos_link(privacy_link, pp_soup)
+                    
+                    if tos_from_pp:
+                        # Make it absolute if needed
+                        if tos_from_pp.startswith('/'):
+                            tos_from_pp = urljoin(pp_base_domain, tos_from_pp)
+                        
+                        logger.info(f"Found ToS link from privacy page: {tos_from_pp}")
+                        
+                        # Verify this is a valid ToS page
+                        if verify_tos_link(session, tos_from_pp, headers):
+                            return TosResponse(
+                                url=url,
+                                tos_url=tos_from_pp,
+                                success=True,
+                                message=f"Terms of Service found via app's privacy policy page for {app_info}",
+                                method_used="app_store_pp_to_tos"
+                            )
+                    
+                    # If not found on privacy page, try common ToS paths on the same domain
+                    logger.info(f"Trying common ToS paths on domain: {pp_base_domain}")
+                    common_tos_paths = [
+                        "/terms", "/tos", "/terms-of-service", "/terms-of-use", 
+                        "/terms-and-conditions", "/legal/terms", "/legal", 
+                        "/terms.html", "/legal/terms.html"
+                    ]
+                    
+                    for path in common_tos_paths:
+                        try:
+                            candidate_tos_url = pp_base_domain + path
+                            logger.info(f"Checking candidate ToS URL: {candidate_tos_url}")
+                            
+                            tos_check_response = session.get(candidate_tos_url, headers=headers, timeout=15)
+                            if tos_check_response.status_code == 200:
+                                if verify_tos_link(session, candidate_tos_url, headers):
+                                    return TosResponse(
+                                        url=url,
+                                        tos_url=candidate_tos_url,
+                                        success=True,
+                                        message=f"Terms of Service found via common path on app's privacy policy domain for {app_info}",
+                                        method_used="app_store_pp_domain_common_path"
+                                    )
+                        except Exception as e:
+                            logger.error(f"Error checking ToS path {path}: {str(e)}")
+                    
+                except Exception as e:
+                    logger.error(f"Error fetching privacy page: {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"Error in App Store ToS detection: {str(e)}")
+        
+        # If we couldn't find developer ToS, fall back to Apple's ToS
+        logger.info(f"Falling back to Apple's general ToS for {app_info}")
+        return TosResponse(
+            url=url,
+            tos_url="https://www.apple.com/legal/internet-services/terms/site.html",
+            success=True,
+            message=f"Fallback to Apple's general Terms of Service for {app_info} - no developer-specific ToS found",
+            method_used="app_store_apple_fallback"
+        )
+            
+    except Exception as e:
+        logger.error(f"Error in App Store ToS handler: {str(e)}")
+        return TosResponse(
+            url=url,
+            success=False,
+            message=f"Error handling App Store URL for ToS: {str(e)}",
+            method_used="app_store_failed"
+        )
+
+
+async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
+    """
+    Special handling for Google Play Store URLs - first get the privacy policy link,
+    then try to find the ToS link on the same domain as the privacy policy.
+    """
+    try:
+        logger.info(f"Using specialized Play Store ToS handling for: {url}")
+        
+        # First, try to get the app name and ID for better logging
+        session = requests.Session()
+        app_name = None
+        app_id = None
+        
+        # Parse URL to get app ID
+        parsed_url = urlparse(url)
+        query_params = parsed_url.query
+        query_dict = {param.split('=')[0]: param.split('=')[1] for param in query_params.split('&') if '=' in param}
+        app_id = query_dict.get('id')
+                
+        try:
+            response = session.get(url, headers=headers, timeout=15)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Look for app name
+            title_elem = soup.find('title')
+            if title_elem:
+                app_name = title_elem.text.strip().split('-')[0].strip()
+            
+            if not app_name:
+                h1_elem = soup.find('h1')
+                if h1_elem:
+                    app_name = h1_elem.text.strip()
+        except Exception as e:
+            logger.error(f"Error extracting app name: {str(e)}")
+            
+        app_info = f"App {'(' + app_name + ')' if app_name else f'ID {app_id}' if app_id else ''}"
+        
+        # Step 1: First try to get Google's standard ToS URL as these are most reliable
+        logger.info(f"Checking for Google standard ToS URL for {app_info}")
+        google_standard_tos_url = "https://play.google.com/about/play-terms/index.html"
+        
+        # Verify that Google's ToS URL is valid
+        try:
+            tos_response = session.get(google_standard_tos_url, headers=headers, timeout=15)
+            if tos_response.status_code == 200:
+                # Verify this is actually a ToS page
+                if verify_tos_link(session, google_standard_tos_url, headers):
+                    logger.info(f"Verified Google standard ToS link: {google_standard_tos_url}")
+                    return TosResponse(
+                        url=url,
+                        tos_url=google_standard_tos_url,
+                        success=True,
+                        message=f"Play Store standard Terms of Service found for {app_info}",
+                        method_used="play_store_standard_tos"
+                    )
+        except Exception as e:
+            logger.error(f"Error checking Google standard ToS URL: {str(e)}")
+        
+        # Step 2: Try to find alternative Google ToS URLs
+        google_alternative_tos_urls = [
+            "https://policies.google.com/terms",
+            "https://www.google.com/policies/terms/",
+            "https://play.google.com/intl/en-us_us/about/play-terms.html",
+        ]
+        
+        for google_tos_url in google_alternative_tos_urls:
+            try:
+                tos_response = session.get(google_tos_url, headers=headers, timeout=15)
+                if tos_response.status_code == 200:
+                    # Verify this is actually a ToS page
+                    if verify_tos_link(session, google_tos_url, headers):
+                        logger.info(f"Verified Google alternative ToS link: {google_tos_url}")
+                        return TosResponse(
+                            url=url,
+                            tos_url=google_tos_url,
+                            success=True,
+                            message=f"Play Store alternative Terms of Service found for {app_info}",
+                            method_used="play_store_alternative_tos"
+                        )
+            except Exception as e:
+                logger.error(f"Error checking Google alternative ToS URL {google_tos_url}: {str(e)}")
+        
+        # Step 3: Try to find the privacy policy link and use that to locate ToS
+        logger.info(f"Looking for privacy policy link to derive ToS link for {app_info}")
+        
+        # Import here to avoid circular imports
+        from .privacy import find_privacy_link
+        
+        # First, we try to see if there's an app data safety page
+        data_safety_url = url
+        if app_id:
+            data_safety_url = f"https://play.google.com/store/apps/datasafety?id={app_id}"
+            
+        try:
+            data_safety_response = session.get(data_safety_url, headers=headers, timeout=15)
+            data_safety_soup = BeautifulSoup(data_safety_response.text, 'html.parser')
+            privacy_link = find_privacy_link(data_safety_url, data_safety_soup)
+            
+            if not privacy_link:
+                # Try the main app page
+                response = session.get(url, headers=headers, timeout=15)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                privacy_link = find_privacy_link(url, soup)
+            
+            if privacy_link:
+                logger.info(f"Found privacy policy link for Play Store item: {privacy_link}")
+                
+                # Make sure the link is absolute
+                if privacy_link.startswith('/'):
+                    privacy_link = urljoin(url, privacy_link)
+                
+                # Get the base domain of the privacy policy
+                pp_parsed = urlparse(privacy_link)
+                pp_base_domain = f"{pp_parsed.scheme}://{pp_parsed.netloc}"
+                
+                # Try to get the ToS from the same domain
+                try:
+                    # First try to visit the privacy page to find ToS links
+                    pp_response = session.get(privacy_link, headers=headers, timeout=15)
+                    pp_soup = BeautifulSoup(pp_response.text, 'html.parser')
+                    
+                    # Search for ToS links on the privacy page
+                    tos_from_pp = find_tos_link(privacy_link, pp_soup)
+                    
+                    if tos_from_pp:
+                        # Make it absolute if needed
+                        if tos_from_pp.startswith('/'):
+                            tos_from_pp = urljoin(pp_base_domain, tos_from_pp)
+                        
+                        logger.info(f"Found ToS link from privacy page: {tos_from_pp}")
+                        
+                        # Verify this is a valid ToS page
+                        if verify_tos_link(session, tos_from_pp, headers):
+                            return TosResponse(
+                                url=url,
+                                tos_url=tos_from_pp,
+                                success=True,
+                                message=f"Terms of Service found via app's privacy policy page for {app_info}",
+                                method_used="play_store_pp_to_tos"
+                            )
+                    
+                    # If not found on privacy page, try common ToS paths on the same domain
+                    logger.info(f"Trying common ToS paths on domain: {pp_base_domain}")
+                    common_tos_paths = [
+                        "/terms", "/tos", "/terms-of-service", "/terms-of-use", 
+                        "/terms-and-conditions", "/legal/terms", "/legal", 
+                        "/terms.html", "/legal/terms.html"
+                    ]
+                    
+                    for path in common_tos_paths:
+                        try:
+                            candidate_tos_url = pp_base_domain + path
+                            logger.info(f"Checking candidate ToS URL: {candidate_tos_url}")
+                            
+                            tos_check_response = session.get(candidate_tos_url, headers=headers, timeout=15)
+                            if tos_check_response.status_code == 200:
+                                if verify_tos_link(session, candidate_tos_url, headers):
+                                    return TosResponse(
+                                        url=url,
+                                        tos_url=candidate_tos_url,
+                                        success=True,
+                                        message=f"Terms of Service found via common path on app's privacy policy domain for {app_info}",
+                                        method_used="play_store_pp_domain_common_path"
+                                    )
+                        except Exception as e:
+                            logger.error(f"Error checking ToS path {path}: {str(e)}")
+                    
+                except Exception as e:
+                    logger.error(f"Error fetching privacy page: {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"Error in Play Store ToS detection: {str(e)}")
+        
+        # If we couldn't find developer ToS, fall back to Google's ToS
+        logger.info(f"Falling back to Google's general ToS for {app_info}")
+        return TosResponse(
+            url=url,
+            tos_url="https://policies.google.com/terms",
+            success=True,
+            message=f"Fallback to Google's general Terms of Service for {app_info} - no developer-specific ToS found",
+            method_used="play_store_google_fallback"
+        )
+            
+    except Exception as e:
+        logger.error(f"Error in Play Store ToS handler: {str(e)}")
+        return TosResponse(
+            url=url,
+            success=False,
+            message=f"Error handling Play Store URL for ToS: {str(e)}",
+            method_used="play_store_failed"
+        )
 
 
 async def playwright_tos_finder(url: str) -> TosResponse:
