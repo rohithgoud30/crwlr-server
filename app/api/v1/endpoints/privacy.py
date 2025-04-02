@@ -830,6 +830,9 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
     candidates = []
     
+    # Get current domain info for domain-matching rules
+    current_domain = urlparse(url).netloc.lower()
+    
     # Iterate through all links to find the privacy policy
     for link in soup.find_all('a', href=True):
         href = link.get('href', '').strip()
@@ -843,10 +846,16 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if is_likely_false_positive(absolute_url, 'privacy'):
                 continue
             
-            # Skip privacy policies from Vercel when looking at NextJS
-            if 'nextjs.org' in url.lower() and 'vercel.com/legal/privacy' in absolute_url.lower():
-                logger.warning(f"Skipping Vercel privacy policy URL for NextJS: {absolute_url}")
-                continue
+            # Check if this is a different domain from the original site
+            target_domain = urlparse(absolute_url).netloc.lower()
+            is_cross_domain = current_domain != target_domain
+            
+            # For cross-domain links, be stricter with privacy policy detection
+            if is_cross_domain:
+                # For cross-domain links, require explicit privacy references
+                if not any(term in absolute_url.lower() for term in ['/privacy', 'privacy-policy', '/gdpr']):
+                    logger.warning(f"Skipping cross-domain non-privacy URL: {absolute_url}")
+                    continue
                 
             # Ensure this is not a ToS URL
             if not is_correct_policy_type(absolute_url, 'privacy'):
@@ -870,9 +879,15 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             href_domain = urlparse(absolute_url).netloc.lower()
             
-            # Strong penalty for cross-domain links from nextjs to vercel
-            if 'nextjs.org' in url.lower() and 'vercel.com' in href_domain:
-                score -= 15.0
+            # Domain-specific scoring adjustments
+            if href_domain == current_domain:
+                # Strongly prefer same-domain links
+                score += 15.0
+                logger.info(f"Applied same-domain bonus for {absolute_url}")
+            elif is_cross_domain:
+                # Apply penalty for cross-domain links
+                score -= 8.0
+                logger.info(f"Applied cross-domain penalty for {absolute_url}")
                 
             if is_legal_page and href_domain != base_domain:
                 continue
@@ -891,11 +906,6 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                     score += penalty
             
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
-            
-            # Apply a domain matching bonus for same-domain policies
-            if urlparse(absolute_url).netloc == urlparse(url).netloc:
-                final_score += 10.0
-                logger.info(f"Applied same-domain bonus for {absolute_url}")
             
             threshold = 5.0
             if footer_score > 0:

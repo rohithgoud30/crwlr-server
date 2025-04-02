@@ -68,6 +68,9 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     exact_patterns, strong_url_patterns = get_policy_patterns('tos')
     candidates = []
     
+    # Get current domain info for domain-matching rules
+    current_domain = urlparse(url).netloc.lower()
+    
     # Iterate through all links to find the ToS
     for link in soup.find_all('a', href=True):
         href = link.get('href', '').strip()
@@ -87,20 +90,16 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 logger.warning(f"Skipping privacy policy URL in ToS search: {absolute_url}")
                 continue
                 
-            # Specific handling for NextJS / Vercel case
-            if 'nextjs.org' in url.lower():
-                if 'vercel.com/legal/privacy' in url_lower:
-                    logger.warning(f"Skipping Vercel privacy policy URL for NextJS: {absolute_url}")
+            # General cross-domain policy handling
+            # Check if this is a different domain from the original site
+            target_domain = urlparse(absolute_url).netloc.lower()
+            is_cross_domain = current_domain != target_domain
+            
+            if is_cross_domain:
+                # For cross-domain links, be stricter - require explicit terms references
+                if not any(term in url_lower for term in ['/terms', '/tos', '/legal/terms']):
+                    logger.warning(f"Skipping cross-domain non-terms URL: {absolute_url}")
                     continue
-                
-                # Strongly prefer NextJS domain ToS links
-                parsed_current = urlparse(url)
-                parsed_candidate = urlparse(absolute_url)
-                if parsed_current.netloc != parsed_candidate.netloc and 'vercel.com' in parsed_candidate.netloc:
-                    # If looking at nextjs.org, only accept vercel.com links if they're explicitly terms
-                    if not any(term in url_lower for term in ['/terms', '/tos', '/legal/terms']):
-                        logger.warning(f"Skipping Vercel non-terms URL for NextJS: {absolute_url}")
-                        continue
                 
             # Ensure this is not a Privacy URL
             if not is_correct_policy_type(absolute_url, 'tos'):
@@ -129,16 +128,15 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             href_domain = urlparse(absolute_url).netloc.lower()
             
-            # NextJS specific scoring adjustments
-            if 'nextjs.org' in url.lower():
+            # Domain-specific scoring adjustments
+            if href_domain == current_domain:
                 # Strongly prefer same-domain links
-                if href_domain == base_domain:
-                    score += 15.0
-                    logger.info(f"Applied NextJS same-domain bonus for {absolute_url}")
-                elif 'vercel.com' in href_domain:
-                    # Apply penalty for cross-domain Vercel links
-                    score -= 8.0
-                    logger.info(f"Applied Vercel domain penalty for {absolute_url}")
+                score += 15.0
+                logger.info(f"Applied same-domain bonus for {absolute_url}")
+            elif is_cross_domain:
+                # Apply penalty for cross-domain links
+                score -= 8.0
+                logger.info(f"Applied cross-domain penalty for {absolute_url}")
             
             if is_legal_page and href_domain != base_domain:
                 continue
@@ -159,11 +157,6 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             # Apply additional penalty for URLs with privacy terms
             if 'privacy' in url_lower:
                 score -= 10.0
-            
-            # Apply domain matching bonus for same-domain policies
-            if urlparse(absolute_url).netloc == urlparse(url).netloc:
-                score += 10.0
-                logger.info(f"Applied same-domain bonus for {absolute_url}")
             
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
             
