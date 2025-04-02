@@ -81,6 +81,12 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if is_likely_false_positive(absolute_url, 'tos'):
                 continue
             
+            # Extra check - skip privacy policy URLs when looking for ToS
+            url_lower = absolute_url.lower()
+            if '/privacy' in url_lower or 'privacy-policy' in url_lower or '/gdpr' in url_lower:
+                logger.warning(f"Skipping privacy policy URL in ToS search: {absolute_url}")
+                continue
+                
             # Ensure this is not a Privacy URL
             if not is_correct_policy_type(absolute_url, 'tos'):
                 continue
@@ -91,6 +97,11 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 link.get('aria-label', '').strip()
             ]).lower()
             
+            # Skip links that are explicitly privacy policies
+            if 'privacy' in link_text and not any(term in link_text for term in ['terms', 'tos', 'conditions']):
+                logger.warning(f"Skipping privacy link text in ToS search: {link_text}")
+                continue
+                
             if len(link_text.strip()) < 3:
                 continue
     
@@ -117,6 +128,10 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
                     score += penalty
+                    
+            # Apply additional penalty for URLs with privacy terms
+            if 'privacy' in url_lower:
+                score -= 10.0
             
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
             
