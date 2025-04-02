@@ -602,6 +602,13 @@ async def standard_privacy_finder(variations_to_try, headers, session) -> Privac
                     logger.warning(f"Found link {privacy_link} appears to be a ToS, not privacy policy, skipping")
                     continue
                     
+                # Ensure the link is absolute
+                if privacy_link.startswith('/'):
+                    parsed_final_url = urlparse(final_url)
+                    base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
+                    privacy_link = urljoin(base_url, privacy_link)
+                    logger.info(f"Converted relative URL to absolute URL: {privacy_link}")
+                    
                 logger.info(f"Found privacy link: {privacy_link} in {final_url} ({variation_type})")
                 return PrivacyResponse(
                     url=final_url,  # Return the actual URL after redirects
@@ -775,6 +782,13 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
                         message=f"Found link appears to be Terms of Service, not Privacy Policy: {privacy_link}",
                         method_used="playwright_wrong_policy_type"
                     )
+                
+                # Ensure the link is absolute
+                if privacy_link.startswith('/'):
+                    parsed_final_url = urlparse(final_url)
+                    base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
+                    privacy_link = urljoin(base_url, privacy_link)
+                    logger.info(f"Converted relative URL to absolute URL: {privacy_link}")
                     
                 return PrivacyResponse(
                     url=final_url,

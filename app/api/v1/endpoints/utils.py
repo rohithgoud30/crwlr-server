@@ -506,6 +506,17 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             base_url = meta.get('content')
             break
     
+    # If no og:url found, try to find base tag
+    if not base_url:
+        base_tag = soup.find('base', href=True)
+        if base_tag:
+            base_url = base_tag.get('href')
+    
+    # If still no base URL, use current URL from existing context if available
+    if not base_url:
+        # We'll handle this when returning the URL
+        pass
+    
     # Determine keywords based on policy type
     if policy_type == 'privacy':
         keywords = [
@@ -547,8 +558,14 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
                 continue
                 
+            # Make the URL absolute if possible
+            if base_url:
+                absolute_url = urljoin(base_url, href)
+            else:
+                # If no base URL is available, use the href as is
+                absolute_url = href
+                
             # Skip likely false positives
-            absolute_url = urljoin(base_url, href) if base_url else href
             if is_likely_false_positive(absolute_url, policy_type):
                 continue
                 

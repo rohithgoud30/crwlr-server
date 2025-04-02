@@ -191,6 +191,13 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
                 if not is_correct_policy_type(tos_link, 'tos'):
                     logger.warning(f"Found link {tos_link} appears to be a privacy policy, not ToS, skipping")
                     continue
+                
+                # Ensure the link is absolute
+                if tos_link.startswith('/'):
+                    parsed_final_url = urlparse(final_url)
+                    base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
+                    tos_link = urljoin(base_url, tos_link)
+                    logger.info(f"Converted relative URL to absolute URL: {tos_link}")
                     
                 logger.info(f"Found ToS link: {tos_link} in {final_url} ({variation_type})")
                 return TosResponse(
@@ -334,6 +341,13 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                             method_used="playwright_wrong_policy_type"
                         )
                         
+                    # Ensure the link is absolute
+                    if tos_link.startswith('/'):
+                        parsed_final_url = urlparse(final_url)
+                        base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
+                        tos_link = urljoin(base_url, tos_link)
+                        logger.info(f"Converted relative URL to absolute URL: {tos_link}")
+                    
                     return TosResponse(
                         url=final_url,
                         tos_url=tos_link,
