@@ -824,47 +824,6 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     if class_id_result:
         return class_id_result
         
-    # Special case for Amazon - they use "Privacy Notice" in the footer
-    if 'amazon' in url.lower():
-        # Look specifically for footer links with "Privacy Notice" text
-        for link in soup.find_all('a', href=True):
-            link_text = link.get_text().strip().lower()
-            if (link_text == 'privacy notice' or 
-                link_text == 'privacy' or 
-                'privacy' in link_text and 'notice' in link_text):
-                href = link.get('href')
-                if href:
-                    logger.info(f"Found Amazon privacy notice link: {href}")
-                    return make_url_absolute(href, url)
-                    
-        # Also look for links with just "Privacy" text in footers
-        footer_elements = soup.select('footer, .footer, #footer, [class*="footer"], [id*="footer"], [class*="bottom"], [id*="bottom"]')
-        for footer in footer_elements:
-            for link in footer.find_all('a', href=True):
-                link_text = link.get_text().strip().lower()
-                if link_text == 'privacy' or link_text == 'privacy notice' or 'privacy' in link_text:
-                    href = link.get('href')
-                    if href:
-                        logger.info(f"Found Amazon footer privacy link: {href}")
-                        return make_url_absolute(href, url)
-    
-    # Look for elements with "Privacy Notice" in their label or aria-label attribute
-    for link in soup.find_all('a', href=True):
-        # Check for Privacy Notice in various attributes
-        link_label = link.get('aria-label', '')
-        link_title = link.get('title', '')
-        link_text = link.get_text().strip()
-        
-        # Case insensitive check for "Privacy Notice" in any attribute
-        if (re.search(r'privacy\s+notice', link_text, re.IGNORECASE) or 
-            re.search(r'privacy\s+notice', link_label, re.IGNORECASE) or
-            re.search(r'privacy\s+notice', link_title, re.IGNORECASE)):
-            
-            href = link.get('href')
-            if href and not href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-                logger.info(f"Found link with Privacy Notice label: {href}")
-                return make_url_absolute(href, url)
-    
     # If not found, proceed with the existing approach
     base_domain = urlparse(url).netloc.lower()
     is_legal_page = is_on_policy_page(url, 'privacy')
@@ -879,14 +838,14 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         href = link.get('href', '').strip()
         if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
             continue
-        
+            
         try:
-            absolute_url = make_url_absolute(href, url)
+            absolute_url = urljoin(url, href)
             
             # Skip likely false positives
             if is_likely_false_positive(absolute_url, 'privacy'):
                 continue
-            
+    
             # Check if this is a different domain from the original site
             target_domain = urlparse(absolute_url).netloc.lower()
             base_domain = get_base_domain(current_domain)
@@ -896,7 +855,7 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 # For cross-domain links, require explicit privacy references
                 if not any(term in absolute_url.lower() for term in ['/privacy', 'privacy-policy', '/gdpr']):
                     logger.warning(f"Skipping cross-domain non-privacy URL: {absolute_url}")
-                    continue
+                continue
             
             # Ensure this is not a ToS URL
             if not is_correct_policy_type(absolute_url, 'privacy'):
@@ -940,10 +899,6 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if any(pattern in href_lower for pattern in strong_url_patterns):
                 score += 4.0
             
-            # Extra scoring for Amazon "Privacy Notice" pattern
-            if 'amazon' in href_lower and ('notice' in link_text or 'privacy' in link_text):
-                score += 7.0  # Give Amazon privacy notice links a boost
-                
             score += get_policy_score(link_text, absolute_url, 'privacy')
             
             for pattern, penalty in get_common_penalties():
