@@ -766,9 +766,14 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
         is_app_store = True
         # Handle App Store URL differently
         app_store_result = await handle_app_store_tos(original_url, headers)
-        if app_store_result.success:
-            return app_store_result
-        # If special handling fails, fall back to standard approach
+        
+        # For App Store URLs, we don't fall back to standard approach
+        # Instead, if the app-specific handler fails, we return not found
+        if not app_store_result.success:
+            logger.warning(f"No app-specific Terms of Service found for App Store URL: {original_url}")
+            response.status_code = 404
+        
+        return app_store_result
     
     if 'play.google.com/store/apps' in original_url:
         logger.info(f"Detected Google Play Store URL: {original_url}")
@@ -1193,7 +1198,7 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                                         tos_url=tos_from_pp,
                                         success=True,
                                         message=f"Terms of Service found via app's privacy policy page for {app_info}",
-                                        method_used="app_store_pp_to_tos"
+                                        method_used="play_store_pp_to_tos"
                                     )
                 
                 except Exception as e:
