@@ -101,14 +101,38 @@ def prepare_url_variations(original_url: str) -> list:
     return variations
 
 def get_footer_score(link) -> float:
-    """Calculate a score based on whether the link is in a footer or similar bottom section."""
+    """Calculate a score based on whether the link is in a footer, header, or similar section."""
     score = 0.0
     
-    # Check if the link itself is in a footer-like element
+    # Check if the link itself is in a footer-like or header-like element
     parent = link.parent
     depth = 0
-    max_depth = 5  # Don't go too far up the tree
+    max_depth = 10  # Increased from 5 to 10 to look deeper in the DOM tree
     
+    # First check for header elements - we'll prioritize checking header first
+    while parent and parent.name and depth < max_depth:
+        # Check element name
+        if parent.name in ['header', 'nav']:
+            score += 2.0
+            break
+            
+        # Check classes and IDs for header indicators
+        classes = ' '.join(parent.get('class', [])).lower()
+        element_id = parent.get('id', '').lower()
+        
+        # Header indicators
+        if any(term in classes or term in element_id for term in ['header', 'nav', 'top', 'menu']):
+            score += 2.0
+            break
+            
+        parent = parent.parent
+        depth += 1
+    
+    # Reset for footer check
+    parent = link.parent
+    depth = 0
+    
+    # Then check for footer elements
     while parent and parent.name and depth < max_depth:
         # Check element name
         if parent.name in ['footer', 'tfoot']:

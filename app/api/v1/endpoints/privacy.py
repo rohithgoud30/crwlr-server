@@ -818,6 +818,7 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
 
 
 def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
+    """Find privacy policy link in the HTML soup."""
     # First try the high-priority class/ID based approach
     class_id_result = find_policy_by_class_id(soup, 'privacy')
     if class_id_result:
@@ -829,6 +830,7 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
     candidates = []
     
+    # Iterate through all links to find the privacy policy
     for link in soup.find_all('a', href=True):
         href = link.get('href', '').strip()
         if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
@@ -840,11 +842,11 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             # Skip likely false positives
             if is_likely_false_positive(absolute_url, 'privacy'):
                 continue
-                
+            
             # Ensure this is not a ToS URL
             if not is_correct_policy_type(absolute_url, 'privacy'):
                 continue
-                
+            
             link_text = ' '.join([
                 link.get_text().strip(),
                 link.get('title', '').strip(),
