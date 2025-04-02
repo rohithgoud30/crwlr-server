@@ -657,6 +657,8 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             'privacy', 
             'privacy policy', 
             'privacy-policy',
+            'privacy notice',
+            'privacy-notice',
             'data protection', 
             'gdpr', 
             'data policy', 
@@ -716,6 +718,10 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                 link.get('aria-label', '').strip()
             ]).lower()
             
+            # Special case for Privacy Notice
+            if policy_type == 'privacy' and re.search(r'privacy\s+notice', link_text, re.IGNORECASE):
+                return absolute_url
+                
             # Skip links containing negative keywords
             if any(neg_keyword in link_text.lower() for neg_keyword in negative_keywords):
                 continue
@@ -816,6 +822,32 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
     
     # Look for any links with very specific privacy policy paths or text
     if policy_type == 'privacy':
+        # Specific check for "Privacy Notice" in any element
+        privacy_notice_elements = soup.find_all(
+            lambda tag: tag.name == 'a' and tag.has_attr('href') and (
+                re.search(r'privacy\s+notice', tag.get_text(), re.IGNORECASE) or
+                any(re.search(r'privacy\s+notice', tag.get(attr, ''), re.IGNORECASE) 
+                    for attr in ['aria-label', 'title', 'alt', 'label'])
+            )
+        )
+        
+        for element in privacy_notice_elements:
+            href = element.get('href', '').strip()
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                continue
+                
+            # Skip likely false positives
+            absolute_url = urljoin(base_url, href) if base_url else href
+            if is_likely_false_positive(absolute_url, policy_type):
+                continue
+                
+            # Ensure this URL is actually a privacy URL
+            if not is_correct_policy_type(absolute_url, policy_type):
+                continue
+                
+            return absolute_url
+            
+        # Continue with regular link checking
         for link in soup.find_all('a', href=True):
             href = link.get('href', '').strip()
             if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
@@ -824,10 +856,6 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             # Skip likely false positives
             absolute_url = urljoin(base_url, href) if base_url else href
             if is_likely_false_positive(absolute_url, policy_type):
-                continue
-            
-            # Skip support-policy for privacy detection
-            if '/support-policy' in absolute_url.lower():
                 continue
             
             # Ensure this URL is not a ToS URL

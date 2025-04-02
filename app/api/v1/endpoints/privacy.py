@@ -847,7 +847,24 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                     if href:
                         logger.info(f"Found Amazon footer privacy link: {href}")
                         return make_url_absolute(href, url)
+    
+    # Look for elements with "Privacy Notice" in their label or aria-label attribute
+    for link in soup.find_all('a', href=True):
+        # Check for Privacy Notice in various attributes
+        link_label = link.get('aria-label', '')
+        link_title = link.get('title', '')
+        link_text = link.get_text().strip()
         
+        # Case insensitive check for "Privacy Notice" in any attribute
+        if (re.search(r'privacy\s+notice', link_text, re.IGNORECASE) or 
+            re.search(r'privacy\s+notice', link_label, re.IGNORECASE) or
+            re.search(r'privacy\s+notice', link_title, re.IGNORECASE)):
+            
+            href = link.get('href')
+            if href and not href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                logger.info(f"Found link with Privacy Notice label: {href}")
+                return make_url_absolute(href, url)
+    
     # If not found, proceed with the existing approach
     base_domain = urlparse(url).netloc.lower()
     is_legal_page = is_on_policy_page(url, 'privacy')
