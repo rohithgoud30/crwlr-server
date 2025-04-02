@@ -903,8 +903,37 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                 # Get the base domain of the privacy policy
                 pp_parsed = urlparse(privacy_link)
                 pp_base_domain = f"{pp_parsed.scheme}://{pp_parsed.netloc}"
+                logger.info(f"Extracted base domain from privacy policy: {pp_base_domain}")
                 
-                # Try to get the ToS from the same domain
+                # New Step: Try common ToS paths directly on the privacy policy domain first
+                # This addresses the issue where we find privacy policy at controlgame.com/privacy/ 
+                # and want to directly check controlgame.com/terms without checking the privacy page first
+                logger.info(f"Trying common ToS paths directly on privacy policy domain: {pp_base_domain}")
+                common_tos_paths = [
+                    "/terms", "/tos", "/terms-of-service", "/terms-of-use", 
+                    "/terms-and-conditions", "/legal/terms", "/legal", 
+                    "/terms.html", "/legal/terms.html", "/eula"
+                ]
+                
+                for path in common_tos_paths:
+                    try:
+                        candidate_tos_url = pp_base_domain + path
+                        logger.info(f"Checking candidate ToS URL directly: {candidate_tos_url}")
+                        
+                        tos_check_response = session.get(candidate_tos_url, headers=headers, timeout=15)
+                        if tos_check_response.status_code == 200:
+                            if verify_tos_link(session, candidate_tos_url, headers):
+                                return TosResponse(
+                                    url=url,
+                                    tos_url=candidate_tos_url,
+                                    success=True,
+                                    message=f"Terms of Service found directly on privacy policy domain for {app_info}",
+                                    method_used="app_store_pp_domain_direct"
+                                )
+                    except Exception as e:
+                        logger.error(f"Error checking direct ToS path {path}: {str(e)}")
+                
+                # If direct domain approach failed, try to get the ToS from the privacy page
                 try:
                     # First try to visit the privacy page to find ToS links
                     pp_response = session.get(privacy_link, headers=headers, timeout=15)
@@ -932,11 +961,6 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                     
                     # If not found on privacy page, try common ToS paths on the same domain
                     logger.info(f"Trying common ToS paths on domain: {pp_base_domain}")
-                    common_tos_paths = [
-                        "/terms", "/tos", "/terms-of-service", "/terms-of-use", 
-                        "/terms-and-conditions", "/legal/terms", "/legal", 
-                        "/terms.html", "/legal/terms.html"
-                    ]
                     
                     for path in common_tos_paths:
                         try:
@@ -1096,8 +1120,37 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                 # Get the base domain of the privacy policy
                 pp_parsed = urlparse(privacy_link)
                 pp_base_domain = f"{pp_parsed.scheme}://{pp_parsed.netloc}"
+                logger.info(f"Extracted base domain from privacy policy: {pp_base_domain}")
                 
-                # Try to get the ToS from the same domain
+                # New Step: Try common ToS paths directly on the privacy policy domain first
+                # This addresses the issue where we find privacy policy at example.com/privacy/ 
+                # and want to directly check example.com/terms without visiting the privacy page first
+                logger.info(f"Trying common ToS paths directly on privacy policy domain: {pp_base_domain}")
+                common_tos_paths = [
+                    "/terms", "/tos", "/terms-of-service", "/terms-of-use", 
+                    "/terms-and-conditions", "/legal/terms", "/legal", 
+                    "/terms.html", "/legal/terms.html", "/eula"
+                ]
+                
+                for path in common_tos_paths:
+                    try:
+                        candidate_tos_url = pp_base_domain + path
+                        logger.info(f"Checking candidate ToS URL directly: {candidate_tos_url}")
+                        
+                        tos_check_response = session.get(candidate_tos_url, headers=headers, timeout=15)
+                        if tos_check_response.status_code == 200:
+                            if verify_tos_link(session, candidate_tos_url, headers):
+                                return TosResponse(
+                                    url=url,
+                                    tos_url=candidate_tos_url,
+                                    success=True,
+                                    message=f"Terms of Service found directly on privacy policy domain for {app_info}",
+                                    method_used="play_store_pp_domain_direct"
+                                )
+                    except Exception as e:
+                        logger.error(f"Error checking direct ToS path {path}: {str(e)}")
+                
+                # If direct domain approach failed, try to get the ToS from the privacy page
                 try:
                     # First try to visit the privacy page to find ToS links
                     pp_response = session.get(privacy_link, headers=headers, timeout=15)
@@ -1125,11 +1178,6 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                     
                     # If not found on privacy page, try common ToS paths on the same domain
                     logger.info(f"Trying common ToS paths on domain: {pp_base_domain}")
-                    common_tos_paths = [
-                        "/terms", "/tos", "/terms-of-service", "/terms-of-use", 
-                        "/terms-and-conditions", "/legal/terms", "/legal", 
-                        "/terms.html", "/legal/terms.html"
-                    ]
                     
                     for path in common_tos_paths:
                         try:
