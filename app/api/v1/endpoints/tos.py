@@ -960,59 +960,13 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
         except Exception as e:
             logger.error(f"Error in App Store ToS detection: {str(e)}")
             
-        # Step 2: If we couldn't find developer ToS through the privacy policy, try Apple's standard ToS
-        logger.info(f"Developer-specific ToS not found, trying Apple's standard ToS for {app_info}")
-        apple_standard_tos_url = "https://www.apple.com/legal/internet-services/itunes/us/terms.html"
-        
-        # Verify that Apple's ToS URL is valid
-        try:
-            tos_response = session.get(apple_standard_tos_url, headers=headers, timeout=15)
-            if tos_response.status_code == 200:
-                # Verify this is actually a ToS page
-                if verify_tos_link(session, apple_standard_tos_url, headers):
-                    logger.info(f"Verified Apple standard ToS link: {apple_standard_tos_url}")
-                    return TosResponse(
-                        url=url,
-                        tos_url=apple_standard_tos_url,
-                        success=True,
-                        message=f"App Store standard Terms of Service found for {app_info}",
-                        method_used="app_store_standard_tos"
-                    )
-        except Exception as e:
-            logger.error(f"Error checking Apple standard ToS URL: {str(e)}")
-        
-        # Step 3: Try to find alternative Apple ToS URLs
-        apple_alternative_tos_urls = [
-            "https://www.apple.com/legal/internet-services/terms/site.html",
-            "https://www.apple.com/legal/terms/site.html",
-            "https://www.apple.com/legal/terms/",
-        ]
-        
-        for apple_tos_url in apple_alternative_tos_urls:
-            try:
-                tos_response = session.get(apple_tos_url, headers=headers, timeout=15)
-                if tos_response.status_code == 200:
-                    # Verify this is actually a ToS page
-                    if verify_tos_link(session, apple_tos_url, headers):
-                        logger.info(f"Verified Apple alternative ToS link: {apple_tos_url}")
-                        return TosResponse(
-                            url=url,
-                            tos_url=apple_tos_url,
-                            success=True,
-                            message=f"App Store alternative Terms of Service found for {app_info}",
-                            method_used="app_store_alternative_tos"
-                        )
-            except Exception as e:
-                logger.error(f"Error checking Apple alternative ToS URL {apple_tos_url}: {str(e)}")
-        
-        # If we couldn't find developer ToS, fall back to Apple's ToS
-        logger.info(f"Falling back to Apple's general ToS for {app_info}")
+        # If we get here and haven't found app-specific terms, return failure
+        logger.warning(f"No app-specific Terms of Service found for {app_info}")
         return TosResponse(
             url=url,
-            tos_url="https://www.apple.com/legal/internet-services/terms/site.html",
-            success=True,
-            message=f"Fallback to Apple's general Terms of Service for {app_info} - no developer-specific ToS found",
-            method_used="app_store_apple_fallback"
+            success=False,
+            message=f"No app-specific Terms of Service found for {app_info}. Apple's general terms will not be used as a substitute.",
+            method_used="app_store_no_specific_terms"
         )
             
     except Exception as e:
