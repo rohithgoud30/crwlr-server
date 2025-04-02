@@ -24,6 +24,7 @@ from .utils import (
     is_likely_false_positive,
     is_correct_policy_type
 )
+import inspect
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -218,9 +219,22 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
     try:
         logger.info(f"Verifying candidate ToS link: {tos_link}")
         
-        # Check if it's obviously a primary ToS URL - these are highest priority
+        # Check if it's Apple's general terms when we're looking for app-specific terms
         tos_link_lower = tos_link.lower()
         parsed_url = urlparse(tos_link_lower)
+        domain = parsed_url.netloc
+        
+        # Reject Apple's general terms links when verifying app-specific terms
+        if domain == "www.apple.com" and any(pattern in parsed_url.path for pattern in [
+            "/legal/terms", "/terms-of-service", "/terms"
+        ]):
+            # Get the caller function name for context-aware decision
+            caller_frame = inspect.currentframe().f_back
+            if caller_frame and "app_store_" in caller_frame.f_code.co_name:
+                logger.warning(f"Rejecting Apple's general terms {tos_link} when looking for app-specific terms")
+                return False
+                
+        # Check if it's obviously a primary ToS URL - these are highest priority
         path = parsed_url.path
         
         # Specific patterns that indicate a non-primary terms page
@@ -896,9 +910,20 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                         candidate_tos_url = pp_base_domain + path
                         logger.info(f"Checking candidate ToS URL based on privacy path: {candidate_tos_url}")
                         
+                        # Skip if this is Apple's domain - we want app-specific terms only
+                        candidate_parsed = urlparse(candidate_tos_url)
+                        if candidate_parsed.netloc == "www.apple.com":
+                            logger.warning(f"Skipping Apple's domain for candidate ToS URL: {candidate_tos_url} - we only want app-specific terms")
+                            continue
+                            
                         tos_check_response = session.get(candidate_tos_url, headers=headers, timeout=15)
                         if tos_check_response.status_code == 200:
                             if verify_tos_link(session, candidate_tos_url, headers):
+                                # Extra check: don't return Apple's general terms
+                                if "apple.com/legal/terms" in candidate_tos_url:
+                                    logger.warning(f"Rejecting Apple's general terms: {candidate_tos_url}")
+                                    continue
+                                
                                 return TosResponse(
                                     url=url,
                                     tos_url=candidate_tos_url,
@@ -915,9 +940,20 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                         candidate_tos_url = pp_base_domain + path
                         logger.info(f"Checking candidate ToS URL directly: {candidate_tos_url}")
                         
+                        # Skip if this is Apple's domain - we want app-specific terms only
+                        candidate_parsed = urlparse(candidate_tos_url)
+                        if candidate_parsed.netloc == "www.apple.com":
+                            logger.warning(f"Skipping Apple's domain for candidate ToS URL: {candidate_tos_url} - we only want app-specific terms")
+                            continue
+                            
                         tos_check_response = session.get(candidate_tos_url, headers=headers, timeout=15)
                         if tos_check_response.status_code == 200:
                             if verify_tos_link(session, candidate_tos_url, headers):
+                                # Extra check: don't return Apple's general terms
+                                if "apple.com/legal/terms" in candidate_tos_url:
+                                    logger.warning(f"Rejecting Apple's general terms: {candidate_tos_url}")
+                                    continue
+                                
                                 return TosResponse(
                                     url=url,
                                     tos_url=candidate_tos_url,
@@ -940,19 +976,27 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                     if tos_from_pp:
                         # Make it absolute if needed
                         if tos_from_pp.startswith('/'):
-                            tos_from_pp = urljoin(pp_base_domain, tos_from_pp)
+                            tos_from_pp = urljoin(privacy_link, tos_from_pp)
                         
-                        logger.info(f"Found ToS link from privacy page: {tos_from_pp}")
-                        
-                        # Verify this is a valid ToS page
-                        if verify_tos_link(session, tos_from_pp, headers):
-                            return TosResponse(
-                                url=url,
-                                tos_url=tos_from_pp,
-                                success=True,
-                                message=f"Terms of Service found via app's privacy policy page for {app_info}",
-                                method_used="app_store_pp_to_tos"
-                            )
+                        # Skip if this is Apple's domain - we want app-specific terms only
+                        tos_parsed = urlparse(tos_from_pp)
+                        if tos_parsed.netloc == "www.apple.com":
+                            logger.warning(f"Skipping Apple's domain for ToS URL found on privacy page: {tos_from_pp} - we only want app-specific terms")
+                            # We don't return anything here, let the function continue to check other methods
+                        else:
+                            # Extra check: don't return Apple's general terms
+                            if "apple.com/legal/terms" in tos_from_pp:
+                                logger.warning(f"Rejecting Apple's general terms: {tos_from_pp}")
+                            else:
+                                # Verify this is actually a ToS link
+                                if verify_tos_link(session, tos_from_pp, headers):
+                                    return TosResponse(
+                                        url=url,
+                                        tos_url=tos_from_pp,
+                                        success=True,
+                                        message=f"Terms of Service found via app's privacy policy page for {app_info}",
+                                        method_used="app_store_pp_to_tos"
+                                    )
                 
                 except Exception as e:
                     logger.error(f"Error fetching privacy page: {str(e)}")
@@ -1130,19 +1174,27 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                     if tos_from_pp:
                         # Make it absolute if needed
                         if tos_from_pp.startswith('/'):
-                            tos_from_pp = urljoin(pp_base_domain, tos_from_pp)
+                            tos_from_pp = urljoin(privacy_link, tos_from_pp)
                         
-                        logger.info(f"Found ToS link from privacy page: {tos_from_pp}")
-                        
-                        # Verify this is a valid ToS page
-                        if verify_tos_link(session, tos_from_pp, headers):
-                            return TosResponse(
-                                url=url,
-                                tos_url=tos_from_pp,
-                                success=True,
-                                message=f"Terms of Service found via app's privacy policy page for {app_info}",
-                                method_used="play_store_pp_to_tos"
-                            )
+                        # Skip if this is Apple's domain - we want app-specific terms only
+                        tos_parsed = urlparse(tos_from_pp)
+                        if tos_parsed.netloc == "www.apple.com":
+                            logger.warning(f"Skipping Apple's domain for ToS URL found on privacy page: {tos_from_pp} - we only want app-specific terms")
+                            # We don't return anything here, let the function continue to check other methods
+                        else:
+                            # Extra check: don't return Apple's general terms
+                            if "apple.com/legal/terms" in tos_from_pp:
+                                logger.warning(f"Rejecting Apple's general terms: {tos_from_pp}")
+                            else:
+                                # Verify this is actually a ToS link
+                                if verify_tos_link(session, tos_from_pp, headers):
+                                    return TosResponse(
+                                        url=url,
+                                        tos_url=tos_from_pp,
+                                        success=True,
+                                        message=f"Terms of Service found via app's privacy policy page for {app_info}",
+                                        method_used="app_store_pp_to_tos"
+                                    )
                 
                 except Exception as e:
                     logger.error(f"Error fetching privacy page: {str(e)}")
