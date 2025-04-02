@@ -307,7 +307,8 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
         exact_patterns = [
             r'\bprivacy\s*policy\b',
             r'\bdata\s*protection\b',
-            r'\bprivacy\s*notice\b',
+            r'\bprivacy\s*notice\b',  # This will match regardless of case
+            r'\bPrivacy\s*Notice\b',  # Added explicit uppercase version
             r'\bprivacy\s*statement\b',
             r'\bcookie\s*policy\b',
             r'\bcookies\s*policy\b',
@@ -322,6 +323,8 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
             'privacy-policy',
             'privacy_policy',
             '/privacy/',
+            'privacy-notice',
+            'privacy_notice',
             'datenschutz',  # German privacy
             'privacidad',  # Spanish privacy
             'cookie-policy',
@@ -335,6 +338,7 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
             r'\bterms\s*&\s*conditions\b',
             r'\bterms\s*and\s*conditions\b',
             r'\bconditions\s*of\s*use\b',
+            r'\bConditions\s*of\s*Use\b',  # Added explicit uppercase version
             r'\bcondition\s*of\s*use\b',  # Added singular form
             r'\bterms\s*of\s*sale\b',
             r'\blegal\s*terms\b',
@@ -419,31 +423,21 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
     # Strong matches for privacy policy
     if policy_type == 'privacy':
         strong_privacy_matches = [
-            'privacy policy', 'privacy notice', 'privacy statement', 
-            'data protection', 'privacy', 'privacidad', 'datenschutz',
-            'gdpr', 'ccpa', 'data privacy', 'notice',
-            # Amazon specific patterns
-            'privacy', 'notice', 'privacy & cookie notice'
+            'privacy policy', 'privacy notice', 'Privacy Notice', 
+            'privacy statement', 'data protection', 'privacy', 
+            'privacidad', 'datenschutz', 'gdpr', 'ccpa', 'data privacy'
         ]
         
         # Count strong privacy matches in the text
         matches = sum(1 for pattern in strong_privacy_matches if pattern in text_lower)
         score += (matches * 5.0)
         
-        # Additional bonus for exact matches - Amazon often uses just "Privacy Notice"
-        if 'privacy policy' in text_lower:
+        # Additional bonus for explicit matches
+        if 'privacy policy' in text_lower or 'privacy notice' in text_lower or 'Privacy Notice' in text:
             score += 8.0
-        elif 'privacy notice' in text_lower:
-            score += 8.0  # Equal score for "Privacy Notice" which Amazon uses
             
-        # Extra bonus for Amazon domain + privacy notice
-        if 'amazon' in url_lower and ('privacy' in text_lower or 'notice' in text_lower):
-            score += 5.0  # Extra bonus for Amazon-specific patterns
-            
-        if 'privacy' in text_lower and 'policy' in text_lower:
+        if 'privacy' in text_lower and ('policy' in text_lower or 'notice' in text_lower):
             score += 4.0
-        elif 'privacy' in text_lower and 'notice' in text_lower:
-            score += 4.0  # Equal score for "privacy notice" pattern
     else:  # ToS
         strong_terms_matches = [
             'terms of service', 'terms of use', 'terms and conditions',
@@ -474,12 +468,12 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
     
     # URL-based scoring
     if policy_type == 'privacy':
-        url_patterns = ['/privacy', 'privacy-policy', 'privacy_policy', 'privacypolicy', 'datenschutz', 'privacy-notice', 'notice']
+        url_patterns = ['/privacy', 'privacy-policy', 'privacy_policy', 'privacypolicy', 'datenschutz']
         url_matches = sum(1 for pattern in url_patterns if pattern in url_lower)
         score += (url_matches * 3.0)
     else:  # ToS
         url_patterns = ['/terms', '/tos', 'terms-of-service', 'terms-of-use', 'termsofservice', 
-                       'conditions-of-use', 'condition-of-use']
+                      'conditions-of-use', 'condition-of-use']
         url_matches = sum(1 for pattern in url_patterns if pattern in url_lower)
         score += (url_matches * 3.0)
     
@@ -497,19 +491,14 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
             score -= 2.0  # Penalty if looking for privacy
     
     # Exact filename matches
-    privacy_filenames = ['privacy.html', 'privacy.php', 'privacy.htm', 'privacy.aspx', 'privacy', 'notice.html']
+    privacy_filenames = ['privacy.html', 'privacy.php', 'privacy.htm', 'privacy.aspx', 'privacy']
     tos_filenames = ['terms.html', 'tos.html', 'terms.php', 'terms.htm', 'terms.aspx', 'tos', 'terms']
     
     if policy_type == 'privacy' and any(url_lower.endswith(fname) for fname in privacy_filenames):
         score += 5.0
     elif policy_type == 'tos' and any(url_lower.endswith(fname) for fname in tos_filenames):
         score += 5.0
-    
-    # Special handling for Amazon
-    if 'amazon' in url_lower:
-        if policy_type == 'privacy' and ('privacy' in url_lower or 'notice' in url_lower):
-            score += 3.0  # Boost Amazon privacy pages
-            
+        
     logger.debug(f"Final score for {policy_type} candidate: {url} = {score}")
     return score
 
@@ -572,9 +561,9 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
     # Define strong indicators for privacy policies
     privacy_indicators = [
         '/privacy', 'privacy-policy', 'privacy_policy', 'privacypolicy', 'privacy.htm',
+        'privacy-notice', 'privacy_notice', 'PrivacyNotice', 'privacy-statement',
         '/datenschutz', 'privacidad', '/gdpr', 'data-protection', 'data_protection',
-        'privacy-notice', 'privacy_notice', 'privacy-statement', 'privacy_statement',
-        'notice', 'notice.html', '/notice/'  # Added notice variations
+        'privacy-notice', 'privacy_notice', 'privacy-statement', 'privacy_statement'
     ]
     
     # Define strong indicators for terms of service
@@ -584,11 +573,6 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
         'terms_and_conditions', 'termsandconditions', 'terms.html', 'tos.html',
         'eula', 'conditions-of-use', 'condition-of-use', 'user-agreement'
     ]
-    
-    # Special case for Amazon domains
-    if 'amazon' in url:
-        if policy_type == 'privacy' and ('notice' in url or 'privacy' in url):
-            return True
     
     # Special case: Combined "legal" pages might contain both
     if '/legal' in url or '/policies' in url:
@@ -658,7 +642,7 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             'privacy policy', 
             'privacy-policy',
             'privacy notice',
-            'privacy-notice',
+            'Privacy Notice',  # Also match with uppercase
             'data protection', 
             'gdpr', 
             'data policy', 
@@ -667,8 +651,58 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
         # For privacy, we want to explicitly exclude support policies
         negative_keywords = ['support policy', 'support-policy']
     else:  # tos
-        keywords = ['terms', 'conditions', 'terms of service', 'terms of use', 'legal']
+        keywords = [
+            'terms', 
+            'conditions', 
+            'terms of service', 
+            'terms of use',
+            'conditions of use',
+            'Conditions of Use',  # Also match with uppercase
+            'legal'
+        ]
         negative_keywords = []
+    
+    # Try finding specific link elements with relevant labels
+    # This will search for elements like <a> with text content of "Privacy Notice" or "Conditions of Use"
+    for link in soup.find_all('a', href=True):
+        href = link.get('href', '').strip()
+        if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+            continue
+            
+        # Make the URL absolute if possible
+        if base_url:
+            absolute_url = urljoin(base_url, href)
+        else:
+            # If no base URL is available, use the href as is
+            absolute_url = href
+            
+        # Skip likely false positives
+        if is_likely_false_positive(absolute_url, policy_type):
+            continue
+            
+        # Check if this URL matches the expected policy type
+        if not is_correct_policy_type(absolute_url, policy_type):
+            continue
+            
+        # Check link text for keywords
+        link_text = ' '.join([
+            link.get_text().strip(),
+            link.get('title', '').strip(),
+            link.get('aria-label', '').strip()
+        ])
+        
+        # Check for exact matches with "Privacy Notice" or "Conditions of Use" in any case
+        if policy_type == 'privacy' and re.search(r'privacy\s+notice', link_text, re.IGNORECASE):
+            try:
+                return absolute_url
+            except Exception:
+                continue
+                
+        if policy_type == 'tos' and re.search(r'conditions\s+of\s+use', link_text, re.IGNORECASE):
+            try:
+                return absolute_url
+            except Exception:
+                continue
     
     # Find elements with footer-related classes or IDs
     footer_elements = []
@@ -718,10 +752,6 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                 link.get('aria-label', '').strip()
             ]).lower()
             
-            # Special case for Privacy Notice
-            if policy_type == 'privacy' and re.search(r'privacy\s+notice', link_text, re.IGNORECASE):
-                return absolute_url
-                
             # Skip links containing negative keywords
             if any(neg_keyword in link_text.lower() for neg_keyword in negative_keywords):
                 continue
@@ -822,32 +852,6 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
     
     # Look for any links with very specific privacy policy paths or text
     if policy_type == 'privacy':
-        # Specific check for "Privacy Notice" in any element
-        privacy_notice_elements = soup.find_all(
-            lambda tag: tag.name == 'a' and tag.has_attr('href') and (
-                re.search(r'privacy\s+notice', tag.get_text(), re.IGNORECASE) or
-                any(re.search(r'privacy\s+notice', tag.get(attr, ''), re.IGNORECASE) 
-                    for attr in ['aria-label', 'title', 'alt', 'label'])
-            )
-        )
-        
-        for element in privacy_notice_elements:
-            href = element.get('href', '').strip()
-            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-                continue
-                
-            # Skip likely false positives
-            absolute_url = urljoin(base_url, href) if base_url else href
-            if is_likely_false_positive(absolute_url, policy_type):
-                continue
-                
-            # Ensure this URL is actually a privacy URL
-            if not is_correct_policy_type(absolute_url, policy_type):
-                continue
-                
-            return absolute_url
-            
-        # Continue with regular link checking
         for link in soup.find_all('a', href=True):
             href = link.get('href', '').strip()
             if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
@@ -856,6 +860,10 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
             # Skip likely false positives
             absolute_url = urljoin(base_url, href) if base_url else href
             if is_likely_false_positive(absolute_url, policy_type):
+                continue
+            
+            # Skip support-policy for privacy detection
+            if '/support-policy' in absolute_url.lower():
                 continue
             
             # Ensure this URL is not a ToS URL
@@ -882,26 +890,3 @@ def find_policy_by_class_id(soup, policy_type: str) -> Optional[str]:
                         continue
     
     return None
-
-def make_url_absolute(url: str, base_url: str) -> str:
-    """Convert relative URLs to absolute URLs."""
-    if not url:
-        return ""
-        
-    # If the URL starts with a single slash, it's relative to the domain root
-    if url.startswith('/') and not url.startswith('//'):
-        parsed_base = urlparse(base_url)
-        base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
-        return urljoin(base_domain, url)
-    
-    # If it starts with // (protocol-relative), add the protocol
-    if url.startswith('//'):
-        parsed_base = urlparse(base_url)
-        return f"{parsed_base.scheme}:{url}"
-        
-    # If it's a relative URL without a leading slash, join with the base URL
-    if not url.startswith(('http://', 'https://', '//')):
-        return urljoin(base_url, url)
-    
-    # It's already an absolute URL
-    return url
