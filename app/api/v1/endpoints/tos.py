@@ -217,8 +217,35 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
     """
     try:
         logger.info(f"Verifying candidate ToS link: {tos_link}")
-        # Skip obvious non-ToS URLs
-        if any(pattern in tos_link.lower() for pattern in [
+        
+        # Check if it's obviously a primary ToS URL - these are highest priority
+        tos_link_lower = tos_link.lower()
+        parsed_url = urlparse(tos_link_lower)
+        path = parsed_url.path
+        
+        # Specific patterns that indicate a non-primary terms page
+        non_primary_patterns = [
+            'event', 'partner', 'enterprise', 'service-', 'specific',
+            'contest', 'promotion', 'sweepstakes', 'marketplace', 'developer',
+            'subscription', 'api-', 'affiliate', 'reseller', 'cookie'
+        ]
+        
+        # Specific patterns that strongly indicate a primary terms page
+        primary_tos_patterns = [
+            '/legal/terms', '/terms-of-service', '/terms-of-use',
+            '/tos', '/terms.html', '/legal/terms-of-service'
+        ]
+        
+        is_likely_primary = any(pattern in path for pattern in primary_tos_patterns)
+        is_likely_specific = any(pattern in path for pattern in non_primary_patterns)
+        
+        # Prioritize links that seem to be primary ToS
+        if is_likely_primary and not is_likely_specific:
+            logger.info(f"Link appears to be a primary ToS URL based on path: {tos_link}")
+            # For these high-confidence URLs, we can skip some checks, but still verify content
+        
+        # Skip obvious non-ToS URLs or tracking params URLs
+        if any(pattern in tos_link_lower for pattern in [
             'utm_', 'utm=', 'source=', 'utm_source', 'campaign=', 'medium=', '?ref=', 
             '&ref=', '/blog/', '/news/', '/search', '/index', '/home', '/user', '/account',
             '/profile', '/dashboard', '/features', '/pricing', '/help', '/support',
@@ -228,9 +255,8 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
             return False
             
         # Check for query parameters that suggest this is not a ToS
-        parsed = urlparse(tos_link)
-        if parsed.query and not any(term in parsed.path.lower() for term in ['/terms', '/tos', '/legal']):
-            query_params = parsed.query.lower()
+        if parsed_url.query and not any(term in path for term in ['/terms', '/tos', '/legal']):
+            query_params = parsed_url.query.lower()
             # If query has params but path doesn't have terms indicators, this is suspicious
             if any(param in query_params for param in ['utm_', 'ref=', 'source=', 'campaign=']):
                 logger.warning(f"Rejecting ToS candidate with suspicious query params: {tos_link}")
@@ -249,26 +275,55 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
         title_elem = soup.find('title')
         if title_elem:
             title_text = title_elem.get_text().lower()
+            
+            # Higher priority for general ToS pages vs. specific ones
+            if any(keyword in title_text for keyword in ['terms of service', 'terms of use', 'terms and conditions']):
+                # High confidence for general terms titles
+                if not any(specific in title_text for specific in non_primary_patterns):
+                    logger.info(f"Verified primary ToS link by title: {tos_link}")
+                    return True
+                else:
+                    logger.info(f"Verified specific ToS link by title: {tos_link}")
+                    # For specific ToS pages, continue checking to see if there's a better general ToS
+            
             # Check for terms-related keywords in title
             if any(keyword in title_text for keyword in ['terms', 'conditions', 'tos', 'legal', 'agreement']):
                 logger.info(f"Verified ToS link by title: {tos_link}")
-                return True
+                # For primary URLs, we can be more confident
+                if is_likely_primary:
+                    return True
+                # Continue with other checks for non-primary URLs
                 
             # Reject pages with non-terms titles
             if any(keyword in title_text for keyword in ['learn', 'tutorial', 'course', 'guide', 'start', 'docs']):
                 logger.warning(f"Rejecting ToS candidate with educational title: '{title_text}'")
                 return False
         
-        # Check headers
-        headers_elements = soup.find_all(['h1', 'h2'])
-        header_texts = [h.get_text().lower() for h in headers_elements]
+        # Check for primary ToS content indicators
+        h1_elements = soup.find_all('h1')
+        h1_texts = [h.get_text().lower() for h in h1_elements]
         
-        # Check for terms-related keywords in headers
-        for header in header_texts:
-            if any(keyword in header for keyword in ['terms', 'conditions', 'service', 'legal', 'agreement']):
-                logger.info(f"Verified ToS link by header: {tos_link}")
+        # Strong indicators of a primary ToS document
+        primary_tos_indicators = [
+            'terms of service', 'terms of use', 'terms and conditions', 
+            'user agreement', 'service agreement'
+        ]
+        
+        # Check h1 elements first - these are most reliable
+        for h1 in h1_texts:
+            if any(indicator in h1 for indicator in primary_tos_indicators):
+                logger.info(f"Verified primary ToS link by h1: {tos_link}")
                 return True
-                
+        
+        # Check h2 elements next
+        h2_elements = soup.find_all('h2')
+        h2_texts = [h.get_text().lower() for h in h2_elements]
+        
+        for h2 in h2_texts:
+            if any(indicator in h2 for indicator in primary_tos_indicators):
+                logger.info(f"Verified primary ToS link by h2: {tos_link}")
+                return True
+        
         # Check for terms-related paragraphs
         paragraphs = soup.find_all('p')
         para_texts = [p.get_text().lower() for p in paragraphs]
@@ -281,11 +336,26 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
             r'\blegal\s+terms\b'
         ]
         
+        tos_paragraph_count = 0
         # Check first few paragraphs for terms content
-        for para in para_texts[:5]:  # Check first 5 paragraphs
+        for para in para_texts[:10]:  # Check first 10 paragraphs
             if any(re.search(pattern, para) for pattern in terms_patterns):
-                logger.info(f"Verified ToS link by paragraph content: {tos_link}")
-                return True
+                tos_paragraph_count += 1
+                
+        if tos_paragraph_count >= 2:
+            # If multiple paragraphs contain terms language, it's likely a ToS page
+            logger.info(f"Verified ToS link by multiple paragraph content: {tos_link}")
+            return True
+        elif tos_paragraph_count == 1 and is_likely_primary:
+            # For URLs that look like primary ToS from the path, one paragraph is enough
+            logger.info(f"Verified primary ToS link by path and paragraph content: {tos_link}")
+            return True
+            
+        # If we've reached this point, check if this is a known primary ToS URL pattern
+        if is_likely_primary and not is_likely_specific:
+            # For these high-confidence URLs, be more lenient
+            logger.info(f"Accepting likely primary ToS URL based on path pattern: {tos_link}")
+            return True
                 
         # If we've reached this point, we couldn't positively verify this as a ToS page
         logger.warning(f"Could not verify {tos_link} as a ToS page")
@@ -498,6 +568,25 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
             
             # If the site is using a platform, try the platform's legal pages
             if platform_domain and platform_domain != site_host:
+                # First try direct access to the main ToS page - this is most reliable
+                primary_tos_url = f"https://{platform_domain}/legal/terms"
+                try:
+                    primary_tos_response = session.get(primary_tos_url, headers=headers, timeout=15)
+                    if primary_tos_response.status_code == 200:
+                        # Check if this is actually a ToS page
+                        if verify_tos_link(session, primary_tos_url, headers):
+                            logger.info(f"Found primary ToS link for platform: {primary_tos_url}")
+                            return TosResponse(
+                                url=original_url,
+                                tos_url=primary_tos_url,
+                                success=True,
+                                message=f"Terms of Service found via platform ({platform_name}): {primary_tos_url}",
+                                method_used="platform_primary_tos"
+                            )
+                except Exception as e:
+                    logger.error(f"Error checking primary ToS URL: {str(e)}")
+                
+                # Then try the legal hub page to find other ToS links
                 platform_legal = f"https://{platform_domain}/legal"
                 try:
                     platform_response = session.get(platform_legal, headers=headers, timeout=15)
@@ -505,22 +594,57 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
                         platform_soup = BeautifulSoup(platform_response.text, 'html.parser')
                         platform_links = platform_soup.find_all('a', href=True)
                         
+                        # Prioritize links by importance
+                        primary_terms_links = []
+                        secondary_terms_links = []
+                        
                         for link in platform_links:
                             href = link.get('href', '').strip()
-                            link_text = link.get_text().lower().strip()
-                            
-                            if href and any(term in link_text for term in ['terms', 'conditions']):
-                                absolute_url = urljoin(platform_legal, href)
-                                logger.info(f"Found terms link on platform legal page: {absolute_url}")
+                            if not href:
+                                continue
                                 
-                                if verify_tos_link(session, absolute_url, headers):
-                                    return TosResponse(
-                                        url=original_url,
-                                        tos_url=absolute_url,
-                                        success=True,
-                                        message=f"Terms of Service found via platform ({platform_name}) legal page: {absolute_url}",
-                                        method_used="platform_legal_fallback"
-                                    )
+                            link_text = link.get_text().lower().strip()
+                            absolute_url = urljoin(platform_legal, href)
+                            
+                            # Skip non-terms links
+                            if not any(term in link_text for term in ['terms', 'conditions']):
+                                continue
+                                
+                            # Categorize by importance
+                            href_lower = absolute_url.lower()
+                            
+                            # Primary ToS links - general Terms of Service/Use
+                            if (('/terms' in href_lower or '/tos' in href_lower) and 
+                                not any(specific in href_lower for specific in 
+                                       ['/event-', '/partner-', '/enterprise-', '/services-', '/specific-'])):
+                                primary_terms_links.append((absolute_url, link_text))
+                            # Secondary ToS links - specific terms
+                            else:
+                                secondary_terms_links.append((absolute_url, link_text))
+                        
+                        # First check primary links
+                        for absolute_url, link_text in primary_terms_links:
+                            logger.info(f"Checking primary terms link: {absolute_url}")
+                            if verify_tos_link(session, absolute_url, headers):
+                                return TosResponse(
+                                    url=original_url,
+                                    tos_url=absolute_url,
+                                    success=True,
+                                    message=f"Terms of Service found via platform ({platform_name}) legal page: {absolute_url}",
+                                    method_used="platform_legal_primary"
+                                )
+                        
+                        # Then check secondary links only if no primary links work
+                        for absolute_url, link_text in secondary_terms_links:
+                            logger.info(f"Checking secondary terms link: {absolute_url}")
+                            if verify_tos_link(session, absolute_url, headers):
+                                return TosResponse(
+                                    url=original_url,
+                                    tos_url=absolute_url,
+                                    success=True,
+                                    message=f"Specific Terms of Service found via platform ({platform_name}) legal page: {absolute_url}",
+                                    method_used="platform_legal_secondary"
+                                )
                 except Exception as e:
                     logger.error(f"Error with platform legal fallback: {str(e)}")
                     
