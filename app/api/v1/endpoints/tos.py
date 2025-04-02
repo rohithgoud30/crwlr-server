@@ -87,6 +87,21 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 logger.warning(f"Skipping privacy policy URL in ToS search: {absolute_url}")
                 continue
                 
+            # Specific handling for NextJS / Vercel case
+            if 'nextjs.org' in url.lower():
+                if 'vercel.com/legal/privacy' in url_lower:
+                    logger.warning(f"Skipping Vercel privacy policy URL for NextJS: {absolute_url}")
+                    continue
+                
+                # Strongly prefer NextJS domain ToS links
+                parsed_current = urlparse(url)
+                parsed_candidate = urlparse(absolute_url)
+                if parsed_current.netloc != parsed_candidate.netloc and 'vercel.com' in parsed_candidate.netloc:
+                    # If looking at nextjs.org, only accept vercel.com links if they're explicitly terms
+                    if not any(term in url_lower for term in ['/terms', '/tos', '/legal/terms']):
+                        logger.warning(f"Skipping Vercel non-terms URL for NextJS: {absolute_url}")
+                        continue
+                
             # Ensure this is not a Privacy URL
             if not is_correct_policy_type(absolute_url, 'tos'):
                 continue
@@ -113,6 +128,18 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 continue
             
             href_domain = urlparse(absolute_url).netloc.lower()
+            
+            # NextJS specific scoring adjustments
+            if 'nextjs.org' in url.lower():
+                # Strongly prefer same-domain links
+                if href_domain == base_domain:
+                    score += 15.0
+                    logger.info(f"Applied NextJS same-domain bonus for {absolute_url}")
+                elif 'vercel.com' in href_domain:
+                    # Apply penalty for cross-domain Vercel links
+                    score -= 8.0
+                    logger.info(f"Applied Vercel domain penalty for {absolute_url}")
+            
             if is_legal_page and href_domain != base_domain:
                 continue
             
@@ -133,6 +160,11 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if 'privacy' in url_lower:
                 score -= 10.0
             
+            # Apply domain matching bonus for same-domain policies
+            if urlparse(absolute_url).netloc == urlparse(url).netloc:
+                score += 10.0
+                logger.info(f"Applied same-domain bonus for {absolute_url}")
+            
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
             
             threshold = 5.0
@@ -147,11 +179,13 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if final_score > threshold:
                 candidates.append((absolute_url, final_score))
         
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error processing link: {e}")
             continue
     
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"Sorted ToS candidates: {candidates}")
         return candidates[0][0]
     
     return None

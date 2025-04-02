@@ -843,6 +843,11 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if is_likely_false_positive(absolute_url, 'privacy'):
                 continue
             
+            # Skip privacy policies from Vercel when looking at NextJS
+            if 'nextjs.org' in url.lower() and 'vercel.com/legal/privacy' in absolute_url.lower():
+                logger.warning(f"Skipping Vercel privacy policy URL for NextJS: {absolute_url}")
+                continue
+                
             # Ensure this is not a ToS URL
             if not is_correct_policy_type(absolute_url, 'privacy'):
                 continue
@@ -864,6 +869,11 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 continue
             
             href_domain = urlparse(absolute_url).netloc.lower()
+            
+            # Strong penalty for cross-domain links from nextjs to vercel
+            if 'nextjs.org' in url.lower() and 'vercel.com' in href_domain:
+                score -= 15.0
+                
             if is_legal_page and href_domain != base_domain:
                 continue
             
@@ -882,6 +892,11 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
             
+            # Apply a domain matching bonus for same-domain policies
+            if urlparse(absolute_url).netloc == urlparse(url).netloc:
+                final_score += 10.0
+                logger.info(f"Applied same-domain bonus for {absolute_url}")
+            
             threshold = 5.0
             if footer_score > 0:
                 threshold = 4.0
@@ -894,11 +909,13 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if final_score > threshold:
                 candidates.append((absolute_url, final_score))
         
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error processing link: {e}")
             continue
     
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"Sorted privacy policy candidates: {candidates}")
         return candidates[0][0]
     
     return None
