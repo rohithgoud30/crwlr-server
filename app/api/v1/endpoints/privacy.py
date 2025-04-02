@@ -874,7 +874,7 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if any(pattern in href_lower for pattern in strong_url_patterns):
                 score += 4.0
             
-            score += get_policy_score(link_text, href_lower, 'privacy')
+            score += get_policy_score(link_text, absolute_url, 'privacy')
             
             for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
