@@ -313,7 +313,10 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
             r'(?:^|\s)pp(?:\s|$)',
             r'(?:^|\s)privacy(?:\s|-|_)notice(?:\s|$)',
             r'(?:^|\s)privacy(?:\s|-|_)policy(?:\s|$)',
-            r'(?:^|\s)policy(?:\s|$)'
+            r'(?:^|\s)policy(?:\s|$)',
+            r'(?:^|\s)data(?:\s|-)policy(?:\s|$)',
+            r'(?:^|\s)policies(?:\s|$)',
+            r'(?:^|\s)legal(?:\s|-)notice(?:\s|$)'
         ]
         
         # Strong URL patterns for privacy
@@ -326,7 +329,10 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
             '/privacy-notice',
             '/gdpr',
             '/data-protection',
-            '/datenschutz'  # German privacy
+            '/datenschutz',  # German privacy
+            '/policies',
+            '/policies/privacy',
+            '/legal/privacy'
         ]
         
     else:  # tos patterns
@@ -339,7 +345,8 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
             r'(?:^|\s)(?:user(?:\s|-)|)agreement(?:\s|$)',
             r'(?:^|\s)legal(?:\s|$)',
             r'(?:^|\s)conditions(?:\s|-)of(?:\s|-)use(?:\s|$)',
-            r'(?:^|\s)tos(?:\s|$)'
+            r'(?:^|\s)tos(?:\s|$)',
+            r'(?:^|\s)policies(?:\s|$)'
         ]
         
         # Strong URL patterns for ToS
@@ -356,7 +363,10 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
             '/legal',
             '/conditions',
             '/eula',
-            '/user-agreement'
+            '/user-agreement',
+            '/policies',
+            '/policies/terms',
+            '/legal/terms'
         ]
     
     return exact_patterns, strong_url_patterns
@@ -364,6 +374,7 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
 def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
     """
     Calculate a score for how likely a link is to be the policy we're looking for.
+    Handles various naming conventions and combined policies.
     
     Args:
         link_text: The text content of the link
@@ -374,20 +385,33 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
         A float score indicating likelihood of being the target policy
     """
     score = 0.0
+    url_lower = url.lower()
     
     # Prevent document/API links from being mistaken for ToS
-    if policy_type == 'tos' and ('/docs' in url or '/documentation' in url or '/api' in url or '/doc/' in url):
-        if not any(term in url for term in [
+    if policy_type == 'tos' and ('/docs' in url_lower or '/documentation' in url_lower or '/api' in url_lower or '/doc/' in url_lower):
+        if not any(term in url_lower for term in [
             '/terms', '/tos', '/terms-of-service', '/terms-of-use', 
             '/legal/terms', '/eula', '/conditions-of-use'
         ]):
             return -5.0  # Strong negative score for documentation URLs
     
+    # Handle combined policies that might include both privacy and terms
+    if '/policies' in url_lower or '/legal' in url_lower:
+        # For combined policies, check if this specific policy type is mentioned
+        if policy_type == 'privacy' and ('privacy' in link_text.lower() or 'privacy' in url_lower):
+            score += 5.0  # Strong boost for combined policies that explicitly mention privacy
+        elif policy_type == 'tos' and ('terms' in link_text.lower() or 'terms' in url_lower):
+            score += 5.0  # Strong boost for combined policies that explicitly mention terms
+    
     # Strongly penalize support policy when looking for privacy policy
-    if policy_type == 'privacy' and ('/support-policy' in url.lower() or 'support' in url.lower()):
+    if policy_type == 'privacy' and ('/support-policy' in url_lower or 'support' in url_lower):
         # Only add penalty if it doesn't also have privacy in the URL
-        if 'privacy' not in url.lower():
-            return -10.0  # Very strong penalty to prefer actual privacy policies
+        if 'privacy' not in url_lower:
+            # However, if it explicitly mentions "data" or other privacy-related terms, it might be valid
+            if any(term in link_text.lower() for term in ['data', 'personal information', 'gdpr']):
+                score += 2.0  # It's likely a valid policy even with "support" in the name
+            else:
+                return -5.0  # Penalty for support policies without privacy indicators
     
     # Handle each policy type differently
     if policy_type == 'privacy':
@@ -401,7 +425,10 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
             r'\bprivate policy\b',
             r'\bdata privacy\b',
             r'\bprivacidad\b',  # Spanish
-            r'\bdatenschutz\b'  # German
+            r'\bdatenschutz\b',  # German
+            r'\bdata policy\b',
+            r'\bpersonal data\b',
+            r'\bdata practices\b'
         ]
         
         for term in pri_exact_terms:
@@ -410,12 +437,14 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
                 break
                 
         # URL path patterns for privacy
-        if '/privacy' in url or '/privacypolicy' in url or '/privacy-policy' in url:
+        if '/privacy' in url_lower or '/privacypolicy' in url_lower or '/privacy-policy' in url_lower:
             score += 2.5
-        elif '/data-protection' in url or '/datenschutz' in url:
+        elif '/data-protection' in url_lower or '/datenschutz' in url_lower:
             score += 2.0
-        elif '/gdpr' in url or '/ccpa' in url:
+        elif '/gdpr' in url_lower or '/ccpa' in url_lower:
             score += 2.0
+        elif '/policies' in url_lower and 'privacy' in link_text.lower():
+            score += 2.5  # High score for generic policies page with privacy text
             
         # Secondary text patterns
         secondary_terms = [
@@ -423,7 +452,10 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
             r'\bcookie', 
             r'\buser data\b', 
             r'\bpersonal information\b',
-            r'\binformation we collect\b'
+            r'\binformation we collect\b',
+            r'\bprivate\b',
+            r'\bdata rights\b',
+            r'\bdata use\b'
         ]
         
         for term in secondary_terms:
@@ -455,18 +487,20 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
                 break
                 
         # Avoid documentation links with "terms" used in a different context
-        if re.search(r'\bterminology\b', link_text) and ('doc' in url or 'api' in url):
+        if re.search(r'\bterminology\b', link_text) and ('doc' in url_lower or 'api' in url_lower):
             score -= 4.0
                 
         # URL path patterns for ToS
-        if '/terms' in url or '/tos' in url or '/terms-of-service' in url:
+        if '/terms' in url_lower or '/tos' in url_lower or '/terms-of-service' in url_lower:
             score += 2.5
-        elif '/terms-of-use' in url or '/terms-conditions' in url:
+        elif '/terms-of-use' in url_lower or '/terms-conditions' in url_lower:
             score += 2.0
-        elif '/legal' in url and not ('/privacy' in url or '/copyright' in url):
+        elif '/legal' in url_lower and not ('/privacy' in url_lower or '/copyright' in url_lower):
             score += 1.5
-        elif '/eula' in url or '/user-agreement' in url:
+        elif '/eula' in url_lower or '/user-agreement' in url_lower:
             score += 2.0
+        elif '/policies' in url_lower and 'terms' in link_text.lower():
+            score += 2.5  # High score for generic policies page with terms text
             
         # Secondary text patterns
         secondary_terms = [
@@ -474,7 +508,9 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
             r'\bacceptance\b', 
             r'\bservice\b.*\bpolicy\b',
             r'\blicense\b',
-            r'\baccount\b.*\bterms\b'
+            r'\baccount\b.*\bterms\b',
+            r'\buse of service\b',
+            r'\bacceptable use\b'
         ]
         
         for term in secondary_terms:
@@ -489,7 +525,8 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
         r'\bcopyright\b',
         r'\blicense\b',
         r'\brights\b',
-        r'\bobligations\b'
+        r'\bobligations\b',
+        r'\bpolicies\b'
     ]
     
     for term in legal_terms:
@@ -497,17 +534,23 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
             score += 0.25
             break
     
+    # Generic "Policies" or "Legal" links - these could be policy hubs
+    if '/policies' in url_lower or '/legal' in url_lower:
+        if 'policies' in link_text.lower() or 'legal' in link_text.lower():
+            score += 1.0  # Give a modest boost to policy hub pages
+    
     # Penalty for support policies
-    if '/support-policy' in url or (('/support' in url) and ('/policy' in url)):
+    if '/support-policy' in url_lower or (('/support' in url_lower) and ('/policy' in url_lower)):
         if policy_type == 'privacy':
-            # Strong penalty for support policy being detected as privacy policy
-            score -= 5.0
+            # Only apply penalty if it doesn't have privacy indicators
+            if not any(term in link_text.lower() for term in ['privacy', 'data', 'personal']):
+                score -= 5.0
         else:
             # Small penalty for support policies in ToS
             score -= 1.0
             
     # Negative patterns specifically for technical documentation
-    if '/docs' in url or '/documentation' in url or '/api' in url:
+    if '/docs' in url_lower or '/documentation' in url_lower or '/api' in url_lower:
         # Check if link text suggests technical documentation
         doc_terms = [
             r'\bapi\b', 
@@ -531,6 +574,7 @@ def get_policy_score(link_text: str, url: str, policy_type: str) -> float:
 def is_likely_false_positive(url: str, policy_type: str) -> bool:
     """
     Check if a URL is likely to be a false positive (not actually a policy page).
+    More flexible with different naming conventions.
     """
     url_lower = url.lower()
     
@@ -546,8 +590,14 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
             return True
     
     # Check for "support policy" in privacy detection - this is a false positive
-    if policy_type == 'privacy' and ('/support-policy' in url_lower or 'support' in url_lower) and 'privacy' not in url_lower:
-        return True
+    # But only if it doesn't also mention privacy or data
+    if policy_type == 'privacy':
+        if '/support-policy' in url_lower and 'privacy' not in url_lower:
+            # Check if it might be a valid privacy policy despite having "support" in the name
+            # For example, some sites might have "Support & Privacy Policy"
+            if any(term in url_lower for term in ['/data', '/personal', '/gdpr', '/private']):
+                return False  # It might be a valid privacy policy despite having "support" in the name
+            return True  # Likely a support policy, not a privacy policy
             
     # Check for documentation links - these are often false positives for ToS
     if policy_type == 'tos' and ('/docs' in url_lower or '/documentation' in url_lower or '/doc/' in url_lower or url_lower.endswith('/doc')):
@@ -560,6 +610,15 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
     for ext in file_extensions:
         if url_lower.endswith(ext):
             return True
+            
+    # Blog posts and news articles are rarely policy pages
+    blog_patterns = ['/blog/', '/news/', '/article/', '/post/', '/press-release/']
+    if any(pattern in url_lower for pattern in blog_patterns):
+        # Unless they explicitly mention policies in the URL
+        if policy_type == 'privacy' and not any(term in url_lower for term in ['/privacy', '/data-policy']):
+            return True
+        if policy_type == 'tos' and not any(term in url_lower for term in ['/terms', '/tos', '/conditions']):
+            return True
     
     return False
 
@@ -567,6 +626,7 @@ def is_correct_policy_type(url: str, expected_type: str) -> bool:
     """
     Check if a URL is likely to be the correct policy type we're looking for.
     This helps avoid misclassification between privacy policies and terms of service.
+    More flexible with different naming conventions.
     
     Args:
         url: The URL to check
@@ -577,9 +637,21 @@ def is_correct_policy_type(url: str, expected_type: str) -> bool:
     """
     url_lower = url.lower()
     
-    # Special case for "support-policy" - never classify as privacy policy
-    if expected_type == 'privacy' and '/support-policy' in url_lower and '/privacy' not in url_lower:
-        return False
+    # Handle policy hubs like "/policies" or "/legal" - these could contain multiple policy types
+    if '/policies' in url_lower or '/legal' in url_lower:
+        # Check if the specific policy type is mentioned in the URL
+        if expected_type == 'privacy' and any(term in url_lower for term in ['/privacy', '/data']):
+            return True
+        if expected_type == 'tos' and any(term in url_lower for term in ['/terms', '/tos', '/conditions']):
+            return True
+        # If it's a generic policies page without specific type indicators, consider it valid for both types
+        # The scoring system will handle ranking them correctly
+        return True
+    
+    # Special case for "support-policy" - never classify as privacy policy unless it also mentions privacy
+    if expected_type == 'privacy' and '/support-policy' in url_lower:
+        # Only accept if it also mentions privacy
+        return 'privacy' in url_lower or 'data' in url_lower
     
     # For documentation pages, require very explicit ToS indicators
     if '/docs' in url_lower or '/documentation' in url_lower or '/doc/' in url_lower:
@@ -597,15 +669,16 @@ def is_correct_policy_type(url: str, expected_type: str) -> bool:
         # Strong privacy patterns
         privacy_patterns = [
             '/privacy', '/privacy-policy', '/data-protection', '/data-privacy',
-            '/personal-data', '/gdpr', '/ccpa', '/privacypolicy', '/pp'
+            '/personal-data', '/gdpr', '/ccpa', '/privacypolicy', '/pp',
+            '/data-policy', '/personal', '/datenschutz'
         ]
         
         # If the URL strongly indicates privacy policy, return True
         if any(pattern in url_lower for pattern in privacy_patterns):
             return True
         
-        # Support policy is not a privacy policy
-        if '/support-policy' in url_lower:
+        # Support policy is not a privacy policy unless it also mentions data/privacy
+        if '/support-policy' in url_lower and not any(term in url_lower for term in privacy_patterns):
             return False
             
         # Check for terms patterns - if we're looking for privacy but it's a terms URL, return False
@@ -626,7 +699,7 @@ def is_correct_policy_type(url: str, expected_type: str) -> bool:
         terms_patterns = [
             '/terms', '/tos', '/terms-of-service', '/terms-of-use', 
             '/terms-and-conditions', '/legal/terms', '/conditions', 
-            '/eula', '/user-agreement'
+            '/eula', '/user-agreement', '/acceptable-use'
         ]
         
         # If the URL strongly indicates terms, return True
