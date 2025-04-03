@@ -272,18 +272,49 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
 def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> bool:
     """
     Verify that a candidate ToS link actually points to a terms page.
-    This function visits the link and checks the page content for terms-related signals.
+    This function tries to visit the link and check content, with fallbacks for access issues.
     """
     try:
         logger.info(f"Verifying candidate ToS link: {tos_link}")
         
-        # Check if it's Apple's general terms when we're looking for app-specific terms
         tos_link_lower = tos_link.lower()
         parsed_url = urlparse(tos_link_lower)
         domain = parsed_url.netloc
+        path = parsed_url.path
+        query = parsed_url.query
         
-        # Reject Apple's general terms links when verifying app-specific terms
-        if domain == "www.apple.com" and any(pattern in parsed_url.path for pattern in [
+        # STEP 1: Fast path for obvious ToS URLs - don't even need to visit these
+        
+        # Common ToS patterns in URL paths
+        primary_tos_patterns = [
+            '/legal/terms', '/terms-of-service', '/terms-of-use',
+            '/tos', '/terms.html', '/legal/terms-of-service', 
+            'terms-conditions', 'conditions-of-use', 'user-agreement',
+            '/legal/terms-of-use', '/terms-and-conditions'
+        ]
+        
+        # Known ToS URLs by domain - these are high confidence even without visiting
+        known_tos_urls = {
+            'www.amazon.com': ['/gp/help/customer/display.html?nodeId=508088', '/help/conditions-of-use'],
+            'www.facebook.com': ['/legal/terms', '/terms'],
+            'twitter.com': ['/tos', '/en/tos'],
+            'www.google.com': ['/terms', '/terms_of_service'],
+            'www.apple.com': ['/legal/terms', '/legal/terms-of-service'],
+            'www.microsoft.com': ['/en-us/legal/terms-of-use', '/en-us/terms-of-service'],
+            'www.instagram.com': ['/legal/terms', '/terms'],
+            'www.youtube.com': ['/terms', '/static?template=terms'],
+            'github.com': ['/site/terms', '/site/terms-of-service']
+        }
+        
+        # Match known ToS URLs directly - this is highest confidence
+        if domain in known_tos_urls:
+            for known_path in known_tos_urls[domain]:
+                if path.startswith(known_path):
+                    logger.info(f"URL matches known ToS path for {domain}")
+                    return True
+        
+        # Special case: App store ToS checks for app-specific vs. general terms
+        if domain == "www.apple.com" and any(pattern in path for pattern in [
             "/legal/terms", "/terms-of-service", "/terms"
         ]):
             # Get the caller function name for context-aware decision
@@ -292,149 +323,285 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                 logger.warning(f"Rejecting Apple's general terms {tos_link} when looking for app-specific terms")
                 return False
                 
-        # Check if it's obviously a primary ToS URL - these are highest priority
-        path = parsed_url.path
+        # STEP 2: Check URL patterns before making any requests
         
-        # Specific patterns that indicate a non-primary terms page
-        non_primary_patterns = [
-            'event', 'partner', 'enterprise', 'service-', 'specific',
-            'contest', 'promotion', 'sweepstakes', 'marketplace', 'developer',
-            'subscription', 'api-', 'affiliate', 'reseller', 'cookie'
-        ]
+        # Special case for URLs with ToS-related query parameters
+        if any(param in query for param in ['cou', 'terms', 'conditions', 'tos', 'legal']):
+            # Valid ToS link with parameters
+            logger.info(f"URL has ToS-related query parameters: {tos_link}")
+            # For Amazon's help center with ToS-related parameters, accept without visiting
+            if 'amazon.com' in domain and '/help/' in path and 'nodeId=' in query:
+                logger.info(f"Accepting Amazon help center URL with ToS params: {tos_link}")
+                return True
+            # Continue to content validation when possible
         
-        # Specific patterns that strongly indicate a primary terms page
-        primary_tos_patterns = [
-            '/legal/terms', '/terms-of-service', '/terms-of-use',
-            '/tos', '/terms.html', '/legal/terms-of-service'
-        ]
-        
-        is_likely_primary = any(pattern in path for pattern in primary_tos_patterns)
-        is_likely_specific = any(pattern in path for pattern in non_primary_patterns)
-        
-        # Prioritize links that seem to be primary ToS
-        if is_likely_primary and not is_likely_specific:
-            logger.info(f"Link appears to be a primary ToS URL based on path: {tos_link}")
-            # For these high-confidence URLs, we can skip some checks, but still verify content
-        
-        # Skip obvious non-ToS URLs or tracking params URLs
-        if any(pattern in tos_link_lower for pattern in [
-            'utm_', 'utm=', 'source=', 'utm_source', 'campaign=', 'medium=', '?ref=', 
-            '&ref=', '/blog/', '/news/', '/search', '/index', '/home', '/user', '/account',
-            '/profile', '/dashboard', '/features', '/pricing', '/help', '/support',
-            '/about', '/contact', '/signin', '/login', '/download', '/products', '/solutions',
-        ]):
-            logger.warning(f"Rejecting ToS candidate with tracking/navigation params: {tos_link}")
-            return False
+        # Check for obvious ToS path patterns
+        if any(pattern in path for pattern in primary_tos_patterns):
+            logger.info(f"URL has primary ToS path pattern: {tos_link}")
+            # For these high-confidence URLs, accept more easily even with access issues
+            high_confidence = True
+        else:
+            high_confidence = False
             
-        # Check for query parameters that suggest this is not a ToS
-        if parsed_url.query and not any(term in path for term in ['/terms', '/tos', '/legal']):
-            query_params = parsed_url.query.lower()
-            # If query has params but path doesn't have terms indicators, this is suspicious
-            if any(param in query_params for param in ['utm_', 'ref=', 'source=', 'campaign=']):
-                logger.warning(f"Rejecting ToS candidate with suspicious query params: {tos_link}")
+        # Check for obvious non-ToS patterns in URL - reject early
+        if not high_confidence and any(pattern in query for pattern in ['utm_', 'source=', 'campaign=']):
+            # Only reject if no ToS indicators in path
+            if not any(tos_term in path for tos_term in ['terms', 'conditions', 'tos', 'legal']):
+                # Special case for help centers
+                if not ('/help/' in path and any(term in query for term in ['cou', 'terms', 'legal'])):
+                    logger.warning(f"Rejecting URL with tracking params and no ToS indicators: {tos_link}")
+                    return False
+        
+        # STEP 3: Try to fetch the page and analyze content
+        try:
+            # Add additional headers to help with access
+            enhanced_headers = headers.copy()
+            enhanced_headers.update({
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': f"https://{domain}/",
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin'
+            })
+            
+            # Make the request
+            response = session.get(tos_link, headers=enhanced_headers, timeout=15)
+            
+            # Handle different status codes
+            if response.status_code == 200:
+                # Got content, analyze it
+                pass
+            elif response.status_code in [403, 429]:
+                # Blocked or rate-limited
+                logger.warning(f"Access denied (status {response.status_code}) for {tos_link}")
+                # For high-confidence URLs, accept even with access issues
+                if high_confidence:
+                    logger.info(f"Accepting high-confidence ToS URL despite access issues: {tos_link}")
+                    return True
+                if domain in known_tos_urls:
+                    for pattern in known_tos_urls[domain]:
+                        if pattern in path:
+                            logger.info(f"Accepting known ToS pattern despite access issues: {tos_link}")
+                            return True
+                # Otherwise, need to reject due to lack of verification
                 return False
-        
-        # Make an HTTP request to the page
-        response = session.get(tos_link, headers=headers, timeout=15)
-        if response.status_code != 200:
-            logger.warning(f"ToS verification failed: status code {response.status_code} for {tos_link}")
-            return False
+            else:
+                # Other error codes
+                logger.warning(f"ToS verification failed: status code {response.status_code} for {tos_link}")
+                if high_confidence:
+                    return True
+                return False
+                
+            # Parse the content
+            soup = BeautifulSoup(response.text, 'html.parser')
             
-        # Parse the content
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Check page title
-        title_elem = soup.find('title')
-        if title_elem:
-            title_text = title_elem.get_text().lower()
+            # STEP 4: Analyze page content
             
-            # Higher priority for general ToS pages vs. specific ones
-            if any(keyword in title_text for keyword in ['terms of service', 'terms of use', 'terms and conditions']):
-                # High confidence for general terms titles
-                if not any(specific in title_text for specific in non_primary_patterns):
-                    logger.info(f"Verified primary ToS link by title: {tos_link}")
+            # Check page title
+            title_elem = soup.find('title')
+            if title_elem:
+                title_text = title_elem.text.lower()
+                
+                # Terms indicators in title
+                tos_title_terms = [
+                    'terms', 'conditions', 'terms of service', 'terms of use', 
+                    'legal', 'user agreement', 'eula'
+                ]
+                
+                if any(term in title_text for term in tos_title_terms):
+                    logger.info(f"Found terms indicator in page title: {title_text}")
+                    return True
+                    
+                # Non-ToS indicators in title
+                not_tos_title_terms = [
+                    'products', 'pricing', 'signup', 'login', 'register',
+                    'features', 'download', 'shop', 'cart', 'buy'
+                ]
+                
+                # Only reject if multiple non-ToS indicators and high confidence
+                non_tos_matches = sum(1 for term in not_tos_title_terms if term in title_text)
+                if non_tos_matches >= 2 and not any(term in title_text for term in tos_title_terms) and not high_confidence:
+                    logger.warning(f"Page title suggests this is not a ToS page: {title_text}")
+                    return False
+            
+            # Check for headers with terms indicators
+            headers_with_terms = soup.find_all(['h1', 'h2', 'h3', 'h4'], string=lambda s: s and any(
+                term in s.lower() for term in [
+                    'terms', 'conditions', 'legal', 'user agreement',
+                    'acceptable use', 'service agreement', 'eula'
+                ]
+            ))
+            
+            if headers_with_terms:
+                logger.info(f"Found {len(headers_with_terms)} headers with terms indicators")
+                return True
+            
+            # Check for terms containers
+            terms_containers = soup.find_all(['div', 'section'], id=lambda i: i and any(
+                term in i.lower() for term in ['terms', 'conditions', 'legal', 'tos']
+            ))
+            
+            if not terms_containers:
+                terms_containers = soup.find_all(['div', 'section'], class_=lambda c: c and any(
+                    term in c.lower() for term in ['terms', 'conditions', 'legal', 'tos']
+                ))
+                
+            if terms_containers:
+                # Filter out footer containers that just contain links to legal pages
+                valid_containers = []
+                for container in terms_containers:
+                    # Ignore small containers (like footers with just links)
+                    container_text = container.get_text().strip()
+                    
+                    # Skip containers that are likely navigation/footer elements
+                    classes = container.get('class', [])
+                    class_str = ' '.join(classes).lower() if classes else ''
+                    
+                    # Skip obvious footer/navigation containers
+                    if any(nav_term in class_str for nav_term in ['footer', 'nav', 'menu', 'copyright']):
+                        # Require more substantial content for these containers
+                        if len(container_text) < 300:  # Footer links are usually brief
+                            continue
+                    
+                    # Check for actual terms content, not just links to terms
+                    legal_phrases = [
+                        'terms of service', 'terms of use', 'terms and conditions',
+                        'user agreement', 'accept these terms', 'agree to these terms',
+                        'legally binding', 'liability', 'disclaimer', 'warranty',
+                        'intellectual property', 'privacy policy', 'governing law'
+                    ]
+                    
+                    # Require multiple legal phrases for a valid container
+                    matches = sum(1 for phrase in legal_phrases if phrase in container_text.lower())
+                    if matches >= 3 and len(container_text) > 500:  # Need substantial content
+                        valid_containers.append(container)
+                
+                # Only accept if we have valid containers with actual terms content
+                if valid_containers:
+                    logger.info(f"Found {len(valid_containers)} containers with substantial terms content")
                     return True
                 else:
-                    logger.info(f"Verified specific ToS link by title: {tos_link}")
-                    # For specific ToS pages, continue checking to see if there's a better general ToS
+                    logger.warning("Found terms containers but they appear to be navigation/footer elements")
+                    # Continue checks rather than accepting immediately
             
-            # Check for terms-related keywords in title
-            if any(keyword in title_text for keyword in ['terms', 'conditions', 'tos', 'legal', 'agreement']):
-                logger.info(f"Verified ToS link by title: {tos_link}")
-                # For primary URLs, we can be more confident
-                if is_likely_primary:
+            # Look for paragraphs with terms content
+            paragraphs_with_terms = soup.find_all('p', string=lambda s: s and any(
+                phrase in s.lower() for phrase in [
+                    'terms of service', 'terms of use', 'terms and conditions',
+                    'user agreement', 'accept these terms', 'agree to these terms',
+                    'service agreement', 'legally binding', 'legal agreement',
+                    'eula', 'end user license'
+                ]
+            ))
+            
+            if paragraphs_with_terms:
+                # Check that we have substantial paragraph content (not just links)
+                substantial_paragraphs = [p for p in paragraphs_with_terms if len(p.get_text()) > 100]
+                if substantial_paragraphs:
+                    logger.info(f"Found {len(substantial_paragraphs)} substantial paragraphs with terms content")
                     return True
-                # Continue with other checks for non-primary URLs
-                
-            # Reject pages with non-terms titles
-            if any(keyword in title_text for keyword in ['learn', 'tutorial', 'course', 'guide', 'start', 'docs']):
-                logger.warning(f"Rejecting ToS candidate with educational title: '{title_text}'")
-                return False
-        
-        # Check for primary ToS content indicators
-        h1_elements = soup.find_all('h1')
-        h1_texts = [h.get_text().lower() for h in h1_elements]
-        
-        # Strong indicators of a primary ToS document
-        primary_tos_indicators = [
-            'terms of service', 'terms of use', 'terms and conditions', 
-            'user agreement', 'service agreement'
-        ]
-        
-        # Check h1 elements first - these are most reliable
-        for h1 in h1_texts:
-            if any(indicator in h1 for indicator in primary_tos_indicators):
-                logger.info(f"Verified primary ToS link by h1: {tos_link}")
-                return True
-        
-        # Check h2 elements next
-        h2_elements = soup.find_all('h2')
-        h2_texts = [h.get_text().lower() for h in h2_elements]
-        
-        for h2 in h2_texts:
-            if any(indicator in h2 for indicator in primary_tos_indicators):
-                logger.info(f"Verified primary ToS link by h2: {tos_link}")
-                return True
-        
-        # Check for terms-related paragraphs
-        paragraphs = soup.find_all('p')
-        para_texts = [p.get_text().lower() for p in paragraphs]
-        
-        terms_patterns = [
-            r'\bterms\s+of\s+service\b', 
-            r'\bterms\s+of\s+use\b',
-            r'\bterms\s+and\s+conditions\b',
-            r'\bagreement\b',
-            r'\blegal\s+terms\b'
-        ]
-        
-        tos_paragraph_count = 0
-        # Check first few paragraphs for terms content
-        for para in para_texts[:10]:  # Check first 10 paragraphs
-            if any(re.search(pattern, para) for pattern in terms_patterns):
-                tos_paragraph_count += 1
-                
-        if tos_paragraph_count >= 2:
-            # If multiple paragraphs contain terms language, it's likely a ToS page
-            logger.info(f"Verified ToS link by multiple paragraph content: {tos_link}")
-            return True
-        elif tos_paragraph_count == 1 and is_likely_primary:
-            # For URLs that look like primary ToS from the path, one paragraph is enough
-            logger.info(f"Verified primary ToS link by path and paragraph content: {tos_link}")
-            return True
             
-        # If we've reached this point, check if this is a known primary ToS URL pattern
-        if is_likely_primary and not is_likely_specific:
-            # For these high-confidence URLs, be more lenient
-            logger.info(f"Accepting likely primary ToS URL based on path pattern: {tos_link}")
-            return True
+            # Check for bulleted lists with legal terms
+            list_elements = soup.find_all(['ol', 'ul'])
+            list_with_terms = []
+            
+            for list_elem in list_elements:
+                # Skip navigation and menu lists
+                if list_elem.parent:
+                    parent_classes = list_elem.parent.get('class', [])
+                    parent_class_str = ' '.join(parent_classes).lower() if parent_classes else ''
+                    if any(nav_term in parent_class_str for nav_term in ['nav', 'menu', 'footer', 'header']):
+                        continue
                 
-        # If we've reached this point, we couldn't positively verify this as a ToS page
-        logger.warning(f"Could not verify {tos_link} as a ToS page")
-        return False
-        
+                list_items = list_elem.find_all('li')
+                if len(list_items) >= 3:
+                    # Convert list items to text
+                    list_texts = [item.get_text().strip().lower() for item in list_items]
+                    
+                    # Check for short navigation items (likely menu)
+                    if all(len(text) < 30 for text in list_texts):
+                        continue
+                    
+                    # Check for terms commonly found in footer/navigation lists
+                    nav_terms = ['home', 'products', 'services', 'about', 'contact', 'support', 
+                                'blog', 'news', 'sign in', 'login', 'register']
+                    
+                    # Skip lists that are likely navigation
+                    nav_matches = sum(1 for text in list_texts if any(nav in text for nav in nav_terms))
+                    if nav_matches > 2:
+                        continue
+                    
+                    # Join all text for deeper analysis
+                    list_text = ' '.join(list_texts)
+                    
+                    # Look for legal terms with higher threshold
+                    legal_terms = [
+                        'terms of service', 'terms of use', 'terms and conditions',
+                        'user agreement', 'accept these terms', 'agree to these terms',
+                        'legally binding', 'liability', 'disclaimer', 'warranty', 
+                        'intellectual property', 'copyright', 'termination', 'prohibited',
+                        'applicable law', 'jurisdiction', 'arbitration', 'dispute resolution',
+                        'limitation of liability', 'indemnification', 'severability'
+                    ]
+                    
+                    # Require multiple specific legal terms for a terms-related list
+                    term_matches = [term for term in legal_terms if term in list_text]
+                    if len(term_matches) >= 2 and len(list_text) > 200:  # Need substantial content
+                        list_with_terms.append({
+                            'element': list_elem,
+                            'matches': term_matches
+                        })
+                        
+            if list_with_terms:
+                # Don't accept terms based on just a list unless high confidence or many matches
+                if high_confidence or any(len(item['matches']) >= 3 for item in list_with_terms):
+                    logger.info(f"Found {len(list_with_terms)} lists with terms content: {[item['matches'] for item in list_with_terms]}")
+                    return True
+                else:
+                    logger.warning("Found lists with some terms content but not enough for certainty")
+                    # Continue to checks instead of accepting
+            
+            # Check for legal term density
+            page_text = soup.get_text().lower()
+            legal_terms = [
+                'terms of service', 'terms of use', 'terms and conditions',
+                'user agreement', 'accept these terms', 'agree to these terms',
+                'legally binding', 'liability', 'disclaimer', 'warranty', 
+                'intellectual property', 'copyright', 'termination', 'privacy',
+                'applicable law', 'jurisdiction', 'arbitration', 'dispute resolution',
+                'limitation of liability', 'indemnification', 'severability',
+                'entire agreement', 'modification', 'waiver', 'governing law'
+            ]
+            
+            term_count = sum(1 for term in legal_terms if term in page_text)
+            
+            if term_count >= 5:  # Lower threshold for high confidence URLs
+                logger.info(f"Found {term_count} legal terms in page content")
+                return True
+                
+            # Final check for high confidence URLs - be more lenient
+            if high_confidence:
+                logger.info(f"Accepting high confidence ToS URL despite limited content indicators: {tos_link}")
+                return True
+                
+            # Not enough evidence
+            logger.warning(f"Insufficient indicators that {tos_link} is a ToS page")
+            return False
+            
+        except requests.RequestException as e:
+            logger.warning(f"Request error for {tos_link}: {str(e)}")
+            # For high confidence URLs, accept even with access issues
+            if high_confidence:
+                logger.info(f"Accepting high confidence ToS URL despite access issues: {tos_link}")
+                return True
+            return False
+            
     except Exception as e:
-        logger.error(f"Error verifying ToS link {tos_link}: {str(e)}")
+        logger.error(f"Error verifying ToS link: {str(e)}")
         return False
 
 
