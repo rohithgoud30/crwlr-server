@@ -603,9 +603,6 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
     """Check if a URL is likely to be the correct policy type based on URL patterns."""
     # Case insensitive check
     url = url.lower()
-    parsed_url = urlparse(url)
-    path = parsed_url.path.lower()
-    query = parsed_url.query.lower()
     
     # Define strong indicators for privacy policies
     privacy_indicators = [
@@ -613,11 +610,6 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
         'privacy-notice', 'privacy_notice', 'PrivacyNotice', 'privacy-statement',
         '/datenschutz', 'privacidad', '/gdpr', 'data-protection', 'data_protection',
         'privacy-notice', 'privacy_notice', 'privacy-statement', 'privacy_statement'
-    ]
-    
-    # Additional path indicators for privacy that are sometimes embedded
-    additional_privacy_path_indicators = [
-        'ref=footer_privacy', 'ref=privacy', 'privacy_statement', 'privacy-policy'
     ]
     
     # Define strong indicators for terms of service
@@ -628,36 +620,6 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
         'eula', 'conditions-of-use', 'condition-of-use', 'user-agreement'
     ]
     
-    # Additional path indicators for ToS that are sometimes embedded
-    additional_terms_path_indicators = [
-        'ref=footer_conditions', 'ref=footer_cou', 'ref=terms', 'ref=footer_terms', 
-        'conditions-of-use', 'user-agreement', 'legal-terms'
-    ]
-    
-    # Check for privacy-specific or terms-specific query parameters
-    if policy_type == 'privacy':
-        # Check for privacy references in query string
-        if any(term in query for term in ['privacy', 'datenschutz', 'gdpr', 'ccpa']):
-            return True
-        # Check for node IDs that are known to be privacy policies
-        if 'nodeid=468496' in query:  # Amazon's privacy policy node ID
-            return True
-    else:  # Terms of Service
-        # Check for terms references in query string
-        if any(term in query for term in ['terms', 'tos', 'conditions', 'eula']):
-            return True
-        # Check for node IDs that are known to be terms pages
-        if 'nodeid=508088' in query:  # Amazon's conditions of use node ID
-            return True
-    
-    # Check for additional path indicators embedded in the path
-    if policy_type == 'privacy':
-        if any(indicator in path for indicator in additional_privacy_path_indicators):
-            return True
-    else:  # Terms of Service
-        if any(indicator in path for indicator in additional_terms_path_indicators):
-            return True
-    
     # Special case: Combined "legal" pages might contain both
     if '/legal' in url or '/policies' in url:
         # Check for explicit indicators in the URL
@@ -665,22 +627,6 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
             return not any(ti in url for ti in terms_indicators) or any(pi in url for pi in privacy_indicators)
         else:  # ToS
             return not any(pi in url for pi in privacy_indicators) or any(ti in url for ti in terms_indicators)
-    
-    # Special case: Help center pages are common for policy documents
-    if '/help/' in path or '/customer/display' in path:
-        # For help pages, check if there are clear indicators in the path or query
-        if policy_type == 'privacy':
-            if 'privacy' in path or 'privacy' in query:
-                return True
-            # Check for common help center patterns for privacy
-            if 'data' in query or 'data-protection' in path:
-                return True
-        else:  # ToS
-            if 'terms' in path or 'tos' in path or 'terms' in query or 'tos' in query:
-                return True
-            # Check for common help center patterns for terms
-            if 'conditions' in path or 'conditions' in query or 'cou' in query:
-                return True
     
     # Special case: Documentation might use "terms" in a different context
     if policy_type == 'tos' and any(doc in url for doc in ['/documentation', '/docs/', '/api/', '/doc/']):
@@ -705,207 +651,391 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
     # Conservative default: if we can't determine the type, consider it a mismatch
     return False
 
-def find_policy_by_class_id(soup: BeautifulSoup, policy_type: str = 'privacy', base_url: str = "") -> Optional[str]:
+def find_policy_by_class_id(soup: BeautifulSoup, policy_type: str, base_url: str = '') -> Optional[str]:
     """
-    Find policy links by looking for specific class, ID attributes, and common structural elements.
-    Prioritizes links found in footers, navigations, and specific sections.
-    Returns an absolute URL if found.
+    Find policy links by looking in specific structures like footers, navigation, etc.
+    This is a more targeted approach using HTML structure and class/id attributes.
     
-    Optimized version with early returns and cached operations for better performance.
+    Args:
+        soup: BeautifulSoup object
+        policy_type: 'privacy' or 'tos'
+        base_url: The base URL to build absolute URLs
+        
+    Returns:
+        The URL of the found policy or None
     """
-    # Define terms to search for based on policy type (cached at function level)
-    if policy_type == 'privacy':
-        keywords = ['privacy', 'privacy policy', 'data protection', 'privacy notice', 'Privacy Notice', 'datenschutz']
-        url_keywords = ['/privacy', 'privacy-policy', 'privacy_policy', 'privacypolicy', 'privacy.html']
-    else:  # Terms of service
-        keywords = ['terms', 'terms of service', 'terms of use', 'terms and conditions', 'legal', 'tos', 'conditions of use', 'eula']
-        url_keywords = ['/terms', '/tos', 'terms-of-service', 'terms.html', 'legal-terms', 'eula']
-
-    # Cache for found candidates to avoid duplicate processing
+    # Get a set of patterns based on policy type
+    policy_terms = get_policy_terms(policy_type)
+    
+    # Best candidates from different methods
     candidates = []
-    existing_urls = set()
-
-    # Fast path: Check footer links first (highest probability area)
-    footer_elements = soup.find_all(['footer'])
-    if not footer_elements:  # Try by class/id if no footer tag
-        footer_elements = soup.find_all(['div'], class_=lambda c: c and ('footer' in c.lower() if c else False))
-        footer_elements += soup.find_all(['div'], id=lambda i: i and ('footer' in i.lower() if i else False))
-        footer_elements += soup.find_all(role='contentinfo')  # Standard footer role
     
-    # Process footer links with high priority
-    for element in footer_elements:
-        for link in element.find_all('a', href=True):
-            href = link.get('href', '').strip()
-            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-                continue
-
-            # Make URL absolute
-            absolute_url = urljoin(base_url, href)
-            if absolute_url in existing_urls:
+    # 1. First check for standard footer elements with policy links
+    footer_elements = soup.select('footer, [class*="footer"], [id*="footer"], [role="contentinfo"]')
+    for footer in footer_elements:
+        links = footer.find_all('a', href=True)
+        
+        # Create a list of links with their text and URL
+        footer_links = []
+        for link in links:
+            href = link.get('href')
+            if not href or href.startswith(('#', 'javascript:', 'mailto:')):
                 continue
                 
-            existing_urls.add(absolute_url)
+            # Get text - both display text and title attribute
+            text = link.get_text().strip().lower()
+            title = link.get('title', '').lower()
+            combined_text = f"{text} {title}"
             
-            # Fast check: direct keyword match in link text
-            link_text = link.get_text().lower().strip()
-            
-            # Fast path for very clear matches in footers (early return for obvious matches)
-            for keyword in keywords:
-                if keyword.lower() in link_text:
-                    # Skip validation for obvious matches in footer
-                    if not is_likely_false_positive(absolute_url, policy_type) and is_correct_policy_type(absolute_url, policy_type):
-                        logger.info(f"Found best candidate for {policy_type} via footer_text_match: {absolute_url} (Score: 12)")
-                        return absolute_url
-            
-            # Check URL keywords for footer links
-            href_lower = absolute_url.lower()
-            for url_keyword in url_keywords:
-                if url_keyword in href_lower:
-                    candidates.append((absolute_url, 10, "footer_href_match"))
-                    break
-    
-    # If we have high-confidence footer candidates, return the best one
-    footer_candidates = [c for c in candidates if c[2].startswith("footer_") and c[1] >= 10]
-    if footer_candidates:
-        # Skip validation for high-confidence footer matches
-        best_candidate = max(footer_candidates, key=lambda x: x[1])
-        if not is_likely_false_positive(best_candidate[0], policy_type) and is_correct_policy_type(best_candidate[0], policy_type):
-            logger.info(f"Found best candidate for {policy_type} via {best_candidate[2]}: {best_candidate[0]} (Score: {best_candidate[1]})")
-            return best_candidate[0]
-
-    # Continue with navigation elements (more focused search)
-    nav_elements = soup.find_all(['nav'])
-    nav_elements += soup.find_all(role='navigation')
-    
-    for element in nav_elements:
-        for link in element.find_all('a', href=True):
-            href = link.get('href', '').strip()
-            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-                continue
-
-            absolute_url = urljoin(base_url, href)
-            if absolute_url in existing_urls:
-                continue
-                
-            existing_urls.add(absolute_url)
-
-            # Fast check for navigation links
-            link_text = link.get_text().lower().strip()
-            for keyword in keywords:
-                if keyword.lower() in link_text:
-                    candidates.append((absolute_url, 8 + 2, "nav_text_match"))
-                    break  # Found a match, move to next link
-                
-            # Check URL keywords
-            href_lower = absolute_url.lower()
-            for url_keyword in url_keywords:
-                if url_keyword in href_lower:
-                    candidates.append((absolute_url, 8, "nav_href_match"))
-                    break
-    
-    # If we have strong navigation candidates, check them now
-    nav_candidates = [c for c in candidates if c[2].startswith("nav_") and c[1] >= 8]
-    if nav_candidates:
-        best_candidate = max(nav_candidates, key=lambda x: x[1])
-        if not is_likely_false_positive(best_candidate[0], policy_type) and is_correct_policy_type(best_candidate[0], policy_type):
-            logger.info(f"Found best candidate for {policy_type} via {best_candidate[2]}: {best_candidate[0]} (Score: {best_candidate[1]})")
-            return best_candidate[0]
-
-    # Continue with common legal/policy sections - but only if we haven't found strong candidates yet
-    common_section_selectors = [
-        {'class': lambda c: c and any(s in c.lower() for s in ['legal', 'policies', 'company', 'about']) if c else False},
-        {'id': lambda i: i and any(s in i.lower() for s in ['legal', 'policies', 'company', 'about']) if i else False}
-    ]
-    
-    for selector in common_section_selectors:
-        section_elements = soup.find_all(['div', 'section'], **selector)
-        for element in section_elements:
-            for link in element.find_all('a', href=True):
-                href = link.get('href', '').strip()
-                if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-                    continue
-
-                absolute_url = urljoin(base_url, href)
-                if absolute_url in existing_urls:
-                    continue
-                    
-                existing_urls.add(absolute_url)
-
-                link_text = link.get_text().lower().strip()
-                for keyword in keywords:
-                    if keyword.lower() in link_text:
-                        candidates.append((absolute_url, 6 + 2, "section_text_match"))
-                        break
-                
-                href_lower = absolute_url.lower()
-                for url_keyword in url_keywords:
-                    if url_keyword in href_lower:
-                        candidates.append((absolute_url, 6, "section_href_match"))
-                        break
-
-    # Check for common policy class/id patterns - but only process new links
-    policy_class_patterns = ['privacy-link', 'privacy_link', 'privacyLink', 'privacy-policy', 
-                          'terms-link', 'terms_link', 'termsLink', 'terms-of-service',
-                          'legal-link', 'legal_link', 'legalLink']
-    
-    for pattern in policy_class_patterns:
-        for element in soup.find_all(class_=lambda c: c and pattern.lower() in c.lower() if c else False):
-            # If it's a link itself
-            if element.name == 'a' and element.has_attr('href'):
-                href = element.get('href', '').strip()
-                if href and not href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-                    absolute_url = urljoin(base_url, href)
-                    if absolute_url not in existing_urls:
-                        candidates.append((absolute_url, 5, "policy_class"))
-                        existing_urls.add(absolute_url)
-            # If it contains links
+            # Create absolute URL if necessary
+            if base_url and href.startswith('/'):
+                abs_url = urljoin(base_url, href)
             else:
-                for link in element.find_all('a', href=True):
-                    href = link.get('href', '').strip()
-                    if href and not href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-                        absolute_url = urljoin(base_url, href)
-                        if absolute_url not in existing_urls:
-                            candidates.append((absolute_url, 4, "policy_container_class"))
-                            existing_urls.add(absolute_url)
-
-    # Only run fallback all-links search if we don't have good candidates yet
-    if not candidates or max(c[1] for c in candidates) < 5:
-        # Limited fallback - only look at links with specific text patterns
-        # This is much faster than searching all links
-        for link in soup.find_all('a', href=True):
-            href = link.get('href', '').strip()
-            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                abs_url = href
+                
+            footer_links.append({
+                'element': link,
+                'text': combined_text,
+                'url': abs_url
+            })
+            
+        # Amazon specific handling - prioritize actual privacy notice over preferences
+        if any('amazon.com' in link['url'] for link in footer_links):
+            amazon_links = []
+            for link in footer_links:
+                url_lower = link['url'].lower()
+                # Direct match for privacy notice/policy
+                if ('privacy' in link['text'] and 'notice' in link['text']) or '/privacy' in url_lower:
+                    # High priority for direct privacy notice links
+                    if '/privacy/notice' in url_lower or 'privacy.amazon' in url_lower:
+                        logger.info(f"Found Amazon direct privacy notice: {link['url']}")
+                        return link['url']
+            
+        # Score and sort based on relevance to the policy type
+        scored_links = []
+        for link in footer_links:
+            url_lower = link['url'].lower()
+            text = link['text']
+            score = 0
+            
+            # Check for exact matches first (highest priority)
+            for term in policy_terms['exact_matches']:
+                if term in text:
+                    score += 12  # Highest score for exact matches
+                    break
+                    
+            # Check for policy-type specific terms in URL
+            for term in policy_terms['url_patterns']:
+                if term in url_lower:
+                    score += 8
+                    break
+                    
+            # Check for general policy indicators in text
+            for term in policy_terms['general_indicators']:
+                if term in text:
+                    score += 5
+                    break
+            
+            # Avoid false positives
+            if is_likely_false_positive(url_lower, policy_type):
+                score = 0
+            
+            # Only consider links with positive scores
+            if score > 0:
+                scored_links.append({
+                    'url': link['url'],
+                    'score': score,
+                    'method': 'footer_text_match'
+                })
+        
+        # If we found some good candidates in this footer, add the best one
+        if scored_links:
+            best_match = max(scored_links, key=lambda x: x['score'])
+            candidates.append(best_match)
+    
+    # 2. Check navigation elements
+    nav_elements = soup.select('nav, [role="navigation"], [class*="nav"], [id*="nav"]')
+    for nav in nav_elements:
+        # Skip main navigation which likely has product links, not policy links
+        if nav.get('class') and any(c in str(nav.get('class')).lower() for c in ['main', 'primary']):
+            continue
+            
+        links = nav.find_all('a', href=True)
+        nav_links = []
+        
+        for link in links:
+            href = link.get('href')
+            if not href or href.startswith(('#', 'javascript:', 'mailto:')):
                 continue
                 
-            # Skip checking links we've already processed
-            absolute_url = urljoin(base_url, href)
-            if absolute_url in existing_urls:
+            # Get text - both display text and title attribute
+            text = link.get_text().strip().lower()
+            title = link.get('title', '').lower()
+            combined_text = f"{text} {title}"
+            
+            # Create absolute URL if necessary
+            if base_url and href.startswith('/'):
+                abs_url = urljoin(base_url, href)
+            else:
+                abs_url = href
+                
+            # Avoid false positives
+            if is_likely_false_positive(abs_url, policy_type):
                 continue
                 
-            link_text = link.get_text().lower().strip()
-            # Only consider links with policy-related text (much faster than checking all links)
-            if any(keyword.lower() in link_text for keyword in keywords):
-                candidates.append((absolute_url, 3, "text_match"))
-                existing_urls.add(absolute_url)
-
-    # Filter and sort candidates - focus on the most promising ones first
-    filtered_candidates = []
-    for url_cand, score, reason in candidates:
-        # Skip likely false positives first - only need to check highest-scoring candidates
-        if is_likely_false_positive(url_cand, policy_type):
-            continue
-        # Check if the type seems correct
-        if not is_correct_policy_type(url_cand, policy_type):
-            continue
-        filtered_candidates.append((url_cand, score, reason))
-
-    # Sort candidates by score
-    filtered_candidates.sort(key=lambda x: x[1], reverse=True)
+            nav_links.append({
+                'element': link,
+                'text': combined_text,
+                'url': abs_url
+            })
+            
+        # Score links based on policy indicators
+        scored_nav_links = []
+        for link in nav_links:
+            url_lower = link['url'].lower()
+            text = link['text']
+            score = 0
+            
+            # Check for exact matches first
+            for term in policy_terms['exact_matches']:
+                if term in text:
+                    score += 10  # High score but slightly lower than footer
+                    break
+                    
+            # Check for policy-type specific terms in URL
+            for term in policy_terms['url_patterns']:
+                if term in url_lower:
+                    score += 6
+                    break
+                    
+            # Check for general policy indicators
+            for term in policy_terms['general_indicators']:
+                if term in text:
+                    score += 3
+                    break
+            
+            # Only consider links with positive scores
+            if score > 0:
+                scored_nav_links.append({
+                    'url': link['url'],
+                    'score': score,
+                    'method': 'nav_text_match'
+                })
+                
+        # If we found some good candidates in navigation, add the best one
+        if scored_nav_links:
+            best_match = max(scored_nav_links, key=lambda x: x['score'])
+            candidates.append(best_match)
     
-    if filtered_candidates:
-        best_candidate = filtered_candidates[0]
-        logger.info(f"Found best candidate for {policy_type} via {best_candidate[2]}: {best_candidate[0]} (Score: {best_candidate[1]})")
-        return best_candidate[0]
+    # 3. Check for policy-specific containers by class/id
+    policy_containers = soup.select(
+        f'[class*="{policy_type}"], [id*="{policy_type}"], [class*="legal"], [id*="legal"]'
+    )
     
-    logger.info(f"No suitable candidate found for {policy_type} via structural search.")
+    for container in policy_containers:
+        links = container.find_all('a', href=True)
+        container_links = []
+        
+        for link in links:
+            href = link.get('href')
+            if not href or href.startswith(('#', 'javascript:', 'mailto:')):
+                continue
+                
+            # Get text - both display text and title attribute
+            text = link.get_text().strip().lower()
+            title = link.get('title', '').lower()
+            combined_text = f"{text} {title}"
+            
+            # Create absolute URL if necessary
+            if base_url and href.startswith('/'):
+                abs_url = urljoin(base_url, href)
+            else:
+                abs_url = href
+                
+            # Avoid false positives
+            if is_likely_false_positive(abs_url, policy_type):
+                continue
+                
+            container_links.append({
+                'element': link,
+                'text': combined_text,
+                'url': abs_url
+            })
+            
+        # Score links based on policy indicators
+        scored_container_links = []
+        for link in container_links:
+            url_lower = link['url'].lower()
+            text = link['text']
+            score = 0
+            
+            # Check for exact matches first
+            for term in policy_terms['exact_matches']:
+                if term in text:
+                    score += 8
+                    break
+                    
+            # Check for policy-type specific terms in URL
+            for term in policy_terms['url_patterns']:
+                if term in url_lower:
+                    score += 5
+                    break
+                    
+            # Check for general policy indicators
+            for term in policy_terms['general_indicators']:
+                if term in text:
+                    score += 2
+                    break
+            
+            # Only consider links with positive scores
+            if score > 0:
+                scored_container_links.append({
+                    'url': link['url'],
+                    'score': score,
+                    'method': 'container_match'
+                })
+                
+        # If we found some good candidates in this container, add the best one
+        if scored_container_links:
+            best_match = max(scored_container_links, key=lambda x: x['score'])
+            candidates.append(best_match)
+    
+    # Return the best match across all methods if found
+    if candidates:
+        best_candidate = max(candidates, key=lambda x: x['score'])
+        logger.info(f"Found best candidate for {policy_type} via {best_candidate['method']}: {best_candidate['url']} (Score: {best_candidate['score']})")
+        return best_candidate['url']
+        
     return None
+
+def get_policy_terms(policy_type: str) -> dict:
+    """
+    Get policy-specific terms organized by categories.
+    Enhanced with comprehensive terms across multiple languages.
+    
+    Args:
+        policy_type: 'privacy' or 'tos'
+        
+    Returns:
+        Dictionary with categorized terms
+    """
+    if policy_type == 'privacy':
+        return {
+            'exact_matches': [
+                # English
+                'privacy policy', 'privacy notice', 'data protection', 
+                'privacy statement', 'privacy & cookies', 'privacy and cookies',
+                'your privacy rights', 'cookie policy', 'privacy settings',
+                'privacy center', 'privacy preferences', 'privacy choices',
+                # German
+                'datenschutzerklärung', 'datenschutz', 'datenschutzrichtlinie',
+                # French
+                'politique de confidentialité', 'protection des données',
+                # Spanish
+                'política de privacidad', 'aviso de privacidad', 'privacidad',
+                # Italian
+                'informativa sulla privacy', 'politica della privacy',
+                # Portuguese
+                'política de privacidade', 'privacidade',
+                # Japanese
+                'プライバシーポリシー', 'プライバシー規約',
+                # Chinese
+                '隐私政策', '隐私权政策', '私隱政策',
+                # Russian
+                'политика конфиденциальности',
+                # Generic
+                'privacy', 'personal data'
+            ],
+            'url_patterns': [
+                # Common URL patterns
+                '/privacy', '/privacypolicy', '/privacy-policy', '/privacy_policy', '/privacy-notice',
+                '/privacy_notice', '/data-protection', '/data_protection', '/pp',
+                '/datenschutz', '/privacidad', '/privacy-statement', '/privacy_statement',
+                '/cookies', '/cookie-policy', '/cookie_policy', '/privacy-center', '/privacy_center',
+                '/privacy/policy', '/privacy-settings', '/privacy-choices', '/privacy/policy/',
+                '/privacy.html', '/privacy.php', '/privacy.aspx', '/privacy.htm',
+                # Special cases for major sites
+                'privacy.amazon', 'privacy.microsoft', 'privacy.apple.com', 'privacy.google',
+                'help/privacy', 'about/privacy', 'legal/privacy', 'policies/privacy',
+                # Parameters
+                'privacy=', 'privacy&', 'privacy?', 'pp=', 'pp&', 'pp?',
+                # Paths with IDs (Amazon style)
+                'nodeId=', 'nodeID=', 'privacynotice', 'privacyNotice'
+            ],
+            'general_indicators': [
+                # English
+                'privacy', 'data', 'cookies', 'gdpr', 'ccpa', 'cpra', 'personal information', 
+                'data protection', 'information collected',
+                # German
+                'datenschutz', 'daten',
+                # French
+                'confidentialité', 'données',
+                # Spanish
+                'privacidad', 'datos',
+                # Italian
+                'riservatezza', 'dati',
+                # Portuguese
+                'privacidade', 'dados',
+                # Common abbreviations
+                'gdpr', 'ccpa', 'cpra', 'pipeda'
+            ]
+        }
+    else:  # Terms of service
+        return {
+            'exact_matches': [
+                # English
+                'terms of service', 'terms of use', 'terms and conditions', 
+                'conditions of use', 'condition of use', 'user agreement', 
+                'legal terms', 'terms', 'conditions', 'service terms',
+                'terms & conditions', 'legal information', 'legal notice',
+                'website terms', 'user terms', 'site terms',
+                # German
+                'nutzungsbedingungen', 'allgemeine geschäftsbedingungen', 'agb',
+                # French
+                'conditions d\'utilisation', 'conditions générales', 'mentions légales',
+                # Spanish
+                'términos de servicio', 'términos y condiciones', 'condiciones de uso',
+                'términos de uso', 'aviso legal',
+                # Italian
+                'termini di servizio', 'termini e condizioni', 'condizioni d\'uso',
+                # Portuguese
+                'termos de serviço', 'termos de uso', 'termos e condições',
+                # Japanese
+                '利用規約', 'サービス利用規約',
+                # Chinese
+                '服务条款', '使用条款', '使用条件',
+                # Russian
+                'условия использования', 'пользовательское соглашение'
+            ],
+            'url_patterns': [
+                # Common URL patterns
+                '/terms', '/tos', '/terms-of-service', '/terms_of_service', '/termsofservice',
+                '/terms-of-use', '/terms_of_use', '/termsofuse', '/terms-and-conditions',
+                '/terms_and_conditions', '/conditions-of-use', '/condition-of-use',
+                '/user-agreement', '/user_agreement', '/legal-terms', '/legal_terms',
+                '/terms.html', '/tos.html', '/terms.php', '/terms.aspx', '/terms.htm',
+                '/legal', '/legal-info', '/legal_info', '/legal-notices', '/legal_notices',
+                '/eula', '/service-terms', '/service_terms',
+                # URL parameters
+                'terms=', 'tos=', 'terms&', 'tos&', 'terms?', 'tos?',
+                # Paths with IDs (Amazon style)
+                'nodeId=', 'nodeID=', 'termsofuse', 'termsOfUse'
+            ],
+            'general_indicators': [
+                # English
+                'terms', 'conditions', 'legal', 'agreement', 'eula', 'policy',
+                'service agreement', 'use', 'rules', 'guidelines',
+                # German
+                'bedingungen', 'nutzung', 'agb',
+                # French
+                'conditions', 'utilisation', 'légales',
+                # Spanish
+                'términos', 'condiciones', 'uso', 'legal',
+                # Italian
+                'termini', 'condizioni', 'uso',
+                # Portuguese
+                'termos', 'condições', 'uso',
+                # Common abbreviations
+                'tos', 'toc', 'eula'
+            ]
+        }

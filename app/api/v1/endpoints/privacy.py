@@ -818,21 +818,162 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
 
 
 def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
-    """Find privacy policy link in the HTML soup."""
+    """
+    Find privacy policy link in the HTML soup.
+    Enhanced to handle various website structures including popular platforms.
+    """
+    logger.info(f"Searching for privacy link in {url}")
+    
+    # Parse URL details once for reuse
+    parsed_url = urlparse(url)
+    current_domain = parsed_url.netloc.lower()
+    base_domain = get_root_domain(current_domain)
+    
     # First try the structure-aware, high-priority approach - fastest method
     class_id_result = find_policy_by_class_id(soup, 'privacy', base_url=url)
     if class_id_result:
         logger.info(f"Found privacy link via structural search: {class_id_result}")
         return class_id_result
-        
-    # If not found, proceed with the general scoring approach (as fallback)
-    logger.info("Structural search failed, proceeding with general link scoring...")
     
-    # Parse and cache domain data (avoid repeated parsing)
-    parsed_url = urlparse(url)
-    current_domain = parsed_url.netloc.lower()
-    base_domain = get_root_domain(current_domain)
-    is_legal_page = is_on_policy_page(url, 'privacy')
+    # Check if we're already on a privacy page (avoid infinite loop)
+    if is_on_policy_page(url, 'privacy'):
+        logger.info(f"Already on a privacy page: {url}")
+        return url
+    
+    # ----- SITE-SPECIFIC HANDLING -----
+    
+    # Special handling for Amazon domains since they have a unique structure
+    if 'amazon.' in current_domain:
+        logger.info("Detected Amazon domain, applying special handling")
+        # Look for privacy links directly
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '')
+            link_text = link.get_text().lower().strip()
+            
+            # Amazon often uses nodeId parameter for policy pages
+            if 'privacy' in link_text or 'privacy' in href.lower():
+                if 'help/customer/display' in href and 'nodeId=' in href:
+                    full_url = urljoin(url, href)
+                    logger.info(f"Found Amazon privacy link with nodeId: {full_url}")
+                    return full_url
+                    
+                # Direct privacy notice URLs
+                if '/privacy/notice' in href.lower() or 'privacy.amazon' in href.lower():
+                    full_url = urljoin(url, href)
+                    logger.info(f"Found Amazon direct privacy notice: {full_url}")
+                    return full_url
+    
+    # Special handling for Facebook/Meta domains
+    if any(domain in current_domain for domain in ['facebook.com', 'fb.com', 'meta.com', 'instagram.com']):
+        logger.info("Detected Facebook/Meta domain, applying special handling")
+        
+        # Define priority patterns for Facebook privacy links
+        fb_privacy_patterns = [
+            '/privacy/policy', 
+            '/privacy/center',
+            '/privacy/policies',
+            '/data_policy',
+            '/privacy'
+        ]
+        
+        # First check for direct privacy policy links in footer or body
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            link_text = link.get_text().lower().strip()
+            
+            # Check for explicit privacy text matches first
+            if 'privacy policy' in link_text or 'data policy' in link_text:
+                full_url = urljoin(url, href)
+                logger.info(f"Found Facebook privacy link by text: {full_url}")
+                return full_url
+                
+            # Check pattern matches in href
+            for pattern in fb_privacy_patterns:
+                if pattern in href.lower():
+                    full_url = urljoin(url, href)
+                    logger.info(f"Found Facebook privacy link by pattern match: {full_url}")
+                    return full_url
+    
+    # Special handling for Google domains
+    if any(domain in current_domain for domain in ['google.com', 'youtube.com', 'gmail.com']):
+        logger.info("Detected Google domain, applying special handling")
+        
+        # Common Google privacy URL patterns
+        google_privacy_patterns = [
+            'policies.google.com/privacy',
+            '/policies/privacy',
+            '/privacy',
+            '/intl/*/policies/privacy'
+        ]
+        
+        # Check all links against Google patterns
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            if any(pattern in href for pattern in google_privacy_patterns):
+                full_url = urljoin(url, href)
+                logger.info(f"Found Google privacy link: {full_url}")
+                return full_url
+    
+    # Special handling for adult content sites
+    if any(domain in current_domain for domain in ['pornhub.com', 'youporn.com', 'xvideos.com']):
+        logger.info("Detected adult content site, applying special handling")
+        
+        # Adult sites often have privacy in specific locations
+        adult_site_privacy_sections = [
+            'footer', '[class*="footer"]', '[class*="bottom"]',
+            '[data-section="footer"]', '.footer-corporate', '.info-section'
+        ]
+        
+        # Look in specific sections first
+        for section_selector in adult_site_privacy_sections:
+            sections = soup.select(section_selector)
+            for section in sections:
+                for link in section.find_all('a', href=True):
+                    href = link.get('href', '').strip()
+                    link_text = link.get_text().lower().strip()
+                    
+                    if 'privacy' in link_text or 'privacy' in href.lower():
+                        full_url = urljoin(url, href)
+                        logger.info(f"Found adult site privacy link in {section_selector}: {full_url}")
+                        return full_url
+    
+    # Special handling for GitHub
+    if 'github.com' in current_domain:
+        logger.info("Detected GitHub domain, applying special handling")
+        
+        # Common GitHub privacy URLs
+        github_privacy_patterns = [
+            'github.com/site/privacy',
+            'github.com/github/site-policy',
+            '/site/privacy',
+            '/articles/github-privacy-statement'
+        ]
+        
+        # Look for GitHub specific privacy links
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            if any(pattern in href for pattern in github_privacy_patterns):
+                full_url = urljoin(url, href)
+                logger.info(f"Found GitHub privacy link: {full_url}")
+                return full_url
+    
+    # Special handling for unsplash and similar image sites
+    if 'unsplash.com' in current_domain:
+        logger.info("Detected Unsplash domain, applying special handling")
+        
+        # Check footer elements and specifically look for privacy
+        footer_elements = soup.select('footer, [class*="footer"]')
+        for footer in footer_elements:
+            for link in footer.find_all('a', href=True):
+                href = link.get('href', '').strip()
+                link_text = link.get_text().lower().strip()
+                
+                if 'privacy' in link_text or '/privacy' in href:
+                    full_url = urljoin(url, href)
+                    logger.info(f"Found Unsplash privacy link: {full_url}")
+                    return full_url
+    
+    # ----- GENERAL PURPOSE HANDLING -----
     
     # Get patterns once (avoid repeated function calls)
     exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
@@ -840,6 +981,9 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     # Track high-potential links to reduce processing time
     candidates = []
     promising_candidates = []  # Track especially promising candidates for early return
+    
+    # If main HTML didn't yield results, look deeper
+    is_legal_page = any(pattern in url.lower() for pattern in ['/legal', '/policy', '/policies', '/about'])
     
     # Look for links only in relevant areas first (faster than processing all links)
     footer_elements = soup.select('footer, [class*="footer"], [id*="footer"], [role="contentinfo"]')
@@ -986,4 +1130,15 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         logger.info(f"Sorted privacy policy candidates: {candidates[:3]}")  # Only log top 3 for efficiency
         return candidates[0][0]
     
+    # Final fallback - check for meta tag with privacy info
+    meta_tags = soup.find_all('meta')
+    for meta in meta_tags:
+        if meta.get('name', '').lower() in ['privacy-policy', 'privacy-policy-url']:
+            content = meta.get('content', '')
+            if content and not content.startswith(('#', 'javascript:')):
+                full_url = urljoin(url, content)
+                logger.info(f"Found privacy link in meta tag: {full_url}")
+                return full_url
+    
+    logger.warning(f"No privacy link found for {url}")
     return None 
