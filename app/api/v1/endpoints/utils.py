@@ -514,7 +514,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
     common_false_positives = [
         'twitter.com', 'instagram.com', 'linkedin.com',
         'youtube.com', 'accounts.google.com', 'plus.google.com',
-        'pinterest.com', 'snapchat.com', 'apple.com/app-store', 'play.google.com'
+        'pinterest.com', 'snapchat.com', 'apple.com/app-store'
     ]
     
     # Check for actual policy pages first - these should never be considered false positives
@@ -522,6 +522,13 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
     if any(indicator in url_lower for indicator in policy_indicators):
         # This looks like an actual policy page, not a false positive
         return False
+    
+    # Special case for Play Store - only consider as false positive if it doesn't have policy indicators
+    if 'play.google.com' in url_lower:
+        # Check if it might be an app-specific privacy policy
+        if 'privacy' in url_lower or any(indicator in url_lower for indicator in policy_indicators):
+            return False
+        return True
     
     # Now check for social media sharing links which are common false positives
     for domain in common_false_positives:
