@@ -136,7 +136,20 @@ async def check_policy_with_playwright(url, policy_type="both"):
 
             # First visit the main page to look for links
             main_page = await context.new_page()
-            await main_page.goto(url, wait_until="networkidle", timeout=30000)
+            try:
+                # Reduce timeout from 30000ms to 15000ms to avoid long hangs
+                await main_page.goto(url, wait_until="networkidle", timeout=15000)
+            except Exception as e:
+                # Try again with domcontentloaded which is less strict
+                try:
+                    await main_page.goto(
+                        url, wait_until="domcontentloaded", timeout=10000
+                    )
+                except Exception as inner_e:
+                    logger.error(
+                        f"Failed to load page even with reduced expectations: {str(inner_e)}"
+                    )
+                    raise inner_e
 
             # Get page content
             content = await main_page.content()
