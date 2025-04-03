@@ -504,66 +504,89 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
 
 def is_likely_false_positive(url: str, policy_type: str) -> bool:
     """
-    Check if a URL is likely to be a false positive (not actually a policy page).
-    More flexible with different naming conventions.
+    Check if a URL is likely to be a false positive (not actually a policy page)
+    using contextual analysis instead of hardcoded domains.
     """
     url_lower = url.lower()
+    parsed_url = urlparse(url)
+    path = parsed_url.path.lower()
     
-    # Common false positives for both policy types - social media sharing links
-    # But now we make exceptions for actual policy pages on these domains
-    common_false_positives = [
-        'twitter.com', 'instagram.com', 'linkedin.com',
-        'youtube.com', 'accounts.google.com', 'plus.google.com',
-        'pinterest.com', 'snapchat.com', 'apple.com/app-store'
-    ]
-    
-    # Check for actual policy pages first - these should never be considered false positives
+    # Strong policy indicators - these should never be considered false positives
+    # Check for these first - most reliable way to identify real policy pages
     policy_indicators = ['/privacy', '/policy', '/policies', '/terms', '/tos', '/legal', '/gdpr', '/data-protection']
-    if any(indicator in url_lower for indicator in policy_indicators):
-        # This looks like an actual policy page, not a false positive
+    if any(indicator in path for indicator in policy_indicators):
         return False
     
-    # Special case for Play Store - only consider as false positive if it doesn't have policy indicators
-    if 'play.google.com' in url_lower:
-        # Check if it might be an app-specific privacy policy
-        if 'privacy' in url_lower or any(indicator in url_lower for indicator in policy_indicators):
+    # Check for policy-specific query parameters in URLs
+    if 'privacy' in parsed_url.query.lower() or 'policy' in parsed_url.query.lower():
+        if policy_type == 'privacy':
             return False
+    
+    if 'terms' in parsed_url.query.lower() or 'tos' in parsed_url.query.lower():
+        if policy_type == 'tos':
+            return False
+    
+    # Case 1: Social media share/profile links - identified by path patterns
+    social_media_paths = [
+        '/share', '/status/', '/post/', '/photo/', '/video/',
+        '/profile/', '/user/', '/account/', '/page/', '/channel/'
+    ]
+    
+    if any(pattern in path for pattern in social_media_paths):
+        # Unless it explicitly has policy in the path
+        if 'privacy' not in path and 'policy' not in path and 'terms' not in path and 'legal' not in path:
+            return True
+    
+    # Case 2: App store links that aren't privacy-related
+    if 'play.google.com' in url_lower and 'store/apps' in url_lower:
+        # Only accept privacy-specific app store links
+        if not any(term in url_lower for term in ['/privacy', 'policy=', 'privacy=', 'privacy?']):
+            return True
+    
+    if 'apps.apple.com' in url_lower or 'itunes.apple.com' in url_lower:
+        # Only accept privacy-specific app store links
+        if not any(term in url_lower for term in ['/privacy', 'policy=', 'privacy=', 'privacy?']):
+            return True
+    
+    # Case 3: Support or documentation pages mistaken for policies
+    if policy_type == 'privacy':
+        if '/support-policy' in path and 'privacy' not in path:
+            # Support policies that don't mention privacy are false positives
+            if not any(term in url_lower for term in ['/data', '/personal', '/gdpr', '/private']):
+                return True
+    
+    # Case 4: Documentation mistaken for ToS
+    if policy_type == 'tos' and ('/docs' in path or '/documentation' in path or '/doc/' in path or path.endswith('/doc')):
+        # Only if it doesn't explicitly mention terms
+        if not any(term in path for term in ['/terms', '/tos', '/legal', '/eula', '/conditions']):
+            return True
+    
+    # Case 5: Common content file types are rarely policy pages
+    file_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.zip', '.mp4', '.mp3', '.exe']
+    if any(url_lower.endswith(ext) for ext in file_extensions):
         return True
     
-    # Now check for social media sharing links which are common false positives
-    for domain in common_false_positives:
-        if domain in url_lower:
+    # Special case for PDFs - they might be legitimate policy documents
+    if url_lower.endswith('.pdf'):
+        # If the PDF filename contains policy terms, it's likely legitimate
+        filename = path.split('/')[-1].lower()
+        policy_terms = ['privacy', 'policy', 'terms', 'tos', 'legal', 'data']
+        if not any(term in filename for term in policy_terms):
             return True
     
-    # Check for "support policy" in privacy detection - this is a false positive
-    # But only if it doesn't also mention privacy or data
-    if policy_type == 'privacy':
-        if '/support-policy' in url_lower and 'privacy' not in url_lower:
-            # Check if it might be a valid privacy policy despite having "support" in the name
-            # For example, some sites might have "Support & Privacy Policy"
-            if any(term in url_lower for term in ['/data', '/personal', '/gdpr', '/private']):
-                return False  # It might be a valid privacy policy despite having "support" in the name
-            return True  # Likely a support policy, not a privacy policy
-            
-    # Check for documentation links - these are often false positives for ToS
-    if policy_type == 'tos' and ('/docs' in url_lower or '/documentation' in url_lower or '/doc/' in url_lower or url_lower.endswith('/doc')):
-        # Make sure it's not actually ToS in documentation section
-        if not any(term in url_lower for term in ['/terms', '/tos', '/legal', '/eula', '/conditions']):
-            return True
-    
-    # These file types are rarely policy pages
-    file_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.pdf', '.zip', '.mp4', '.mp3', '.exe']
-    for ext in file_extensions:
-        if url_lower.endswith(ext):
-            return True
-            
-    # Blog posts and news articles are rarely policy pages
+    # Case 6: Blog posts and news articles are rarely policy pages
     blog_patterns = ['/blog/', '/news/', '/article/', '/post/', '/press-release/']
-    if any(pattern in url_lower for pattern in blog_patterns):
+    if any(pattern in path for pattern in blog_patterns):
         # Unless they explicitly mention policies in the URL
-        if policy_type == 'privacy' and not any(term in url_lower for term in ['/privacy', '/data-policy']):
+        if policy_type == 'privacy' and not any(term in path for term in ['/privacy', '/data-policy']):
             return True
-        if policy_type == 'tos' and not any(term in url_lower for term in ['/terms', '/tos', '/conditions']):
+        if policy_type == 'tos' and not any(term in path for term in ['/terms', '/tos', '/conditions']):
+            return True
+    
+    # Case 7: Date patterns in URL typically indicate news/blog content, not policies
+    if re.search(r'/\d{4}/\d{1,2}(/\d{1,2})?/', path):
+        # Unless they explicitly mention policies
+        if not any(term in path for term in policy_indicators):
             return True
     
     return False
