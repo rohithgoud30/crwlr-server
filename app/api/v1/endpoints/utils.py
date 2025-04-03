@@ -509,13 +509,21 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
     """
     url_lower = url.lower()
     
-    # Common false positives for both policy types
+    # Common false positives for both policy types - social media sharing links
+    # But now we make exceptions for actual policy pages on these domains
     common_false_positives = [
-        'twitter.com', 'facebook.com', 'instagram.com', 'linkedin.com',
+        'twitter.com', 'instagram.com', 'linkedin.com',
         'youtube.com', 'accounts.google.com', 'plus.google.com',
         'pinterest.com', 'snapchat.com', 'apple.com/app-store', 'play.google.com'
     ]
     
+    # Check for actual policy pages first - these should never be considered false positives
+    policy_indicators = ['/privacy', '/policy', '/policies', '/terms', '/tos', '/legal', '/gdpr', '/data-protection']
+    if any(indicator in url_lower for indicator in policy_indicators):
+        # This looks like an actual policy page, not a false positive
+        return False
+    
+    # Now check for social media sharing links which are common false positives
     for domain in common_false_positives:
         if domain in url_lower:
             return True

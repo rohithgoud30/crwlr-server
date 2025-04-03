@@ -9,7 +9,7 @@ from typing import Optional, Any, List, Tuple
 import asyncio
 from playwright.async_api import async_playwright
 import logging
-from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id, is_likely_false_positive, is_correct_policy_type
+from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id, is_likely_false_positive, is_correct_policy_type, get_root_domain
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -850,14 +850,14 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     
             # Check if this is a different domain from the original site
             target_domain = urlparse(absolute_url).netloc.lower()
-            base_domain = get_base_domain(current_domain)
-            target_base_domain = get_base_domain(target_domain)
+            base_domain = get_root_domain(current_domain)
+            target_base_domain = get_root_domain(target_domain)
             
             if target_base_domain != base_domain:
                 # For cross-domain links, require explicit privacy references
                 if not any(term in absolute_url.lower() for term in ['/privacy', 'privacy-policy', '/gdpr']):
                     logger.warning(f"Skipping cross-domain non-privacy URL: {absolute_url}")
-                continue
+                    continue
             
             # Ensure this is not a ToS URL
             if not is_correct_policy_type(absolute_url, 'privacy'):
@@ -930,26 +930,4 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         logger.info(f"Sorted privacy policy candidates: {candidates}")
         return candidates[0][0]
     
-    return None
-
-def get_root_domain(domain: str) -> str:
-    """Extract root domain from a domain name."""
-    if not domain:
-        return ""
-        
-    # Remove www prefix if present
-    if domain.startswith('www.'):
-        domain = domain[4:]
-        
-    parts = domain.split('.')
-    
-    # Handle common TLDs like .co.uk
-    if len(parts) > 2:
-        if parts[-2] in ['co', 'com', 'org', 'net', 'gov', 'edu'] and parts[-1] in ['uk', 'au', 'br', 'jp', 'in']:
-            return '.'.join(parts[-3:])
-    
-    # For most domains, return the last two parts
-    if len(parts) >= 2:
-        return '.'.join(parts[-2:])
-    
-    return domain 
+    return None 
