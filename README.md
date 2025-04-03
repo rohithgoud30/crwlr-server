@@ -293,36 +293,84 @@ The API focuses exclusively on finding links in the actual HTML content and does
 1. Create a new file in `app/api/v1/endpoints/` for your endpoint.
 2. Add the router to `app/api/v1/api.py`.
 
-## Policy Detection
+## Universal Policy Detector
 
-This project includes scripts for detecting Terms of Service and Privacy Policy links on websites.
-
-### Scripts
-
-- `test_unsplash.py` - Script specifically for testing Unsplash's ToS and Privacy Policy links
-- `test_policy_detector.py` - Comprehensive tool for detecting policy links across multiple sites
-- `check_unsplash_policies.py` - Tool to fetch and save the full content of Unsplash's policies
+The project includes a universal policy detector tool that can find Terms of Service and Privacy Policy links on any website, without relying on website-specific logic.
 
 ### Features
 
-- Detects policy links in various page sections (head, footer, general HTML)
-- Uses Playwright for JavaScript-heavy sites and interaction with menus/dropdowns
-- Verifies discovered links by checking content for relevant terms
-- Tries common URL patterns when links can't be found directly
-- Saves policy content to files for further analysis
-- Provides detailed reports on policy link detection
+- Works with any website, not just pre-defined ones
+- Uses intelligent detection logic to find policy links in different page sections:
+  - Head section
+  - Footer elements
+  - Navigation menus
+  - General page content
+- Employs multiple detection strategies:
+  - Text matching for policy link labels
+  - URL pattern recognition
+  - HTML structure analysis (footer, nav, legal sections)
+  - Common policy URL patterns
+- Handles JavaScript-heavy websites using Playwright
+- Downloads and saves policy content for further analysis
+- Supports batch processing of multiple sites
+- Generates detailed reports on detection results
 
 ### Usage
 
-Run any of the scripts directly:
+The policy detector can be used directly from the command line:
 
-```
-python test_unsplash.py
-python test_policy_detector.py
-python check_unsplash_policies.py
+```bash
+# Check a single website
+python tests/policy_detector/policy_detector.py example.com
+
+# Check multiple websites in batch mode
+python tests/policy_detector/policy_detector.py
+# Then input multiple URLs when prompted
 ```
 
-The comprehensive detector writes results to a JSON file for further analysis.
+For programmatic use:
+
+```python
+from tests.policy_detector.policy_detector import check_policy_with_playwright, batch_check_policies
+import asyncio
+
+# Check a single site
+results = asyncio.run(check_policy_with_playwright("example.com"))
+
+# Check multiple sites
+sites = ["example.com", "github.com", "microsoft.com"]
+all_results = asyncio.run(batch_check_policies(sites))
+```
+
+### Output
+
+The detector saves various outputs to the `policy_results` directory:
+
+- HTML content of detected policy pages
+- Text-only versions of the policies
+- JSON files with detection results for each site
+- Summary reports for batch processing
+
+### Comprehensive Testing
+
+The repository includes a comprehensive test script that evaluates the policy detector against a diverse set of websites:
+
+```bash
+python tests/policy_detector/test_multi_sites.py
+```
+
+This script tests detection across different categories of websites including:
+
+- Popular services
+- E-commerce sites
+- Tech companies
+- Developer platforms
+- Media sites
+- International sites
+- Educational institutions
+- Government websites
+
+The test generates statistics on success rates and a detailed report on which policies were found where.
 
 ## License
 
