@@ -603,6 +603,9 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
     """Check if a URL is likely to be the correct policy type based on URL patterns."""
     # Case insensitive check
     url = url.lower()
+    parsed_url = urlparse(url)
+    path = parsed_url.path.lower()
+    query = parsed_url.query.lower()
     
     # Define strong indicators for privacy policies
     privacy_indicators = [
@@ -610,6 +613,11 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
         'privacy-notice', 'privacy_notice', 'PrivacyNotice', 'privacy-statement',
         '/datenschutz', 'privacidad', '/gdpr', 'data-protection', 'data_protection',
         'privacy-notice', 'privacy_notice', 'privacy-statement', 'privacy_statement'
+    ]
+    
+    # Additional path indicators for privacy that are sometimes embedded
+    additional_privacy_path_indicators = [
+        'ref=footer_privacy', 'ref=privacy', 'privacy_statement', 'privacy-policy'
     ]
     
     # Define strong indicators for terms of service
@@ -620,6 +628,36 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
         'eula', 'conditions-of-use', 'condition-of-use', 'user-agreement'
     ]
     
+    # Additional path indicators for ToS that are sometimes embedded
+    additional_terms_path_indicators = [
+        'ref=footer_conditions', 'ref=footer_cou', 'ref=terms', 'ref=footer_terms', 
+        'conditions-of-use', 'user-agreement', 'legal-terms'
+    ]
+    
+    # Check for privacy-specific or terms-specific query parameters
+    if policy_type == 'privacy':
+        # Check for privacy references in query string
+        if any(term in query for term in ['privacy', 'datenschutz', 'gdpr', 'ccpa']):
+            return True
+        # Check for node IDs that are known to be privacy policies
+        if 'nodeid=468496' in query:  # Amazon's privacy policy node ID
+            return True
+    else:  # Terms of Service
+        # Check for terms references in query string
+        if any(term in query for term in ['terms', 'tos', 'conditions', 'eula']):
+            return True
+        # Check for node IDs that are known to be terms pages
+        if 'nodeid=508088' in query:  # Amazon's conditions of use node ID
+            return True
+    
+    # Check for additional path indicators embedded in the path
+    if policy_type == 'privacy':
+        if any(indicator in path for indicator in additional_privacy_path_indicators):
+            return True
+    else:  # Terms of Service
+        if any(indicator in path for indicator in additional_terms_path_indicators):
+            return True
+    
     # Special case: Combined "legal" pages might contain both
     if '/legal' in url or '/policies' in url:
         # Check for explicit indicators in the URL
@@ -627,6 +665,22 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
             return not any(ti in url for ti in terms_indicators) or any(pi in url for pi in privacy_indicators)
         else:  # ToS
             return not any(pi in url for pi in privacy_indicators) or any(ti in url for ti in terms_indicators)
+    
+    # Special case: Help center pages are common for policy documents
+    if '/help/' in path or '/customer/display' in path:
+        # For help pages, check if there are clear indicators in the path or query
+        if policy_type == 'privacy':
+            if 'privacy' in path or 'privacy' in query:
+                return True
+            # Check for common help center patterns for privacy
+            if 'data' in query or 'data-protection' in path:
+                return True
+        else:  # ToS
+            if 'terms' in path or 'tos' in path or 'terms' in query or 'tos' in query:
+                return True
+            # Check for common help center patterns for terms
+            if 'conditions' in path or 'conditions' in query or 'cou' in query:
+                return True
     
     # Special case: Documentation might use "terms" in a different context
     if policy_type == 'tos' and any(doc in url for doc in ['/documentation', '/docs/', '/api/', '/doc/']):
