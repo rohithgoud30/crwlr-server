@@ -58,7 +58,7 @@ class TosResponse(BaseModel):
 
 def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     """Find Terms of Service link in the HTML soup."""
-    # First try the structure-aware, high-priority approach
+    # First try the structure-aware, high-priority approach - fastest method
     class_id_result = find_policy_by_class_id(soup, 'tos', base_url=url)
     if class_id_result:
         logger.info(f"Found ToS link via structural search: {class_id_result}")
@@ -66,13 +66,19 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         
     # If not found, proceed with the general scoring approach (as fallback)
     logger.info("Structural search failed, proceeding with general link scoring...")
-    base_domain = urlparse(url).netloc.lower()
-    is_legal_page = is_on_policy_page(url, 'tos')
-    exact_patterns, strong_url_patterns = get_policy_patterns('tos')
-    candidates = []
     
-    # Get current domain info for domain-matching rules
-    current_domain = urlparse(url).netloc.lower()
+    # Parse and cache domain data (avoid repeated parsing)
+    parsed_url = urlparse(url)
+    current_domain = parsed_url.netloc.lower()
+    base_domain = get_root_domain(current_domain)
+    is_legal_page = is_on_policy_page(url, 'tos')
+    
+    # Get patterns once (avoid repeated function calls)
+    exact_patterns, strong_url_patterns = get_policy_patterns('tos')
+    
+    # Track high-potential links to reduce processing time
+    candidates = []
+    promising_candidates = []  # Track especially promising candidates for early return
     
     # Additional patterns to filter out false positives
     false_positive_patterns = [
@@ -81,7 +87,70 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         '/examples', '/showcase'
     ]
     
-    # Iterate through all links to find the ToS
+    # Look for links only in relevant areas first (faster than processing all links)
+    footer_elements = soup.select('footer, [class*="footer"], [id*="footer"], [role="contentinfo"]')
+    nav_elements = soup.select('nav, [role="navigation"], header, [class*="header"], [id*="header"]')
+    policy_elements = soup.select('[class*="legal"], [id*="legal"], [class*="terms"], [id*="terms"]')
+    
+    # Process high-value elements first
+    priority_elements = footer_elements + nav_elements + policy_elements
+    
+    # Fast path - check high-priority elements first before doing full scan
+    for element in priority_elements:
+        for link in element.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                continue
+                
+            # Compute absolute URL once
+            absolute_url = urljoin(url, href)
+            
+            # Skip URLs with false positive patterns
+            if any(pattern in absolute_url.lower() for pattern in false_positive_patterns):
+                continue
+                
+            # Fast check for obvious matches
+            url_lower = absolute_url.lower()
+            if '/terms' in url_lower or '/tos' in url_lower or 'terms-of-service' in url_lower:
+                # Skip the detailed analysis for obvious matches
+                if not is_likely_false_positive(absolute_url, 'tos'):
+                    logger.info(f"Found clear ToS link in priority element: {absolute_url}")
+                    return absolute_url
+                    
+            # Skip privacy URLs when looking for ToS
+            if '/privacy' in url_lower or 'privacy-policy' in url_lower:
+                continue
+                    
+            # Get text once to avoid repeating the expensive text extraction
+            link_text = ' '.join([
+                link.get_text().strip(),
+                link.get('title', '').strip(),
+                link.get('aria-label', '').strip()
+            ]).lower()
+            
+            # Skip privacy text
+            if 'privacy' in link_text and not any(term in link_text for term in ['terms', 'tos', 'conditions']):
+                continue
+                
+            # If text has clear ToS keywords, prioritize
+            if ('terms of service' in link_text or 'terms of use' in link_text or 
+                'terms and conditions' in link_text):
+                if not is_likely_false_positive(absolute_url, 'tos'):
+                    promising_candidates.append((absolute_url, 25.0))  # Very high score for clear matches
+                    # If we find >2 promising candidates, return the best one immediately
+                    if len(promising_candidates) > 2:
+                        promising_candidates.sort(key=lambda x: x[1], reverse=True)
+                        logger.info(f"Found promising ToS candidate in priority scan: {promising_candidates[0][0]}")
+                        return promising_candidates[0][0]
+    
+    # If we found any promising candidates, use them
+    if promising_candidates:
+        promising_candidates.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"Using best promising candidate: {promising_candidates[0][0]}")
+        return promising_candidates[0][0]
+    
+    # Only do full scan if priority elements didn't yield results
+    # Iterate through all links to find the Terms of Service
     for link in soup.find_all('a', href=True):
         href = link.get('href', '').strip()
         if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
@@ -90,36 +159,34 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         try:
             absolute_url = urljoin(url, href)
             
-            # Skip likely false positives
+            # Skip likely false positives (early rejection)
             if is_likely_false_positive(absolute_url, 'tos'):
                 continue
             
             # Extra check - filter out known false positive patterns
-            if any(pattern in absolute_url.lower() for pattern in false_positive_patterns):
-                logger.warning(f"Skipping likely false positive URL: {absolute_url}")
+            url_lower = absolute_url.lower()
+            if any(pattern in url_lower for pattern in false_positive_patterns):
                 continue
                 
             # Extra check - skip privacy policy URLs when looking for ToS
-            url_lower = absolute_url.lower()
-            if '/privacy' in url_lower or 'privacy-policy' in url_lower or '/gdpr' in url_lower:
-                logger.warning(f"Skipping privacy policy URL in ToS search: {absolute_url}")
+            if '/privacy' in url_lower or 'privacy-policy' in url_lower:
                 continue
                 
-            # General cross-domain policy handling
             # Check if this is a different domain from the original site
             target_domain = urlparse(absolute_url).netloc.lower()
+            target_base_domain = get_root_domain(target_domain)
             is_cross_domain = current_domain != target_domain
             
             if is_cross_domain:
                 # For cross-domain links, be stricter - require explicit terms references
                 if not any(term in url_lower for term in ['/terms', '/tos', '/legal/terms']):
-                    logger.warning(f"Skipping cross-domain non-terms URL: {absolute_url}")
                     continue
                 
             # Ensure this is not a Privacy URL
             if not is_correct_policy_type(absolute_url, 'tos'):
                 continue
             
+            # Get text once to avoid repeated operations
             link_text = ' '.join([
                 link.get_text().strip(),
                 link.get('title', '').strip(),
@@ -128,18 +195,17 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             # Skip links that are explicitly privacy policies
             if 'privacy' in link_text and not any(term in link_text for term in ['terms', 'tos', 'conditions']):
-                logger.warning(f"Skipping privacy link text in ToS search: {link_text}")
                 continue
                 
             # Skip educational links with terms like "learn" 
             if any(edu_term in link_text for edu_term in ['learn', 'tutorial', 'course', 'guide', 'start', 'example']):
                 if not any(term in link_text for term in ['terms', 'legal', 'conditions']):
-                    logger.warning(f"Skipping educational link in ToS search: {link_text}")
                     continue
                 
             if len(link_text.strip()) < 3:
                 continue
     
+            # Calculate all scores in one batch
             score = 0.0
             footer_score = get_footer_score(link)
             domain_score = get_domain_score(absolute_url, base_domain)
@@ -147,67 +213,57 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if domain_score < 0:
                 continue
             
-            href_domain = urlparse(absolute_url).netloc.lower()
+            # Apply domain bonuses/penalties
+            href_domain = target_domain  # Reuse already parsed domain
             
-            # Domain-specific scoring adjustments
             if href_domain == current_domain:
-                # Strongly prefer same-domain links
-                score += 15.0
-                logger.info(f"Applied same-domain bonus for {absolute_url}")
+                score += 15.0  # Same-domain bonus
             elif is_cross_domain:
-                # Apply penalty for cross-domain links
-                score -= 8.0
-                logger.info(f"Applied cross-domain penalty for {absolute_url}")
+                score -= 8.0  # Cross-domain penalty
             
             if is_legal_page and href_domain != base_domain:
                 continue
             
+            # Apply exact pattern bonuses
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 score += 6.0
             
-            href_lower = absolute_url.lower()
-            if any(pattern in href_lower for pattern in strong_url_patterns):
+            # Apply URL pattern bonuses
+            if any(pattern in url_lower for pattern in strong_url_patterns):
                 score += 4.0
             
+            # Add special bonus for terms links in footers
+            if footer_score > 0 and ('terms' in link_text or 'legal' in link_text):
+                score += 5.0
+            
+            # Apply policy score bonuses
             score += get_policy_score(link_text, absolute_url, 'tos')
             
+            # Apply common penalties
             for pattern, penalty in get_common_penalties():
-                if pattern in href_lower:
+                if pattern in url_lower:
                     score += penalty
-                    
-            # Apply additional penalty for URLs with privacy terms
-            if 'privacy' in url_lower:
-                score -= 10.0
-                
-            # Apply strong penalty for educational content
-            if any(pattern in url_lower for pattern in false_positive_patterns):
-                score -= 20.0
+
+            # Combine all factors for final score
+            final_score = (score * 1.5) + (footer_score * 2.5) + (domain_score * 1.0)
             
-            final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
-            
-            # Big bonus for footer links containing "terms" text
-            if footer_score > 0 and ('terms' in link_text or 'conditions' in link_text):
-                final_score += 10.0
-            
+            # Set dynamic threshold based on context
             threshold = 5.0
             if footer_score > 0:
                 threshold = 4.0
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                threshold = 4.0
-            
-            if is_legal_page and href_domain != base_domain:
-                threshold += 3.0
+                threshold = 3.5
             
             if final_score > threshold:
                 candidates.append((absolute_url, final_score))
-        
+            
         except Exception as e:
             logger.error(f"Error processing link: {e}")
             continue
     
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
-        logger.info(f"Sorted ToS candidates: {candidates}")
+        logger.info(f"Sorted ToS policy candidates: {candidates[:3]}")  # Only log top 3 for efficiency
         return candidates[0][0]
     
     return None

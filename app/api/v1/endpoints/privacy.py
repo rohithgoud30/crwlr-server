@@ -819,7 +819,7 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
 
 def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     """Find privacy policy link in the HTML soup."""
-    # First try the structure-aware, high-priority approach
+    # First try the structure-aware, high-priority approach - fastest method
     class_id_result = find_policy_by_class_id(soup, 'privacy', base_url=url)
     if class_id_result:
         logger.info(f"Found privacy link via structural search: {class_id_result}")
@@ -827,14 +827,70 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         
     # If not found, proceed with the general scoring approach (as fallback)
     logger.info("Structural search failed, proceeding with general link scoring...")
-    base_domain = urlparse(url).netloc.lower()
+    
+    # Parse and cache domain data (avoid repeated parsing)
+    parsed_url = urlparse(url)
+    current_domain = parsed_url.netloc.lower()
+    base_domain = get_root_domain(current_domain)
     is_legal_page = is_on_policy_page(url, 'privacy')
+    
+    # Get patterns once (avoid repeated function calls)
     exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
+    
+    # Track high-potential links to reduce processing time
     candidates = []
+    promising_candidates = []  # Track especially promising candidates for early return
     
-    # Get current domain info for domain-matching rules
-    current_domain = urlparse(url).netloc.lower()
+    # Look for links only in relevant areas first (faster than processing all links)
+    footer_elements = soup.select('footer, [class*="footer"], [id*="footer"], [role="contentinfo"]')
+    nav_elements = soup.select('nav, [role="navigation"], header, [class*="header"], [id*="header"]')
+    policy_elements = soup.select('[class*="legal"], [id*="legal"], [class*="policy"], [id*="policy"]')
     
+    # Process high-value elements first
+    priority_elements = footer_elements + nav_elements + policy_elements
+    
+    # Fast path - check high-priority elements first before doing full scan
+    for element in priority_elements:
+        for link in element.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                continue
+                
+            # Compute absolute URL once
+            absolute_url = urljoin(url, href)
+            
+            # Fast check for obvious matches
+            url_lower = absolute_url.lower()
+            if '/privacy' in url_lower or 'privacy-policy' in url_lower:
+                # Skip the detailed analysis for obvious matches
+                if not is_likely_false_positive(absolute_url, 'privacy'):
+                    logger.info(f"Found clear privacy link in priority element: {absolute_url}")
+                    return absolute_url
+                    
+            # Get text once to avoid repeating the expensive text extraction
+            link_text = ' '.join([
+                link.get_text().strip(),
+                link.get('title', '').strip(),
+                absolute_url
+            ]).lower()
+            
+            # If text has clear privacy keywords, prioritize
+            if 'privacy policy' in link_text or 'privacy notice' in link_text:
+                if not is_likely_false_positive(absolute_url, 'privacy'):
+                    promising_candidates.append((absolute_url, 25.0))  # Very high score for clear matches
+                    # If we find >2 promising candidates, return the best one immediately
+                    if len(promising_candidates) > 2:
+                        promising_candidates.sort(key=lambda x: x[1], reverse=True)
+                        logger.info(f"Found promising privacy candidate in priority scan: {promising_candidates[0][0]}")
+                        return promising_candidates[0][0]
+    
+    # If we found any promising candidates, use them
+    if promising_candidates:
+        promising_candidates.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"Using best promising candidate: {promising_candidates[0][0]}")
+        return promising_candidates[0][0]
+    
+    # Only do full scan if priority elements didn't yield results
     # Iterate through all links to find the privacy policy
     for link in soup.find_all('a', href=True):
         href = link.get('href', '').strip()
@@ -844,56 +900,52 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         try:
             absolute_url = urljoin(url, href)
             
-            # Skip likely false positives
+            # Skip likely false positives (early rejection)
             if is_likely_false_positive(absolute_url, 'privacy'):
                 continue
     
             # Check if this is a different domain from the original site
             target_domain = urlparse(absolute_url).netloc.lower()
-            base_domain = get_root_domain(current_domain)
             target_base_domain = get_root_domain(target_domain)
             
             if target_base_domain != base_domain:
                 # For cross-domain links, require explicit privacy references
                 if not any(term in absolute_url.lower() for term in ['/privacy', 'privacy-policy', '/gdpr']):
-                    logger.warning(f"Skipping cross-domain non-privacy URL: {absolute_url}")
                     continue
             
             # Ensure this is not a ToS URL
             if not is_correct_policy_type(absolute_url, 'privacy'):
                 continue
     
+            # Get all text data at once (avoid repeated operations)
             link_text = ' '.join([
                 link.get_text().strip(),
                 link.get('title', '').strip(),
                 absolute_url
             ]).lower()
             
+            # Calculate score in one batch instead of multiple additions
             score = get_policy_score(link_text, absolute_url, 'privacy')
-            
             if score <= 0:
                 continue
             
             domain_score = get_domain_score(absolute_url, base_domain)
-            
             if domain_score < 0:
                 continue
+                
+            # Domain bonuses/penalties
+            href_domain = target_domain  # Reuse already parsed domain
             
-            href_domain = urlparse(absolute_url).netloc.lower()
-            
-            # Domain-specific scoring adjustments
+            # Calculate all bonuses at once
             if href_domain == current_domain:
-                # Strongly prefer same-domain links
-                score += 15.0
-                logger.info(f"Applied same-domain bonus for {absolute_url}")
+                score += 15.0  # Same-domain bonus
             elif target_base_domain != base_domain:
-                # Apply penalty for cross-domain links
-                score -= 8.0
-                logger.info(f"Applied cross-domain penalty for {absolute_url}")
+                score -= 8.0  # Cross-domain penalty
                 
             if is_legal_page and href_domain != base_domain:
                 continue
             
+            # Apply pattern bonuses
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 score += 6.0
             
@@ -901,16 +953,20 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             if any(pattern in href_lower for pattern in strong_url_patterns):
                 score += 4.0
             
-            score += get_policy_score(link_text, absolute_url, 'privacy')
-            
+            # Apply penalties
             for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
                     score += penalty
             
-            final_score = (score * 2.0) + (get_footer_score(link) * 3.0) + (domain_score * 1.0)
+            # Calculate footer score once
+            footer_score = get_footer_score(link)
             
+            # Combine all factors for final score
+            final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
+            
+            # Determine threshold dynamically
             threshold = 5.0
-            if get_footer_score(link) > 0:
+            if footer_score > 0:
                 threshold = 4.0
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 threshold = 4.0
@@ -927,7 +983,7 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
-        logger.info(f"Sorted privacy policy candidates: {candidates}")
+        logger.info(f"Sorted privacy policy candidates: {candidates[:3]}")  # Only log top 3 for efficiency
         return candidates[0][0]
     
     return None 
