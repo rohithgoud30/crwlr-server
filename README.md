@@ -293,6 +293,37 @@ The API focuses exclusively on finding links in the actual HTML content and does
 1. Create a new file in `app/api/v1/endpoints/` for your endpoint.
 2. Add the router to `app/api/v1/api.py`.
 
+## Policy Detection
+
+This project includes scripts for detecting Terms of Service and Privacy Policy links on websites.
+
+### Scripts
+
+- `test_unsplash.py` - Script specifically for testing Unsplash's ToS and Privacy Policy links
+- `test_policy_detector.py` - Comprehensive tool for detecting policy links across multiple sites
+- `check_unsplash_policies.py` - Tool to fetch and save the full content of Unsplash's policies
+
+### Features
+
+- Detects policy links in various page sections (head, footer, general HTML)
+- Uses Playwright for JavaScript-heavy sites and interaction with menus/dropdowns
+- Verifies discovered links by checking content for relevant terms
+- Tries common URL patterns when links can't be found directly
+- Saves policy content to files for further analysis
+- Provides detailed reports on policy link detection
+
+### Usage
+
+Run any of the scripts directly:
+
+```
+python test_unsplash.py
+python test_policy_detector.py
+python check_unsplash_policies.py
+```
+
+The comprehensive detector writes results to a JSON file for further analysis.
+
 ## License
 
 [MIT](LICENSE)
