@@ -1413,14 +1413,23 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
     if playwright_result.success:
         return playwright_result
 
+    # Approach 4: Final fallback - scan complete HTML as last resort
+    logger.info(
+        f"All previous methods failed, trying complete HTML scan for {original_url}"
+    )
+    html_scan_result = await scan_html_for_tos_links(original_url)
+
+    if html_scan_result.success:
+        return html_scan_result
+
     # If all methods failed, return a failure response
     logger.warning(f"All methods failed to find ToS for URL: {original_url}")
     response.status_code = 404
     return TosResponse(
         url=original_url,
         success=False,
-        message="No Terms of Service link found. Tried both standard scraping and JavaScript-enabled browser rendering.",
-        method_used="both_failed",
+        message="No Terms of Service link found. Tried standard scraping, common patterns, JavaScript-rendering, and full HTML scan.",
+        method_used="all_methods_failed",
     )
 
 
@@ -2231,6 +2240,139 @@ async def try_common_tos_patterns(url: str, headers: dict) -> TosResponse:
         message="No Terms of Service link found via common patterns",
         method_used="common_patterns_failed",
     )
+
+
+async def scan_html_for_tos_links(url: str) -> TosResponse:
+    """
+    Final fallback method that downloads and scans the complete HTML for policy links
+    before concluding that no ToS link exists.
+    """
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            )
+
+            page = await context.new_page()
+            logger.info(f"Final fallback: Downloading full HTML from {url}")
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                logger.warning(f"Error loading page in fallback method: {str(e)}")
+                # Continue anyway with whatever content we have
+
+            # Get the final URL after any redirects
+            final_url = page.url
+
+            # Get the complete HTML content
+            html_content = await page.content()
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Look for any links that might be policy-related
+            all_links = soup.find_all("a", href=True)
+
+            # Score all links for ToS likelihood
+            tos_candidates = []
+
+            for link in all_links:
+                href = link.get("href", "").strip()
+                if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                    continue
+
+                absolute_url = urljoin(final_url, href)
+                url_lower = absolute_url.lower()
+                text = link.get_text().strip().lower()
+
+                # Skip if clearly a privacy policy
+                if "/privacy" in url_lower or "privacy policy" in text:
+                    continue
+
+                score = 0
+
+                # Check URL for ToS indicators
+                tos_url_indicators = [
+                    "/terms",
+                    "/tos",
+                    "/terms-of-service",
+                    "terms-conditions",
+                    "/legal/terms",
+                    "/conditions",
+                    "/legal",
+                    "/policies",
+                ]
+                for indicator in tos_url_indicators:
+                    if indicator in url_lower:
+                        score += 5
+                        break
+
+                # Check text for ToS indicators
+                tos_text_indicators = [
+                    "terms",
+                    "conditions",
+                    "legal",
+                    "terms of service",
+                    "terms of use",
+                    "user agreement",
+                    "policies",
+                ]
+                for indicator in tos_text_indicators:
+                    if indicator in text:
+                        score += 3
+                        break
+
+                # Check for footer placement (often indicates policy links)
+                parent_footer = link.find_parent(
+                    ["footer", "div"],
+                    class_=lambda x: x and ("footer" in x.lower() if x else False),
+                )
+                if parent_footer:
+                    score += 2
+
+                if score > 0:
+                    tos_candidates.append((absolute_url, score, text))
+
+            await browser.close()
+
+            # Sort by score and take the highest
+            if tos_candidates:
+                tos_candidates.sort(key=lambda x: x[1], reverse=True)
+                best_tos = tos_candidates[0][0]
+                best_score = tos_candidates[0][1]
+                best_text = tos_candidates[0][2]
+
+                logger.info(
+                    f"Found potential ToS link through HTML scan: {best_tos} (score: {best_score}, text: {best_text})"
+                )
+
+                # Only use if score is reasonably good
+                if best_score >= 5:
+                    return TosResponse(
+                        url=final_url,
+                        tos_url=best_tos,
+                        success=True,
+                        message=f"Terms of Service link found through final HTML scan: {best_tos}",
+                        method_used="html_scan",
+                    )
+
+            # No suitable candidates found
+            return TosResponse(
+                url=final_url,
+                success=False,
+                message="No Terms of Service link found even after scanning all HTML content",
+                method_used="html_scan_failed",
+            )
+
+    except Exception as e:
+        logger.error(f"Error in HTML scanning fallback: {str(e)}")
+        return TosResponse(
+            url=url,
+            success=False,
+            message=f"Error during final HTML scan: {str(e)}",
+            method_used="html_scan_error",
+        )
 
 
 # Rest of the file stays the same

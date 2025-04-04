@@ -205,6 +205,16 @@ async def find_privacy(request: PrivacyRequest, response: Response) -> PrivacyRe
         logger.info(f"Found privacy link with Playwright: {playwright_result.pp_url}")
         return playwright_result
 
+    # Final fallback: Scan complete HTML as last resort
+    logger.info(
+        f"All previous methods failed, trying complete HTML scan for {original_url}"
+    )
+    html_scan_result = await scan_html_for_privacy_links(original_url)
+
+    if html_scan_result.success:
+        logger.info(f"Found privacy link with HTML scan: {html_scan_result.pp_url}")
+        return html_scan_result
+
     # If both methods failed, include a message about what was tried
     logger.info(f"No privacy policy link found for {original_url} with any method")
 
@@ -214,8 +224,8 @@ async def find_privacy(request: PrivacyRequest, response: Response) -> PrivacyRe
     return PrivacyResponse(
         url=original_url,
         success=False,
-        message=f"No Privacy Policy link found. Tried both standard scraping and JavaScript-enabled browser rendering on both the exact URL and base domain.",
-        method_used="both_failed",
+        message=f"No Privacy Policy link found. Tried standard scraping, JavaScript-enabled browser rendering, and full HTML scan.",
+        method_used="all_methods_failed",
     )
 
 
@@ -1210,3 +1220,140 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     except Exception as e:
         logger.error(f"Error finding privacy link: {str(e)}")
         return None
+
+
+async def scan_html_for_privacy_links(url: str) -> PrivacyResponse:
+    """
+    Final fallback method that downloads and scans the complete HTML for privacy policy links
+    before concluding that no privacy policy link exists.
+    """
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            )
+
+            page = await context.new_page()
+            logger.info(f"Final fallback: Downloading full HTML from {url}")
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                logger.warning(f"Error loading page in fallback method: {str(e)}")
+                # Continue anyway with whatever content we have
+
+            # Get the final URL after any redirects
+            final_url = page.url
+
+            # Get the complete HTML content
+            html_content = await page.content()
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Look for any links that might be policy-related
+            all_links = soup.find_all("a", href=True)
+
+            # Score all links for privacy policy likelihood
+            privacy_candidates = []
+
+            for link in all_links:
+                href = link.get("href", "").strip()
+                if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                    continue
+
+                absolute_url = urljoin(final_url, href)
+                url_lower = absolute_url.lower()
+                text = link.get_text().strip().lower()
+
+                # Skip if clearly a ToS
+                if (
+                    "/terms" in url_lower
+                    or "terms of service" in text
+                    or "terms of use" in text
+                ):
+                    continue
+
+                score = 0
+
+                # Check URL for Privacy indicators
+                privacy_url_indicators = [
+                    "/privacy",
+                    "privacy-policy",
+                    "/data-policy",
+                    "/data-protection",
+                    "/privacypolicy",
+                    "/gdpr",
+                    "/dataprivacy",
+                    "data-privacy",
+                ]
+                for indicator in privacy_url_indicators:
+                    if indicator in url_lower:
+                        score += 5
+                        break
+
+                # Check text for Privacy indicators
+                privacy_text_indicators = [
+                    "privacy",
+                    "data protection",
+                    "personal data",
+                    "gdpr",
+                    "data policy",
+                    "privacy policy",
+                    "cookie policy",
+                ]
+                for indicator in privacy_text_indicators:
+                    if indicator in text:
+                        score += 3
+                        break
+
+                # Check for footer placement (often indicates policy links)
+                parent_footer = link.find_parent(
+                    ["footer", "div"],
+                    class_=lambda x: x and ("footer" in x.lower() if x else False),
+                )
+                if parent_footer:
+                    score += 2
+
+                if score > 0:
+                    privacy_candidates.append((absolute_url, score, text))
+
+            await browser.close()
+
+            # Sort by score and take the highest
+            if privacy_candidates:
+                privacy_candidates.sort(key=lambda x: x[1], reverse=True)
+                best_privacy = privacy_candidates[0][0]
+                best_score = privacy_candidates[0][1]
+                best_text = privacy_candidates[0][2]
+
+                logger.info(
+                    f"Found potential privacy link through HTML scan: {best_privacy} (score: {best_score}, text: {best_text})"
+                )
+
+                # Only use if score is reasonably good
+                if best_score >= 5:
+                    return PrivacyResponse(
+                        url=final_url,
+                        pp_url=best_privacy,
+                        success=True,
+                        message=f"Privacy Policy link found through final HTML scan: {best_privacy}",
+                        method_used="html_scan",
+                    )
+
+            # No suitable candidates found
+            return PrivacyResponse(
+                url=final_url,
+                success=False,
+                message="No Privacy Policy link found even after scanning all HTML content",
+                method_used="html_scan_failed",
+            )
+
+    except Exception as e:
+        logger.error(f"Error in HTML scanning fallback: {str(e)}")
+        return PrivacyResponse(
+            url=url,
+            success=False,
+            message=f"Error during final HTML scan: {str(e)}",
+            method_used="html_scan_error",
+        )

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import os
+import shutil
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
@@ -121,10 +122,12 @@ async def check_policy_with_playwright(url, policy_type="both"):
         "domain": domain,
         "tos_link": None,
         "privacy_link": None,
-        "tos_saved": False,
-        "privacy_saved": False,
         "checked_at": datetime.now().isoformat(),
     }
+
+    # Create a temporary directory for downloading HTML files during processing
+    temp_dir = os.path.join(OUTPUT_DIR, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
 
     try:
         async with async_playwright() as p:
@@ -155,7 +158,15 @@ async def check_policy_with_playwright(url, policy_type="both"):
             content = await main_page.content()
             soup = BeautifulSoup(content, "html.parser")
 
-            # Check if we're already on a policy page
+            # Search Priority Order:
+            # 1. Check if we're already on a policy page
+            # 2. Try to find policy links with direct matching
+            # 3. Look for links in footer elements
+            # 4. Look for links in header elements
+            # 5. Try common URL patterns
+            # 6. Use Playwright for JavaScript rendering
+
+            # 1. Check if we're already on a policy page
             if policy_type in ["tos", "both"] and is_on_policy_page(url, "tos"):
                 results["tos_link"] = url
                 logger.info(f"Already on ToS page: {url}")
@@ -164,7 +175,7 @@ async def check_policy_with_playwright(url, policy_type="both"):
                 results["privacy_link"] = url
                 logger.info(f"Already on Privacy Policy page: {url}")
 
-            # Try to find policy links in the page
+            # 2-4. Try to find policy links in the page using priority ordering
             if policy_type in ["tos", "both"] and not results["tos_link"]:
                 tos_results = find_policy_link(url, soup, "tos")
                 if tos_results["policy_url"]:
@@ -179,7 +190,7 @@ async def check_policy_with_playwright(url, policy_type="both"):
                         f"Found Privacy link in page: {results['privacy_link']}"
                     )
 
-            # If links not found, try common patterns
+            # 5. If links not found, try common patterns
             parsed_url = urlparse(url)
             base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
@@ -199,30 +210,7 @@ async def check_policy_with_playwright(url, policy_type="both"):
                         if response and response.status < 400:
                             results["tos_link"] = try_url
                             logger.info(f"Found working ToS URL: {try_url}")
-
-                            # Save the content
-                            content = await page.content()
-                            tos_soup = BeautifulSoup(content, "html.parser")
-
-                            # Get the title
-                            title = await page.title()
-
-                            # Save to files with domain-specific names
-                            tos_filename = os.path.join(
-                                OUTPUT_DIR, f"{domain_clean}_tos.html"
-                            )
-                            with open(tos_filename, "w", encoding="utf-8") as f:
-                                f.write(content)
-
-                            # Also extract text
-                            tos_text_filename = os.path.join(
-                                OUTPUT_DIR, f"{domain_clean}_tos.txt"
-                            )
-                            with open(tos_text_filename, "w", encoding="utf-8") as f:
-                                f.write(f"Title: {title}\n\n")
-                                f.write(tos_soup.get_text())
-
-                            results["tos_saved"] = True
+                            await page.close()
                             break
 
                         await page.close()
@@ -247,32 +235,7 @@ async def check_policy_with_playwright(url, policy_type="both"):
                         if response and response.status < 400:
                             results["privacy_link"] = try_url
                             logger.info(f"Found working Privacy URL: {try_url}")
-
-                            # Save the content
-                            content = await page.content()
-                            privacy_soup = BeautifulSoup(content, "html.parser")
-
-                            # Get the title
-                            title = await page.title()
-
-                            # Save to files with domain-specific names
-                            privacy_filename = os.path.join(
-                                OUTPUT_DIR, f"{domain_clean}_privacy.html"
-                            )
-                            with open(privacy_filename, "w", encoding="utf-8") as f:
-                                f.write(content)
-
-                            # Also extract text
-                            privacy_text_filename = os.path.join(
-                                OUTPUT_DIR, f"{domain_clean}_privacy.txt"
-                            )
-                            with open(
-                                privacy_text_filename, "w", encoding="utf-8"
-                            ) as f:
-                                f.write(f"Title: {title}\n\n")
-                                f.write(privacy_soup.get_text())
-
-                            results["privacy_saved"] = True
+                            await page.close()
                             break
 
                         await page.close()
@@ -281,11 +244,184 @@ async def check_policy_with_playwright(url, policy_type="both"):
                         logger.warning(f"Error trying Privacy URL {try_url}: {str(e)}")
                         await page.close()
 
+            # 7. Final fallback: Download complete HTML and scan all links
+            if (policy_type in ["tos", "both"] and not results["tos_link"]) or (
+                policy_type in ["privacy", "both"] and not results["privacy_link"]
+            ):
+                logger.info(
+                    "Using final fallback: Scanning complete HTML for policy links"
+                )
+
+                # Download the complete HTML for analysis
+                temp_html_path = os.path.join(temp_dir, f"{domain_clean}_complete.html")
+
+                await main_page.content()  # Ensure page is fully loaded
+                html_content = await main_page.content()
+
+                with open(temp_html_path, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+
+                # Create a fresh BeautifulSoup object from the downloaded HTML
+                soup = BeautifulSoup(html_content, "html.parser")
+
+                # Look for any links that might be policy-related
+                all_links = soup.find_all("a", href=True)
+
+                if policy_type in ["tos", "both"] and not results["tos_link"]:
+                    # Score all links for ToS likelihood
+                    tos_candidates = []
+
+                    for link in all_links:
+                        href = link.get("href", "").strip()
+                        if not href or href.startswith(
+                            ("#", "javascript:", "mailto:", "tel:")
+                        ):
+                            continue
+
+                        absolute_url = urljoin(url, href)
+                        url_lower = absolute_url.lower()
+                        text = link.get_text().strip().lower()
+
+                        # Skip if clearly a privacy policy
+                        if "/privacy" in url_lower or "privacy policy" in text:
+                            continue
+
+                        score = 0
+
+                        # Check URL for ToS indicators
+                        tos_url_indicators = [
+                            "/terms",
+                            "/tos",
+                            "/terms-of-service",
+                            "terms-conditions",
+                            "/legal/terms",
+                            "/conditions",
+                            "/legal",
+                            "/policies",
+                        ]
+                        for indicator in tos_url_indicators:
+                            if indicator in url_lower:
+                                score += 5
+                                break
+
+                        # Check text for ToS indicators
+                        tos_text_indicators = [
+                            "terms",
+                            "conditions",
+                            "legal",
+                            "terms of service",
+                            "terms of use",
+                            "user agreement",
+                            "policies",
+                        ]
+                        for indicator in tos_text_indicators:
+                            if indicator in text:
+                                score += 3
+                                break
+
+                        # Check for footer placement (often indicates policy links)
+                        parent_footer = link.find_parent(
+                            ["footer", "div"],
+                            class_=lambda x: x
+                            and ("footer" in x.lower() if x else False),
+                        )
+                        if parent_footer:
+                            score += 2
+
+                        if score > 0:
+                            tos_candidates.append((absolute_url, score))
+
+                    # Sort by score and take the highest
+                    if tos_candidates:
+                        tos_candidates.sort(key=lambda x: x[1], reverse=True)
+                        results["tos_link"] = tos_candidates[0][0]
+                        logger.info(
+                            f"Found ToS link through full HTML scan: {results['tos_link']}"
+                        )
+
+                if policy_type in ["privacy", "both"] and not results["privacy_link"]:
+                    # Score all links for Privacy Policy likelihood
+                    privacy_candidates = []
+
+                    for link in all_links:
+                        href = link.get("href", "").strip()
+                        if not href or href.startswith(
+                            ("#", "javascript:", "mailto:", "tel:")
+                        ):
+                            continue
+
+                        absolute_url = urljoin(url, href)
+                        url_lower = absolute_url.lower()
+                        text = link.get_text().strip().lower()
+
+                        # Skip if clearly a ToS
+                        if "/terms" in url_lower or "terms of service" in text:
+                            continue
+
+                        score = 0
+
+                        # Check URL for Privacy indicators
+                        privacy_url_indicators = [
+                            "/privacy",
+                            "privacy-policy",
+                            "/data-policy",
+                            "/data-protection",
+                            "/privacypolicy",
+                            "/gdpr",
+                            "/dataprivacy",
+                        ]
+                        for indicator in privacy_url_indicators:
+                            if indicator in url_lower:
+                                score += 5
+                                break
+
+                        # Check text for Privacy indicators
+                        privacy_text_indicators = [
+                            "privacy",
+                            "data protection",
+                            "personal data",
+                            "gdpr",
+                            "data policy",
+                            "privacy policy",
+                        ]
+                        for indicator in privacy_text_indicators:
+                            if indicator in text:
+                                score += 3
+                                break
+
+                        # Check for footer placement (often indicates policy links)
+                        parent_footer = link.find_parent(
+                            ["footer", "div"],
+                            class_=lambda x: x
+                            and ("footer" in x.lower() if x else False),
+                        )
+                        if parent_footer:
+                            score += 2
+
+                        if score > 0:
+                            privacy_candidates.append((absolute_url, score))
+
+                    # Sort by score and take the highest
+                    if privacy_candidates:
+                        privacy_candidates.sort(key=lambda x: x[1], reverse=True)
+                        results["privacy_link"] = privacy_candidates[0][0]
+                        logger.info(
+                            f"Found Privacy link through full HTML scan: {results['privacy_link']}"
+                        )
+
             await browser.close()
 
     except Exception as e:
         logger.error(f"Error checking policies for {url}: {str(e)}")
         results["error"] = str(e)
+    finally:
+        # Clean up any downloaded temporary files
+        try:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info(f"Cleaned up temporary HTML files in {temp_dir}")
+        except Exception as cleanup_error:
+            logger.error(f"Error cleaning up temporary files: {str(cleanup_error)}")
 
     # Save the results to a JSON file
     results_filename = os.path.join(OUTPUT_DIR, f"{domain_clean}_results.json")
@@ -367,21 +503,11 @@ async def main():
 
             if result.get("tos_link"):
                 print(f"Terms of Service: ✅ Found at {result['tos_link']}")
-                if result.get("tos_saved"):
-                    domain_clean = result["domain"].replace(".", "_").replace("-", "_")
-                    print(
-                        f"Content saved to: {os.path.join(OUTPUT_DIR, f'{domain_clean}_tos.html')}"
-                    )
             else:
                 print("Terms of Service: ❌ Not found")
 
             if result.get("privacy_link"):
                 print(f"Privacy Policy: ✅ Found at {result['privacy_link']}")
-                if result.get("privacy_saved"):
-                    domain_clean = result["domain"].replace(".", "_").replace("-", "_")
-                    print(
-                        f"Content saved to: {os.path.join(OUTPUT_DIR, f'{domain_clean}_privacy.html')}"
-                    )
             else:
                 print("Privacy Policy: ❌ Not found")
 
@@ -394,32 +520,17 @@ async def main():
         if results.get("tos_link"):
             print(f"\nTerms of Service: ✅ Found")
             print(f"Link: {results['tos_link']}")
-
-            if results.get("tos_saved"):
-                domain_clean = results["domain"].replace(".", "_").replace("-", "_")
-                print(
-                    f"Content saved to: {os.path.join(OUTPUT_DIR, f'{domain_clean}_tos.html')}"
-                )
-                print(
-                    f"Text extracted to: {os.path.join(OUTPUT_DIR, f'{domain_clean}_tos.txt')}"
-                )
         else:
             print("\nTerms of Service: ❌ Not found")
 
         if results.get("privacy_link"):
             print(f"\nPrivacy Policy: ✅ Found")
             print(f"Link: {results['privacy_link']}")
-
-            if results.get("privacy_saved"):
-                domain_clean = results["domain"].replace(".", "_").replace("-", "_")
-                print(
-                    f"Content saved to: {os.path.join(OUTPUT_DIR, f'{domain_clean}_privacy.html')}"
-                )
-                print(
-                    f"Text extracted to: {os.path.join(OUTPUT_DIR, f'{domain_clean}_privacy.txt')}"
-                )
         else:
             print("\nPrivacy Policy: ❌ Not found")
+
+        if "error" in results:
+            print(f"\nError: {results['error']}")
 
     print(f"\nAll results saved to {OUTPUT_DIR} directory")
 
