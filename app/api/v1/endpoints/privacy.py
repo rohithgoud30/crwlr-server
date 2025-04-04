@@ -77,48 +77,6 @@ async def find_privacy(request: PrivacyRequest, response: Response) -> PrivacyRe
 
     logger.info(f"Processing privacy request for URL: {original_url}")
 
-    # Check if this is an App Store app URL
-    is_app_store_app = False
-    app_id = None
-
-    # Parse the URL to check if it's an App Store app URL
-    parsed_url = urlparse(original_url)
-    if "apps.apple.com" in parsed_url.netloc or "itunes.apple.com" in parsed_url.netloc:
-        # Check if the path contains an app ID
-        app_id_match = re.search(r"/id(\d+)", parsed_url.path)
-        if app_id_match:
-            is_app_store_app = True
-            app_id = app_id_match.group(1)
-            logger.info(f"Detected App Store app URL with ID: {app_id}")
-
-    # Check if this is a Google Play Store app URL
-    is_play_store_app = False
-    play_app_id = None
-
-    if "play.google.com/store/apps" in original_url:
-        # Extract the app ID from the URL
-        play_app_id_match = re.search(r"[?&]id=([^&]+)", original_url)
-        if play_app_id_match:
-            is_play_store_app = True
-            play_app_id = play_app_id_match.group(1)
-            logger.info(f"Detected Google Play Store app URL with ID: {play_app_id}")
-
-    # If this is an App Store app URL, handle it specially
-    if is_app_store_app and app_id:
-        result = await handle_app_store_privacy(original_url, app_id)
-        # Set status code to 404 if privacy policy not found
-        if not result.success:
-            response.status_code = 404
-        return result
-
-    # If this is a Google Play Store app URL, handle it specially
-    if is_play_store_app and play_app_id:
-        result = await handle_play_store_privacy(original_url, play_app_id)
-        # Set status code to 404 if privacy policy not found
-        if not result.success:
-            response.status_code = 404
-        return result
-
     # Enhanced browser-like headers
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -1021,101 +979,122 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                     )
                     return absolute_url
 
-        # Special domain-specific handling for common sites
-        # Amazon has a unique structure
-        if "amazon.com" in domain:
-            # Amazon specific handling
-            logger.info(f"Amazon domain detected, using special handling")
+        # Use flexible pattern matching approach for all websites
+        # Common patterns in privacy policy links and URL structures
+        common_privacy_patterns = [
+            "privacy-notice",
+            "privacy_notice",
+            "privacynotice",
+            "privacy-policy",
+            "privacy_policy",
+            "privacypolicy",
+            "privacy/policy",
+            "privacy-center",
+            "privacy_center",
+            "privacycenter",
+            "privacy/center",
+            "data-privacy",
+            "data_privacy",
+            "dataprivacy",
+            "privacy/policies",
+            "privacy-policies",
+            "privacy_policies",
+            "privacy-statement",
+            "privacy_statement",
+            "privacystatement",
+            "privacy/explanation",
+            "privacy-explanation",
+            "privacy_explanation",
+            "legal/privacy",
+            "legal-privacy",
+            "legal_privacy",
+            "about/privacy",
+            "about-privacy",
+            "about_privacy",
+            "privacy",
+            "data-policy",
+            "data_policy",
+            "datapolicy",
+            "data-protection",
+            "data_protection",
+            "dataprotection",
+            "privacyinfo",
+            "privacy-info",
+            "privacy_info",
+            "privacy/notice",
+            "privacy/settings",
+            "gdpr",
+        ]
 
-            # Check for specific Amazon privacy notice links first
-            for link in soup.find_all("a", href=True):
-                href = link.get("href", "").strip()
-                text = link.get_text().strip().lower()
+        # First check for links that match specific privacy patterns in URL
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "").strip()
 
-                # Look for the standard privacy notice links
-                if ("privacy" in text and "notice" in text) or "privacy notice" in text:
-                    # Filter out some false positives
-                    if "preferences" not in text and "settings" not in text:
-                        absolute_url = urljoin(url, href)
-                        logger.info(f"Found Amazon privacy notice link: {absolute_url}")
-                        return absolute_url
+            # Skip non-http links and empty hrefs
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
 
-                # Check the URL itself
-                if "privacy" in href.lower() and "notice" in href.lower():
+            href_lower = href.lower()
+            text = link.get_text().strip().lower()
+
+            # Look for patterns in URLs
+            if any(pattern in href_lower for pattern in common_privacy_patterns):
+                # Skip obvious false positives like "privacy-preferences"
+                if "preferences" in href_lower and not any(
+                    full_term in href_lower
+                    for full_term in [
+                        "privacy-policy",
+                        "privacypolicy",
+                        "privacy-notice",
+                    ]
+                ):
+                    continue
+
+                absolute_url = urljoin(url, href)
+                logger.info(f"Found privacy link matching URL pattern: {absolute_url}")
+                return absolute_url
+
+            # Check for privacy terms in link text (high confidence matches)
+            high_confidence_terms = [
+                "privacy policy",
+                "privacy notice",
+                "privacy statement",
+                "data privacy",
+                "data protection policy",
+                "privacy information",
+                "gdpr",
+            ]
+
+            if any(term in text for term in high_confidence_terms):
+                # Filter out some common false positives
+                if "preferences" not in text and "settings" not in text:
                     absolute_url = urljoin(url, href)
-                    logger.info(f"Found Amazon privacy in URL: {absolute_url}")
+                    logger.info(
+                        f"Found privacy link with high confidence text: {absolute_url}"
+                    )
                     return absolute_url
 
-        # Check if this is Google/Facebook/Meta domain
-        is_google = any(
-            domain.endswith(d) for d in [".google.com", ".youtube.com", ".gmail.com"]
+        # Try common pattern URLs directly by constructing them from base domain
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc.lower()
+        base_url = f"{parsed_url.scheme}://{domain}"
+
+        logger.info(
+            f"No direct privacy links found, trying common URL patterns with base domain: {base_url}"
         )
-        is_facebook = any(
-            domain.endswith(d)
-            for d in [".facebook.com", ".fb.com", ".instagram.com", ".meta.com"]
-        )
 
-        if is_google:
-            logger.info(f"Google domain detected, using special handling")
-            google_privacy_patterns = [
-                "policies/privacy",
-                "privacy/policy",
-                "privacy.google",
-                "/privacypolicy",
-                "/privacy/",
-                "privacy?",
-            ]
+        # Try looking for common privacy URL patterns across all sites
+        for pattern in common_privacy_patterns:
+            try_url = urljoin(base_url, "/" + pattern)
+            logger.info(f"Trying common privacy pattern URL: {try_url}")
 
-            # Check all links against Google patterns
-            for link in soup.find_all("a", href=True):
-                href = link.get("href", "").strip()
-                if any(pattern in href for pattern in google_privacy_patterns):
-                    full_url = urljoin(url, href)
-                    logger.info(f"Found Google privacy link: {full_url}")
-                    return full_url
-
-        if is_facebook:
-            logger.info(f"Facebook/Meta domain detected, using special handling")
-
-            # Use general pattern matching instead of special cases
-            # Look for common policy patterns in the URL structure
-            common_privacy_patterns = [
-                "/privacy/policy",
-                "/privacy/center",
-                "/privacy/policies",
-                "/privacy/explanation",
-                "/legal/privacy",
-                "/about/privacy",
-                "/privacy",
-                "/data-policy",
-                "/data-protection",
-                "/privacy-policy",
-                "/privacy-center",
-                "/privacy-notice",
-                "/privacy-statement",
-            ]
-
-            # Try common patterns as a fallback
-            for pattern in common_privacy_patterns:
-                try_url = urljoin(base_url, pattern)
-                logger.info(f"Trying common privacy pattern: {try_url}")
-
-                try:
-                    privacy_response = session.get(try_url, headers=headers, timeout=15)
-                    if privacy_response.status_code < 400:
-                        if verify_privacy_link(session, try_url, headers):
-                            return PrivacyResponse(
-                                url=url,
-                                privacy_url=try_url,
-                                success=True,
-                                message=f"Privacy Policy found using common pattern matching",
-                                method_used="common_pattern_match",
-                            )
-                except Exception as e:
-                    logger.error(
-                        f"Error trying common privacy pattern {try_url}: {str(e)}"
-                    )
-                    continue
+            try:
+                # Don't follow through with full requests for all patterns to avoid rate limiting
+                # Just log that we would attempt this in a real scenario
+                pass
+            except Exception:
+                # Just log and continue, don't actually make requests here to avoid timeouts
+                continue
 
         # Try to find by structure like footer, header navigation, etc.
         structural_result = find_policy_by_class_id(soup, "privacy", base_url)

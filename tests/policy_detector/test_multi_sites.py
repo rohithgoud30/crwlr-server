@@ -66,7 +66,7 @@ TEST_SITES = [
 async def run_tests():
     """Run tests on all sites and generate a report"""
     start_time = datetime.now()
-    logger.info(
+                    logger.info(
         f"Starting policy detection tests for {len(TEST_SITES)} websites at {start_time}"
     )
 
