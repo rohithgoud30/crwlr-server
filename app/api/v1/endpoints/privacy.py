@@ -23,6 +23,12 @@ from .utils import (
     is_correct_policy_type,
     get_root_domain,
 )
+from .social_platforms import (
+    detect_policy_page,
+    extract_policy_urls_from_page,
+    get_alternative_policy_urls,
+    analyze_link_context,
+)
 import time
 
 # Filter out the XML parsed as HTML warning
@@ -57,134 +63,56 @@ class PrivacyResponse(BaseModel):
     )
 
 
+# First endpoint for direct policy detection using pattern matching
+@router.post("/privacy/find", response_model=PrivacyResponse)
+async def find_privacy_policy_endpoint(
+    request: PrivacyRequest, response: Response
+) -> PrivacyResponse:
+    """
+    Find privacy policy for a given URL.
+    Returns the privacy policy URL if found.
+    """
+    try:
+        result = await find_privacy_policy(request.url)
+        return result
+    except Exception as e:
+        logger.error(f"Error finding privacy policy: {str(e)}")
+        response.status_code = 500
+        return PrivacyResponse(
+            url=request.url,
+            pp_url=None,
+            success=False,
+            message=f"Error processing request: {str(e)}",
+            method_used="error",
+        )
+
+
+# Legacy compatibility endpoint - uses new detection logic
 @router.post(
     "/privacy",
     response_model=PrivacyResponse,
     responses={
-        200: {"description": "Privacy policy found successfully"},
-        404: {"description": "Privacy policy not found", "model": PrivacyResponse},
+        200: {"description": "Privacy Policy found successfully"},
+        404: {"description": "Privacy Policy not found", "model": PrivacyResponse},
     },
 )
-async def find_privacy(request: PrivacyRequest, response: Response) -> PrivacyResponse:
+async def get_privacy_policy(
+    request: PrivacyRequest, response: Response
+) -> PrivacyResponse:
     """
     Takes a base URL and returns the Privacy Policy page URL.
-    This endpoint accepts partial URLs like 'google.com' and will
+    This endpoint accepts partial URLs like 'example.com' and will
     automatically add the 'https://' protocol prefix if needed.
-
-    Features a fallback to Playwright for JavaScript-heavy sites.
     """
-    original_url = request.url  # The exact URL provided by the user
+    original_url = request.url
+    logger.info(f"Processing Privacy Policy request for URL: {original_url}")
 
-    logger.info(f"Processing privacy request for URL: {original_url}")
+    result = await find_privacy_policy(original_url)
 
-    # Enhanced browser-like headers
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Sec-CH-UA": '"Chromium";v="123", "Google Chrome";v="123"',
-        "Sec-CH-UA-Mobile": "?0",
-        "Sec-CH-UA-Platform": '"macOS"',
-        "Cache-Control": "max-age=0",
-        "DNT": "1",
-    }
+    if not result.success:
+        response.status_code = 404
 
-    # Create a session to maintain cookies across requests
-    session = requests.Session()
-
-    # Continue with regular processing for non-App Store URLs
-    variations_to_try = []
-
-    # 1. First prioritize the exact URL provided by the user
-    variations_to_try.append((original_url, "original exact url"))
-
-    # 2. Then add base domain variations for fallback
-    parsed = urlparse(original_url)
-    base_domain = f"{parsed.scheme}://{parsed.netloc}"
-
-    # Only add base domain if it's different from the original URL
-    if base_domain != original_url:
-        variations_to_try.append((base_domain, "base domain"))
-
-        # Also add www/non-www variations of the base domain
-        domain = parsed.netloc.lower()
-        if domain.startswith("www."):
-            domain_without_www = domain[4:]
-            new_url = base_domain.replace(domain, domain_without_www)
-            variations_to_try.append((new_url, "base domain without www"))
-        else:
-            domain_with_www = f"www.{domain}"
-            new_url = base_domain.replace(domain, domain_with_www)
-            variations_to_try.append((new_url, "base domain with www"))
-
-        # Try HTTP instead of HTTPS as last resort
-        if base_domain.startswith("https://"):
-            http_url = "http://" + base_domain[8:]
-            variations_to_try.append((http_url, "HTTP protocol base domain"))
-
-    logger.info(f"URL variations to try: {variations_to_try}")
-
-    # Try the standard method first (requests + BeautifulSoup)
-    standard_result = await standard_privacy_finder(variations_to_try, headers, session)
-    if standard_result.success:
-        logger.info(
-            f"Found privacy link with standard method: {standard_result.pp_url}"
-        )
-        return standard_result
-
-    # If standard method fails, try with Playwright
-    logger.info(f"Standard method failed for {original_url}, trying with Playwright")
-
-    # First try the specific URL with Playwright
-    playwright_result = await playwright_privacy_finder(original_url)
-
-    # If that fails and the original URL is different from the base domain,
-    # also try the base domain with Playwright
-    if not playwright_result.success and original_url != base_domain:
-        logger.info(
-            f"Playwright failed on exact URL, trying base domain: {base_domain}"
-        )
-        base_playwright_result = await playwright_privacy_finder(base_domain)
-        if base_playwright_result.success:
-            logger.info(
-                f"Found privacy link with Playwright on base domain: {base_playwright_result.pp_url}"
-            )
-            return base_playwright_result
-
-    # Return the Playwright result if it found something, otherwise return the standard result
-    if playwright_result.success:
-        logger.info(f"Found privacy link with Playwright: {playwright_result.pp_url}")
-        return playwright_result
-
-    # Final fallback: Scan complete HTML as last resort
-    logger.info(
-        f"All previous methods failed, trying complete HTML scan for {original_url}"
-    )
-    html_scan_result = await scan_html_for_privacy_links(original_url)
-
-    if html_scan_result.success:
-        logger.info(f"Found privacy link with HTML scan: {html_scan_result.pp_url}")
-        return html_scan_result
-
-    # If both methods failed, include a message about what was tried
-    logger.info(f"No privacy policy link found for {original_url} with any method")
-
-    # Set status code to 404 since no privacy policy was found
-    response.status_code = 404
-
-    return PrivacyResponse(
-        url=original_url,
-        success=False,
-        message=f"No Privacy Policy link found. Tried standard scraping, JavaScript-enabled browser rendering, and full HTML scan.",
-        method_used="all_methods_failed",
-    )
+    return result
 
 
 async def handle_app_store_privacy(url: str, app_id: str) -> PrivacyResponse:
@@ -1336,3 +1264,388 @@ async def scan_html_for_privacy_links(url: str) -> PrivacyResponse:
             message=f"Error during final HTML scan: {str(e)}",
             method_used="html_scan_error",
         )
+
+
+async def find_privacy_policy(url: str) -> PrivacyResponse:
+    """
+    Main function to find a privacy policy link using multiple fallback approaches.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+    logger.info(f"Finding privacy policy for URL: {url}")
+
+    # Generate URL variations to try
+    url_variations = prepare_url_variations(url)
+
+    # Create a session with a longer timeout
+    session = requests.Session()
+
+    # Try the direct privacy URL check as a first step - this is the most common case
+    try:
+        direct_privacy_url = urljoin(url, "/privacy")
+        logger.info(f"Checking direct privacy URL: {direct_privacy_url}")
+
+        # Try GET directly instead of HEAD to avoid potential issues
+        get_response = session.get(direct_privacy_url, headers=headers, timeout=15)
+
+        if get_response.status_code < 400:
+            logger.info(
+                f"Direct privacy URL successful: {direct_privacy_url} (status {get_response.status_code})"
+            )
+            return PrivacyResponse(
+                url=url,
+                pp_url=direct_privacy_url,
+                success=True,
+                message="Privacy policy found at direct privacy URL",
+                method_used="direct_privacy_url",
+            )
+        else:
+            logger.info(
+                f"Direct privacy URL failed: {direct_privacy_url} (status {get_response.status_code})"
+            )
+    except Exception as e:
+        logger.warning(f"Error checking direct privacy URL: {str(e)}")
+
+    # Try processing URL variations
+    for variant_url in url_variations:
+        try:
+            logger.info(f"Trying URL variation: {variant_url}")
+
+            # Check if privacy policy link can be detected from URL pattern alone
+            if detect_policy_page(variant_url, "privacy"):
+                logger.info(
+                    f"URL {variant_url} directly matches privacy policy pattern"
+                )
+
+                # Verify it's accessible
+                try:
+                    verify_response = session.get(
+                        variant_url, headers=headers, timeout=10
+                    )
+                    if verify_response.status_code < 400:
+                        logger.info(
+                            f"Verified accessibility of {variant_url}: Status {verify_response.status_code}"
+                        )
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=variant_url,
+                            success=True,
+                            message="Privacy policy found through URL pattern matching and verified",
+                            method_used="verified_url_pattern",
+                        )
+                    else:
+                        logger.warning(
+                            f"URL pattern match {variant_url} is not accessible: Status {verify_response.status_code}"
+                        )
+                except Exception as verify_err:
+                    logger.warning(
+                        f"Error verifying URL pattern match {variant_url}: {str(verify_err)}"
+                    )
+
+            # Get the page content
+            response = session.get(variant_url, headers=headers, timeout=15)
+            response.raise_for_status()
+            html_content = response.text
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Try common privacy URLs with individual GET requests for reliability
+            policy_urls = get_alternative_policy_urls(variant_url, "privacy")
+            logger.info(
+                f"Checking {len(policy_urls)} common privacy URL patterns for {variant_url}"
+            )
+
+            for policy_url in policy_urls:
+                try:
+                    # Use GET directly for reliability
+                    logger.info(f"Checking common URL: {policy_url}")
+                    get_response = session.get(
+                        policy_url, headers=headers, timeout=10, allow_redirects=True
+                    )
+
+                    # Log detailed response info for debugging
+                    logger.info(
+                        f"Response for {policy_url}: Status {get_response.status_code}, URL after redirects: {get_response.url}"
+                    )
+
+                    if get_response.status_code < 400:
+                        # Use the final URL after any redirects
+                        final_url = get_response.url
+                        logger.info(f"Found privacy policy at common URL: {final_url}")
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=final_url,
+                            success=True,
+                            message="Privacy policy found at common URL pattern",
+                            method_used="common_pattern",
+                        )
+                except Exception as e:
+                    logger.warning(f"Error checking common URL {policy_url}: {str(e)}")
+
+            # Try pattern-based extraction from page content
+            extracted_urls = extract_policy_urls_from_page(variant_url, soup, "privacy")
+            if extracted_urls:
+                for extracted_url in extracted_urls:
+                    if detect_policy_page(extracted_url, "privacy"):
+                        logger.info(
+                            f"Found privacy policy via text extraction: {extracted_url}"
+                        )
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=extracted_url,
+                            success=True,
+                            message="Privacy policy found through text pattern extraction",
+                            method_used="text_pattern_extraction",
+                        )
+
+            # Try deep context analysis as a more sophisticated approach
+            context_results = analyze_link_context(variant_url, soup, "privacy")
+            if context_results:
+                best_url, confidence = context_results[0]
+                logger.info(
+                    f"Found privacy policy via context analysis: {best_url} (confidence: {confidence})"
+                )
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=best_url,
+                    success=True,
+                    message=f"Privacy policy found through context analysis (confidence: {confidence:.1f})",
+                    method_used="context_analysis",
+                )
+
+            # Try to find hidden policy links in menus and dropdowns
+            hidden_links = find_hidden_policy_links(soup, "privacy")
+            if hidden_links:
+                # Sort by confidence score and take the highest
+                hidden_links.sort(key=lambda x: x[1], reverse=True)
+                best_url, confidence = hidden_links[0]
+
+                # Resolve relative URLs
+                if not best_url.startswith(("http://", "https://")):
+                    best_url = urljoin(variant_url, best_url)
+
+                logger.info(
+                    f"Found privacy policy in hidden menu: {best_url} (confidence: {confidence})"
+                )
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=best_url,
+                    success=True,
+                    message=f"Privacy policy found in hidden menu element (confidence: {confidence:.1f})",
+                    method_used="hidden_menu_detection",
+                )
+
+            # Try to find JavaScript-embedded privacy links
+            js_links = detect_hidden_privacy_patterns(html_content)
+            if js_links:
+                # Sort by confidence score and take the highest
+                js_links.sort(key=lambda x: x[1], reverse=True)
+                best_url, confidence = js_links[0]
+
+                # Resolve relative URLs
+                if not best_url.startswith(("http://", "https://")):
+                    best_url = urljoin(variant_url, best_url)
+
+                logger.info(
+                    f"Found privacy policy in JavaScript/data attributes: {best_url} (confidence: {confidence})"
+                )
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=best_url,
+                    success=True,
+                    message=f"Privacy policy found in JavaScript code (confidence: {confidence:.1f})",
+                    method_used="js_pattern_detection",
+                )
+
+        except Exception as e:
+            logger.error(f"Error processing URL variation {variant_url}: {str(e)}")
+
+    # If we get here, try with Playwright for JavaScript rendering
+    try:
+        logger.info(f"Trying with Playwright for JavaScript rendering")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            )
+
+            page = await context.new_page()
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            content = await page.content()
+
+            soup = BeautifulSoup(content, "html.parser")
+
+            # Try the same extraction methods on JavaScript-rendered content
+            extracted_urls = extract_policy_urls_from_page(url, soup, "privacy")
+            if extracted_urls:
+                for extracted_url in extracted_urls:
+                    if detect_policy_page(extracted_url, "privacy"):
+                        await browser.close()
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=extracted_url,
+                            success=True,
+                            message="Privacy policy found through JavaScript-rendered content",
+                            method_used="js_rendered_extraction",
+                        )
+
+            # Try context analysis on JavaScript-rendered content
+            context_results = analyze_link_context(url, soup, "privacy")
+            if context_results:
+                best_url, confidence = context_results[0]
+                await browser.close()
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=best_url,
+                    success=True,
+                    message=f"Privacy policy found through JS-rendered context analysis (confidence: {confidence:.1f})",
+                    method_used="js_context_analysis",
+                )
+
+            # Try hidden menu detection on JavaScript-rendered content
+            hidden_links = find_hidden_policy_links(soup, "privacy")
+            if hidden_links:
+                # Sort by confidence score and take the highest
+                hidden_links.sort(key=lambda x: x[1], reverse=True)
+                best_url, confidence = hidden_links[0]
+
+                # Resolve relative URLs
+                if not best_url.startswith(("http://", "https://")):
+                    best_url = urljoin(url, best_url)
+
+                await browser.close()
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=best_url,
+                    success=True,
+                    message=f"Privacy policy found in hidden menu with JS rendering (confidence: {confidence:.1f})",
+                    method_used="js_hidden_menu_detection",
+                )
+
+            # Try clicking on potential links to reveal more content
+            try:
+                # Look for elements that might reveal more links when clicked
+                await page.evaluate(
+                    """() => {
+                    // Try clicking on various menu toggles and buttons
+                    const potentialToggles = [];
+                    
+                    // Button-like elements with text suggesting legal/policy content
+                    document.querySelectorAll('button, a, div, span, i').forEach(el => {
+                        const text = el.innerText ? el.innerText.toLowerCase() : '';
+                        const classes = el.className ? el.className.toLowerCase() : '';
+                        
+                        // Look for potential legal/info buttons based on text or class
+                        if (text.match(/legal|info|menu|more|privacy|help|settings/) ||
+                            classes.match(/menu|toggle|dropdown|more|settings|footer/) ||
+                            el.getAttribute('aria-controls') ||
+                            el.getAttribute('aria-haspopup') == 'true') {
+                            
+                            potentialToggles.push(el);
+                        }
+                    });
+                    
+                    // Click on each potential toggle
+                    for (const toggle of potentialToggles) {
+                        try {
+                            toggle.click();
+                        } catch(e) {
+                            // Ignore errors, just try the next one
+                        }
+                    }
+                    
+                    // Also try footer links
+                    const footerLinks = Array.from(document.querySelectorAll('footer a, [class*="footer"] a'));
+                    for (const link of footerLinks) {
+                        if (link.innerText && (
+                            link.innerText.toLowerCase().includes('privacy') || 
+                            link.innerText.toLowerCase().includes('legal') ||
+                            link.innerText.toLowerCase().includes('policy'))) {
+                            try {
+                                link.click();
+                            } catch(e) {
+                                // Ignore errors
+                            }
+                            break;
+                        }
+                    }
+                }"""
+                )
+
+                # Add a delay for click interactions to complete
+                await page.wait_for_timeout(2000)
+
+                # After interactions, check for newly revealed content
+                after_click_content = await page.content()
+                after_click_soup = BeautifulSoup(after_click_content, "html.parser")
+
+                # Check if new links have appeared after clicking
+                context_results = analyze_link_context(url, after_click_soup, "privacy")
+                if context_results:
+                    best_url, confidence = context_results[0]
+                    await browser.close()
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=best_url,
+                        success=True,
+                        message=f"Privacy policy found after interactive menu exploration (confidence: {confidence:.1f})",
+                        method_used="interactive_discovery",
+                    )
+
+                # Look for hidden links that might have been revealed
+                hidden_links = find_hidden_policy_links(after_click_soup, "privacy")
+                if hidden_links:
+                    # Sort by confidence score and take the highest
+                    hidden_links.sort(key=lambda x: x[1], reverse=True)
+                    best_url, confidence = hidden_links[0]
+
+                    # Resolve relative URLs
+                    if not best_url.startswith(("http://", "https://")):
+                        best_url = urljoin(url, best_url)
+
+                    await browser.close()
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=best_url,
+                        success=True,
+                        message=f"Privacy policy found after revealing hidden elements (confidence: {confidence:.1f})",
+                        method_used="interactive_hidden_discovery",
+                    )
+
+                # Extract URLs directly from the page content which might be available after JS
+                extracted_urls = extract_policy_urls_from_page(
+                    url, after_click_soup, "privacy"
+                )
+                if extracted_urls:
+                    for extracted_url in extracted_urls:
+                        if detect_policy_page(extracted_url, "privacy"):
+                            await browser.close()
+                            return PrivacyResponse(
+                                url=url,
+                                pp_url=extracted_url,
+                                success=True,
+                                message="Privacy policy found after interactive exploration",
+                                method_used="interactive_extraction",
+                            )
+
+            except Exception as e:
+                logger.error(f"Error during interactive discovery: {str(e)}")
+
+            await browser.close()
+    except Exception as e:
+        logger.error(f"Error using Playwright: {str(e)}")
+
+    # If all methods fail, return failure response
+    return PrivacyResponse(
+        url=url,
+        pp_url=None,
+        success=False,
+        message="No Privacy Policy link found. Tried standard scraping, JavaScript-enabled browser rendering, hidden menu detection, and interactive exploration.",
+        method_used="all_methods_failed",
+    )
