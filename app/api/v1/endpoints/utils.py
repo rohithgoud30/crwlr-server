@@ -134,7 +134,7 @@ def prepare_url_variations(original_url: str) -> list:
 
     # Remove any duplicates and ensure uniqueness
     variations = list(dict.fromkeys(variations))
-
+    
     logger.info(f"Prepared URL variations: {variations}")
     return variations
 
