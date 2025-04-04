@@ -326,6 +326,9 @@ def is_on_policy_page(url: str, policy_type: str) -> bool:
                 "/conditions",
                 "/user-agreement",
                 "/eula",
+                "/policies",
+                "/policy",
+                "/legal",
             ]
         )
     elif policy_type == "privacy":
@@ -682,17 +685,23 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
             return True
 
     # App store links that aren't privacy-related
-    if "play.google.com" in url_lower and "store/apps" in url_lower:
-        # Only accept privacy-specific app store links
-        if not (
-            "privacy" in url_lower or "policy=" in url_lower or "privacy=" in url_lower
-        ):
-            return True
-
-    if "apps.apple.com" in url_lower or "itunes.apple.com" in url_lower:
-        # Only accept privacy-specific app store links
-        if not (
-            "privacy" in url_lower or "policy=" in url_lower or "privacy=" in url_lower
+    if (
+        "play.google.com" in url_lower
+        or "apps.apple.com" in url_lower
+        or "itunes.apple.com" in url_lower
+    ):
+        # Only accept policy-specific app store links
+        if not any(
+            term in url_lower
+            for term in [
+                "privacy",
+                "policy",
+                "terms",
+                "tos",
+                "legal",
+                "conditions",
+                "agreement",
+            ]
         ):
             return True
 
@@ -832,22 +841,6 @@ def find_policy_by_class_id(
             footer_links.append(
                 {"element": link, "text": combined_text, "url": abs_url}
             )
-
-        # Amazon specific handling - prioritize actual privacy notice over preferences
-        if any("amazon.com" in link["url"] for link in footer_links):
-            amazon_links = []
-            for link in footer_links:
-                url_lower = link["url"].lower()
-                # Direct match for privacy notice/policy
-                if (
-                    "privacy" in link["text"] and "notice" in link["text"]
-                ) or "/privacy" in url_lower:
-                    # High priority for direct privacy notice links
-                    if "/privacy/notice" in url_lower or "privacy.amazon" in url_lower:
-                        logger.info(
-                            f"Found Amazon direct privacy notice: {link['url']}"
-                        )
-                        return link["url"]
 
         # Score and sort based on relevance to the policy type
         scored_links = []

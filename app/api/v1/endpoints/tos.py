@@ -26,6 +26,7 @@ from .utils import (
 )
 import inspect
 import time
+import aiohttp
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -162,7 +163,7 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             'nav, [role="navigation"], header, [class*="header"], [id*="header"]'
         )
         policy_elements = soup.select(
-            '[class*="legal"], [id*="legal"], [class*="terms"], [id*="terms"]'
+            '[class*="legal"], [id*="legal"], [class*="terms"], [id*="terms"], [class*="policies"], [id*="policies"]'
         )
 
         # Process high-value elements first
@@ -191,6 +192,8 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                     "/terms" in url_lower
                     or "/tos" in url_lower
                     or "terms-of-service" in url_lower
+                    or "/policies" in url_lower
+                    or "/policies_center" in url_lower
                 ):
                     # Skip the detailed analysis for obvious matches
                     if not is_likely_false_positive(absolute_url, "tos"):
@@ -223,6 +226,8 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                     "terms of service" in link_text
                     or "terms of use" in link_text
                     or "terms and conditions" in link_text
+                    or "policies" in link_text
+                    or "policy" in link_text
                 ):
                     if not is_likely_false_positive(absolute_url, "tos"):
                         promising_candidates.append(
@@ -417,36 +422,22 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
             "user-agreement",
             "/legal/terms-of-use",
             "/terms-and-conditions",
+            "/policies",
+            "/policies_center",
+            "/terms",
         ]
 
-        # Known ToS URLs by domain - these are high confidence even without visiting
-        known_tos_urls = {
-            "www.amazon.com": [
-                "/gp/help/customer/display.html?nodeId=508088",
-                "/help/conditions-of-use",
-            ],
-            "www.facebook.com": ["/legal/terms", "/terms"],
-            "twitter.com": ["/tos", "/en/tos"],
-            "www.google.com": ["/terms", "/terms_of_service"],
-            "www.apple.com": ["/legal/terms", "/legal/terms-of-service"],
-            "www.microsoft.com": [
-                "/en-us/legal/terms-of-use",
-                "/en-us/terms-of-service",
-            ],
-            "www.instagram.com": ["/legal/terms", "/terms"],
-            "www.youtube.com": ["/terms", "/static?template=terms"],
-            "github.com": ["/site/terms", "/site/terms-of-service"],
-        }
-
-        # Match known ToS URLs directly - this is highest confidence
-        if domain in known_tos_urls:
-            for known_path in known_tos_urls[domain]:
-                if path.startswith(known_path):
-                    logger.info(f"URL matches known ToS path for {domain}")
-                    return True
+        # Check for obvious ToS path patterns
+        if any(pattern in path for pattern in primary_tos_patterns):
+            logger.info(f"URL has primary ToS path pattern: {tos_link}")
+            # For these high-confidence URLs, accept more easily even with access issues
+            high_confidence = True
+            return True
+        else:
+            high_confidence = False
 
         # Special case: App store ToS checks for app-specific vs. general terms
-        if domain == "www.apple.com" and any(
+        if "apple.com" in domain and any(
             pattern in path
             for pattern in ["/legal/terms", "/terms-of-service", "/terms"]
         ):
@@ -454,25 +445,19 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
             caller_frame = inspect.currentframe().f_back
             if caller_frame and "app_store_" in caller_frame.f_code.co_name:
                 logger.warning(
-                    f"Rejecting Apple's general terms {tos_link} when looking for app-specific terms"
+                    f"Looking for app-specific terms rather than general terms"
                 )
                 return False
 
         # STEP 2: Check URL patterns before making any requests
 
-        # Special case for URLs with ToS-related query parameters
+        # Check for ToS-related query parameters
         if any(
             param in query for param in ["cou", "terms", "conditions", "tos", "legal"]
         ):
             # Valid ToS link with parameters
             logger.info(f"URL has ToS-related query parameters: {tos_link}")
-            # For Amazon's help center with ToS-related parameters, accept without visiting
-            if "amazon.com" in domain and "/help/" in path and "nodeId=" in query:
-                logger.info(
-                    f"Accepting Amazon help center URL with ToS params: {tos_link}"
-                )
-                return True
-            # Continue to content validation when possible
+            return True
 
         # Check for obvious ToS path patterns
         if any(pattern in path for pattern in primary_tos_patterns):
@@ -1387,37 +1372,49 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
 
         return app_store_result
 
-    if "play.google.com/store/apps" in original_url:
-        logger.info(f"Detected Google Play Store URL: {original_url}")
+    if "play.google.com" in parsed_url.netloc and "/store/apps/" in parsed_url.path:
+        logger.info(f"Detected Play Store URL: {original_url}")
         is_play_store = True
         # Handle Play Store URL differently
         play_store_result = await handle_play_store_tos(original_url, headers)
-        if play_store_result.success:
-            return play_store_result
-        # If special handling fails, fall back to standard approach
 
-    session = requests.Session()
-    variations_with_types = [(original_url, "original exact url")]
+        # For Play Store URLs, we don't fall back to standard approach
+        # Instead, if the app-specific handler fails, we return not found
+        if not play_store_result.success:
+            logger.warning(
+                f"No app-specific Terms of Service found for Play Store URL: {original_url}"
+            )
+            response.status_code = 404
 
-    variations = prepare_url_variations(original_url)
-    for idx, var_url in enumerate(variations[1:], 1):
-        variations_with_types.append((var_url, f"variation_{idx}"))
+        return play_store_result
 
-    logger.info(f"URL variations to try: {variations_with_types}")
+    # Try multiple methods to find the ToS
+    url_variations = prepare_url_variations(original_url)
 
-    standard_result = await standard_tos_finder(variations_with_types, headers, session)
-    if standard_result.success:
-        logger.info(f"Found ToS link with standard method: {standard_result.tos_url}")
-        return standard_result
+    # Create a list of (url, variation_type) tuples for standard finder
+    variations_to_try = [(url, "original") for url in url_variations]
 
-    logger.info(f"Standard method failed for {original_url}, trying with Playwright")
+    # Approach 1: Standard web requests with fallbacks
+    with requests.Session() as session:
+        standard_result = await standard_tos_finder(variations_to_try, headers, session)
+
+        if standard_result.success:
+            return standard_result
+
+    # Approach 2: Try common URL patterns
+    common_patterns_result = await try_common_tos_patterns(original_url, headers)
+
+    if common_patterns_result.success:
+        return common_patterns_result
+
+    # Approach 3: Use Playwright for JavaScript-rendered content
     playwright_result = await playwright_tos_finder(original_url)
 
     if playwright_result.success:
-        logger.info(f"Found ToS link with Playwright: {playwright_result.tos_url}")
         return playwright_result
 
-    logger.info(f"No ToS link found for {original_url} with any method")
+    # If all methods failed, return a failure response
+    logger.warning(f"All methods failed to find ToS for URL: {original_url}")
     response.status_code = 404
     return TosResponse(
         url=original_url,
@@ -1989,10 +1986,24 @@ async def playwright_tos_finder(url: str) -> TosResponse:
             page.set_default_timeout(45000)  # 45 seconds
 
             try:
+                logger.info(f"Trying to load URL with Playwright: {url}")
                 await page.goto(url, wait_until="networkidle", timeout=60000)
                 final_url = page.url
                 content = await page.content()
                 soup = BeautifulSoup(content, "html.parser")
+
+                # First check if we're already on a policy page
+                if is_on_policy_page(final_url, "tos"):
+                    logger.info(f"Already on a ToS page: {final_url}")
+                    await browser.close()
+                    return TosResponse(
+                        url=final_url,
+                        tos_url=final_url,
+                        success=True,
+                        message="Already on a Terms of Service page",
+                        method_used="playwright_already_on_tos",
+                    )
+
                 tos_link = find_tos_link(final_url, soup)
 
                 if not tos_link:
@@ -2013,6 +2024,45 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                                 break
                         except:
                             continue
+
+                    if not tos_link:
+                        # Try to explicitly look for policy links with common text patterns
+                        logger.info("Trying explicit link text search with Playwright")
+                        policy_links = await page.query_selector_all(
+                            'a:has-text("Terms"), a:has-text("Terms of Service"), a:has-text("Terms of Use"), a:has-text("Terms and Conditions"), a:has-text("Legal"), a:has-text("Policies"), a:has-text("User Agreement")'
+                        )
+                        for link in policy_links:
+                            try:
+                                href = await link.get_attribute("href")
+                                if href:
+                                    # Check if this is likely a ToS link
+                                    href_lower = href.lower()
+                                    if any(
+                                        pattern in href_lower
+                                        for pattern in [
+                                            "/terms",
+                                            "/tos",
+                                            "/legal",
+                                            "/policies",
+                                            "terms-of-service",
+                                            "terms-of-use",
+                                            "terms-and-conditions",
+                                        ]
+                                    ):
+                                        absolute_url = urljoin(final_url, href)
+                                        if not is_likely_false_positive(
+                                            absolute_url, "tos"
+                                        ):
+                                            tos_link = absolute_url
+                                            logger.info(
+                                                f"Found ToS link by explicit search: {tos_link}"
+                                            )
+                                            break
+                            except Exception as e:
+                                logger.error(
+                                    f"Error processing link in Playwright search: {str(e)}"
+                                )
+                                continue
 
                 await browser.close()
 
@@ -2097,6 +2147,90 @@ async def playwright_tos_finder(url: str) -> TosResponse:
         return TosResponse(
             url=url, success=False, message=error_msg, method_used="playwright_failed"
         )
+
+
+async def try_common_tos_patterns(url: str, headers: dict) -> TosResponse:
+    """
+    Try common URL patterns for finding ToS links.
+    This method uses a systematic approach to try common ToS URL patterns.
+    """
+    try:
+        # Parse the URL
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc.lower()
+        scheme = parsed_url.scheme
+        base_url = f"{scheme}://{domain}"
+
+        logger.info(f"Trying common ToS patterns for {base_url}")
+
+        # Common ToS URL patterns to try
+        common_patterns = [
+            "/policies",
+            "/policies?ref=pf",
+            "/legal/terms",
+            "/terms",
+            "/terms-of-service",
+            "/terms-of-use",
+            "/terms-and-conditions",
+            "/tos",
+            "/legal",
+            "/about/terms",
+            "/about/legal",
+            "/legal/user-agreement",
+            "/user-agreement",
+        ]
+
+        async with aiohttp.ClientSession() as session:
+            for pattern in common_patterns:
+                try_url = urljoin(base_url, pattern)
+                logger.info(f"Trying pattern: {try_url}")
+
+                try:
+                    async with session.get(
+                        try_url,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as response:
+                        if response.status < 400:
+                            logger.info(f"Successfully accessed: {try_url}")
+
+                            # If URL contains obvious ToS indicators, accept it
+                            url_lower = try_url.lower()
+                            if any(
+                                term in url_lower
+                                for term in [
+                                    "/terms",
+                                    "/tos",
+                                    "/policies",
+                                    "/legal/terms",
+                                    "terms-of-service",
+                                    "terms-conditions",
+                                ]
+                            ):
+                                logger.info(
+                                    f"Found ToS URL with direct pattern match: {try_url}"
+                                )
+                                return TosResponse(
+                                    url=url,
+                                    tos_url=try_url,
+                                    success=True,
+                                    message=f"Terms of Service found via common pattern matching",
+                                    method_used="common_pattern_match",
+                                )
+                except Exception as e:
+                    logger.warning(f"Error trying pattern {try_url}: {str(e)}")
+                    continue
+
+    except Exception as e:
+        logger.error(f"Error in common pattern search: {str(e)}")
+
+    # If no patterns worked, return failure
+    return TosResponse(
+        url=url,
+        success=False,
+        message="No Terms of Service link found via common patterns",
+        method_used="common_patterns_failed",
+    )
 
 
 # Rest of the file stays the same

@@ -1067,35 +1067,45 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         if is_facebook:
             logger.info(f"Facebook/Meta domain detected, using special handling")
 
-            # Define priority patterns for Facebook/Meta privacy links
-            fb_privacy_patterns = [
+            # Use general pattern matching instead of special cases
+            # Look for common policy patterns in the URL structure
+            common_privacy_patterns = [
                 "/privacy/policy",
                 "/privacy/center",
                 "/privacy/policies",
                 "/privacy/explanation",
                 "/legal/privacy",
                 "/about/privacy",
+                "/privacy",
+                "/data-policy",
+                "/data-protection",
+                "/privacy-policy",
+                "/privacy-center",
+                "/privacy-notice",
+                "/privacy-statement",
             ]
 
-            # First search for links with specific patterns
-            for link in soup.find_all("a", href=True):
-                href = link.get("href", "").strip()
-                if not href or href.startswith(("#", "javascript:", "mailto:")):
+            # Try common patterns as a fallback
+            for pattern in common_privacy_patterns:
+                try_url = urljoin(base_url, pattern)
+                logger.info(f"Trying common privacy pattern: {try_url}")
+
+                try:
+                    privacy_response = session.get(try_url, headers=headers, timeout=15)
+                    if privacy_response.status_code < 400:
+                        if verify_privacy_link(session, try_url, headers):
+                            return PrivacyResponse(
+                                url=url,
+                                privacy_url=try_url,
+                                success=True,
+                                message=f"Privacy Policy found using common pattern matching",
+                                method_used="common_pattern_match",
+                            )
+                except Exception as e:
+                    logger.error(
+                        f"Error trying common privacy pattern {try_url}: {str(e)}"
+                    )
                     continue
-
-                link_text = link.get_text().strip().lower()
-
-                # Check for exact matches in URL first
-                if any(pattern in href for pattern in fb_privacy_patterns):
-                    full_url = urljoin(url, href)
-                    logger.info(f"Found Facebook privacy link by pattern: {full_url}")
-                    return full_url
-
-                # Then check for privacy policy in text
-                if "privacy policy" in link_text or "privacy center" in link_text:
-                    full_url = urljoin(url, href)
-                    logger.info(f"Found Facebook privacy link by text: {full_url}")
-                    return full_url
 
         # Try to find by structure like footer, header navigation, etc.
         structural_result = find_policy_by_class_id(soup, "privacy", base_url)
