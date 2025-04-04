@@ -26,13 +26,13 @@ def get_root_domain(domain: str) -> str:
     parts = domain.split(".")
     if len(parts) <= 2:
         return domain
-        
+
     # Handle special cases like co.uk, com.au, etc.
     if parts[-2] in ["co", "com", "org", "gov", "edu"] and len(parts[-1]) == 2:
         if len(parts) > 3:
             return ".".join(parts[-3:])
         return domain
-        
+
     return ".".join(parts[-2:])
 
 
@@ -40,15 +40,15 @@ def normalize_url(url: str) -> str:
     """
     Normalize URLs to ensure they're valid for request processing.
     Ensures URLs begin with http:// or https:// protocol.
-    
+
     Returns:
         str: Normalized URL with proper protocol
     """
     url = url.strip()
-    
+
     # Remove any trailing slashes for consistency
     url = url.rstrip("/")
-    
+
     # Handle the "t3.chat" format with dots but no protocol
     # This is an important special case where domains may be entered without protocol
     if re.match(r"^[a-zA-Z0-9][\w\.-]+\.[a-zA-Z]{2,}$", url) and not url.startswith(
@@ -57,12 +57,12 @@ def normalize_url(url: str) -> str:
         url = f"https://{url}"
         logger.info(f"Added protocol to domain name: {url}")
         return url
-    
+
     # Check if URL has protocol, if not add https://
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
         logger.info(f"Added https:// protocol: {url}")
-        
+
     return url
 
 
@@ -71,21 +71,21 @@ def prepare_url_variations(original_url: str) -> list:
     Prepare different URL variations to try for link discovery.
     """
     variations = []
-    
+
     # Ensure URL has protocol
     original_url = normalize_url(original_url)
-    
+
     # Add the exact URL
     variations.append(original_url)
-    
+
     # Parse for base domain variations
     parsed = urlparse(original_url)
     base_domain = f"{parsed.scheme}://{parsed.netloc}"
-    
+
     # Only add base domain if it's different from the original URL
     if base_domain != original_url:
         variations.append(base_domain)
-        
+
         # Add www/non-www variations of the base domain
         domain = parsed.netloc.lower()
         if domain.startswith("www."):
@@ -94,11 +94,11 @@ def prepare_url_variations(original_url: str) -> list:
         else:
             domain_with_www = f"www.{domain}"
             variations.append(f"{parsed.scheme}://{domain_with_www}")
-        
+
         # Try HTTP instead of HTTPS as last resort
         if parsed.scheme == "https":
             variations.append(f"http://{parsed.netloc}")
-    
+
     # Add common paths where links might be found
     for base_url in [base_domain]:
         variations.append(f"{base_url}/terms")
@@ -109,7 +109,7 @@ def prepare_url_variations(original_url: str) -> list:
         variations.append(f"{base_url}/legal")
         variations.append(f"{base_url}/privacy")
         variations.append(f"{base_url}/privacy-policy")
-    
+
     # NEW: Try additional common privacy patterns
     for base_url in [base_domain]:
         # Add more variations specific to privacy policies
@@ -134,7 +134,7 @@ def prepare_url_variations(original_url: str) -> list:
 
     # Remove any duplicates and ensure uniqueness
     variations = list(dict.fromkeys(variations))
-    
+
     logger.info(f"Prepared URL variations: {variations}")
     return variations
 
@@ -142,23 +142,23 @@ def prepare_url_variations(original_url: str) -> list:
 def get_footer_score(link) -> float:
     """Calculate a score based on whether the link is in a footer, header, or similar section."""
     score = 0.0
-    
+
     # Check if the link itself is in a footer-like or header-like element
     parent = link.parent
     depth = 0
     max_depth = 10  # Increased from 5 to 10 to look deeper in the DOM tree
-    
+
     # First check for header elements - we'll prioritize checking header first
     while parent and parent.name and depth < max_depth:
         # Check element name
         if parent.name in ["header", "nav"]:
             score += 2.0
             break
-            
+
         # Check classes and IDs for header indicators
         classes = " ".join(parent.get("class", [])).lower()
         element_id = parent.get("id", "").lower()
-        
+
         # Header indicators
         if any(
             term in classes or term in element_id
@@ -166,25 +166,25 @@ def get_footer_score(link) -> float:
         ):
             score += 2.0
             break
-            
+
         parent = parent.parent
         depth += 1
-    
+
     # Reset for footer check
     parent = link.parent
     depth = 0
-    
+
     # Then check for footer elements
     while parent and parent.name and depth < max_depth:
         # Check element name
         if parent.name in ["footer", "tfoot"]:
             score += 3.0
             break
-            
+
         # Check classes and IDs
         classes = " ".join(parent.get("class", [])).lower()
         element_id = parent.get("id", "").lower()
-        
+
         # Strong footer indicators
         if any(
             term in classes or term in element_id
@@ -192,17 +192,17 @@ def get_footer_score(link) -> float:
         ):
             score += 3.0
             break
-            
+
         # Secondary footer indicators
         if any(
             term in classes or term in element_id
             for term in ["legal", "copyright", "links"]
         ):
             score += 1.5
-        
+
         parent = parent.parent
         depth += 1
-    
+
     return score
 
 
@@ -212,31 +212,31 @@ def get_domain_score(href: str, base_domain: str) -> float:
         href_domain = urlparse(href).netloc.lower()
         if not href_domain:
             return 0.0
-            
+
         # Same domain gets highest score
         if href_domain == base_domain:
             return 2.0
-            
+
         # Subdomain relationship
         if href_domain.endswith("." + base_domain) or base_domain.endswith(
             "." + href_domain
         ):
             return 1.5
-            
+
         # Check if the domains share a common root
         href_parts = href_domain.split(".")
         base_parts = base_domain.split(".")
-        
+
         if len(href_parts) >= 2 and len(base_parts) >= 2:
             href_root = ".".join(href_parts[-2:])
             base_root = ".".join(base_parts[-2:])
             if href_root == base_root:
                 return 1.0
-                
+
         # For external domains, check if they look like legitimate policy hosts
         if any(term in href_domain for term in ["legal", "terms", "privacy", "policy"]):
             return 0.5
-            
+
         # Don't heavily penalize external domains
         return 0.0
     except Exception:
@@ -272,17 +272,17 @@ def get_common_penalties() -> list:
 def is_likely_article_link(href_lower: str, full_url: str) -> bool:
     """
     Determine if a URL is likely to be a news article rather than a policy page.
-    
+
     Args:
         href_lower: The lowercase href attribute
         full_url: The full URL for additional context
-    
+
     Returns:
         bool: True if the URL appears to be an article, False otherwise
     """
     # News article patterns in URLs
     article_indicators = [
-        "/article/", 
+        "/article/",
         "/news/",
         "/story/",
         "/blog/",
@@ -298,24 +298,24 @@ def is_likely_article_link(href_lower: str, full_url: str) -> bool:
         "/watch/",
         "/video/",
     ]
-    
+
     # Check if URL contains article indicators
     for indicator in article_indicators:
         if indicator in href_lower:
             return True
-    
+
     # Check for date patterns in URL paths
     date_pattern = re.compile(r"/\d{4}/\d{1,2}/\d{1,2}/")
     if date_pattern.search(href_lower):
         return True
-    
+
     # Check if URL is from a known news domain
     parsed_url = urlparse(full_url)
     domain = parsed_url.netloc.lower()
-    
+
     # Get the root domain for comparison
     root_domain = get_root_domain(domain)
-    
+
     # Only consider it a policy link if it clearly has policy terms in the path
     if root_domain in [
         "reuters.com",
@@ -336,7 +336,7 @@ def is_likely_article_link(href_lower: str, full_url: str) -> bool:
             for term in ["/privacy", "/terms", "/tos", "/legal"]
         ):
             return True
-    
+
     return False
 
 
@@ -447,12 +447,12 @@ def get_policy_patterns(policy_type: str) -> Tuple[List[str], List[str]]:
 def get_policy_score(text: str, url: str, policy_type: str) -> float:
     """Calculate a score for a link based on its text and URL."""
     logger.debug(f"Scoring {policy_type} candidate: {url} with text: {text}")
-    
+
     text_lower = text.lower()
     url_lower = url.lower()
-    
+
     score = 0.0
-    
+
     # Apply negative score for wrong policy type
     if policy_type == "privacy":
         # Check if this is likely a ToS URL rather than privacy
@@ -478,10 +478,10 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
         ):
             logger.debug(f"Penalizing for privacy text patterns: {text_lower}")
             score -= 10.0
-    
+
     # Handle combined policies - less specific but still valid
     combined_patterns = ["legal", "policies", "legal notices", "legal information"]
-    
+
     # Handle support policies - we want to avoid these
     support_patterns = [
         "help center",
@@ -490,17 +490,17 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
         "faq",
         "customer support",
     ]
-    
+
     # Check for combined policy hits
     combined_matches = sum(1 for pattern in combined_patterns if pattern in text_lower)
     if combined_matches > 0:
         score += combined_matches * 1.0
-        
+
     # Check for support pattern hits (negative)
     support_matches = sum(1 for pattern in support_patterns if pattern in text_lower)
     if support_matches > 0:
         score -= support_matches * 3.0
-    
+
     # Strong matches for privacy policy
     if policy_type == "privacy":
         strong_privacy_matches = [
@@ -516,11 +516,11 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
             "ccpa",
             "data privacy",
         ]
-        
+
         # Count strong privacy matches in the text
         matches = sum(1 for pattern in strong_privacy_matches if pattern in text_lower)
         score += matches * 5.0
-        
+
         # Additional bonus for explicit matches
         if (
             "privacy policy" in text_lower
@@ -528,7 +528,7 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
             or "Privacy Notice" in text
         ):
             score += 8.0
-            
+
         if "privacy" in text_lower and (
             "policy" in text_lower or "notice" in text_lower
         ):
@@ -549,11 +549,11 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
             "agb",
             "nutzungsbedingungen",  # Spanish and German terms
         ]
-        
+
         # Count strong terms matches in the text
         matches = sum(1 for pattern in strong_terms_matches if pattern in text_lower)
         score += matches * 5.0
-        
+
         # Additional bonus for explicit matches
         if any(
             exact in text_lower
@@ -565,7 +565,7 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
             ]
         ):
             score += 8.0
-    
+
     # Technical documentation penalties
     tech_doc_patterns = [
         "api documentation",
@@ -575,13 +575,13 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
         "integration",
         "api terms",
     ]
-    
+
     # Penalize technical documentation links for ToS search
     if policy_type == "tos":
         tech_matches = sum(1 for pattern in tech_doc_patterns if pattern in text_lower)
         if tech_matches > 0:
             score -= tech_matches * 4.0
-    
+
     # URL-based scoring
     if policy_type == "privacy":
         url_patterns = [
@@ -605,20 +605,20 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
         ]
         url_matches = sum(1 for pattern in url_patterns if pattern in url_lower)
         score += url_matches * 3.0
-    
+
     # Additional URL pattern scoring
     if re.search(r"/(?:legal|policies)/(?:privacy|data)", url_lower):
         if policy_type == "privacy":
             score += 4.0
         else:
             score -= 2.0  # Penalty if looking for ToS
-            
+
     if re.search(r"/(?:legal|policies)/(?:terms|tos)", url_lower):
         if policy_type == "tos":
             score += 4.0
         else:
             score -= 2.0  # Penalty if looking for privacy
-    
+
     # Exact filename matches
     privacy_filenames = [
         "privacy.html",
@@ -645,7 +645,7 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
         url_lower.endswith(fname) for fname in tos_filenames
     ):
         score += 5.0
-        
+
     logger.debug(f"Final score for {policy_type} candidate: {url} = {score}")
     return score
 
@@ -654,12 +654,12 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
     """
     Check if a URL is likely to be a false positive (not actually a policy page)
     using contextual analysis instead of hardcoded domains.
-    
+
     Optimized version with early returns for better performance.
     """
     # Fast initial check for common policy paths - these should never be false positives
     url_lower = url.lower()
-    
+
     # Fastest path: Direct word match in URL path for obvious policy pages
     if (
         "/privacy" in url_lower
@@ -668,31 +668,31 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
         or "/policy" in url_lower
     ):
         return False
-        
+
     # Parse the URL only if we need more analysis (avoid parsing in common cases)
     parsed_url = urlparse(url)
     path = parsed_url.path.lower()
-    
+
     # Check for policy indicators in the query (only if we need to parse deeper)
     query = parsed_url.query.lower()
     if "privacy" in query or "policy" in query:
         if policy_type == "privacy":
             return False
-    
+
     if "terms" in query or "tos" in query:
         if policy_type == "tos":
             return False
-            
+
     # Additional policy indicators in path (less common cases)
     policy_indicators = ["/policies", "/legal", "/gdpr", "/data-protection"]
     if any(indicator in path for indicator in policy_indicators):
         return False
-    
+
     # Fast path for media files (almost always false positives)
     file_extensions = [".jpg", ".jpeg", ".png", ".gif", ".zip", ".mp4", ".mp3", ".exe"]
     if any(url_lower.endswith(ext) for ext in file_extensions):
         return True
-    
+
     # Social media paths (common false positives)
     social_media_paths = [
         "/share",
@@ -706,7 +706,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
         "/page/",
         "/channel/",
     ]
-    
+
     if any(pattern in path for pattern in social_media_paths):
         # Unless it explicitly has policy in the path
         if (
@@ -716,7 +716,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
             and "legal" not in path
         ):
             return True
-    
+
     # App store links that aren't privacy-related
     if (
         "play.google.com" in url_lower
@@ -737,7 +737,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
             ]
         ):
             return True
-    
+
     # Support pages mistaken for policies
     if policy_type == "privacy" and "/support-policy" in path and "privacy" not in path:
         # Support policies that don't mention privacy are false positives
@@ -745,7 +745,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
             term in url_lower for term in ["/data", "/personal", "/gdpr", "/private"]
         ):
             return True
-    
+
     # Documentation mistaken for ToS
     if policy_type == "tos" and (
         "/docs" in path or "/documentation" in path or "/doc/" in path
@@ -756,7 +756,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
             for term in ["/terms", "/tos", "/legal", "/eula", "/conditions"]
         ):
             return True
-    
+
     # Special case for PDFs - they might be legitimate policy documents
     if url_lower.endswith(".pdf"):
         # If the PDF filename contains policy terms, it's likely legitimate
@@ -764,7 +764,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
         policy_terms = ["privacy", "policy", "terms", "tos", "legal", "data"]
         if not any(term in filename for term in policy_terms):
             return True
-    
+
     # Blog posts and news articles are rarely policy pages
     blog_patterns = ["/blog/", "/news/", "/article/", "/post/", "/press-release/"]
     if any(pattern in path for pattern in blog_patterns):
@@ -777,7 +777,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
             term in path for term in ["/terms", "/tos", "/conditions"]
         ):
             return True
-    
+
     # Date patterns in URL typically indicate news/blog content, not policies
     if re.search(r"/\d{4}/\d{1,2}(/\d{1,2})?/", path):
         # Unless they explicitly mention policies
@@ -785,7 +785,7 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
             term in path for term in policy_indicators + ["/privacy", "/terms", "/tos"]
         ):
             return True
-    
+
     return False
 
 
@@ -833,7 +833,7 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
                     "/ccpa",
                 ]
             ):
-            return False
+                    return False
     else:  # policy_type == "tos"
         # Check that this is NOT a privacy URL
         if any(
@@ -854,7 +854,7 @@ def is_correct_policy_type(url: str, policy_type: str) -> bool:
                 term in path
                 for term in ["/terms", "/tos", "/legal/terms", "/conditions", "/eula"]
             ):
-            return False
+                    return False
 
     return True
 
@@ -865,90 +865,90 @@ def find_policy_by_class_id(
     """
     Find policy links by looking in specific structures like footers, navigation, etc.
     This is a more targeted approach using HTML structure and class/id attributes.
-    
+
     Args:
         soup: BeautifulSoup object
         policy_type: 'privacy' or 'tos'
         base_url: The base URL to build absolute URLs
-        
+
     Returns:
         The URL of the found policy or None
     """
     # Get a set of patterns based on policy type
     policy_terms = get_policy_terms(policy_type)
-    
+
     # Best candidates from different methods
     candidates = []
-    
+
     # 1. First check for standard footer elements with policy links
     footer_elements = soup.select(
         'footer, [class*="footer"], [id*="footer"], [role="contentinfo"]'
     )
     for footer in footer_elements:
         links = footer.find_all("a", href=True)
-        
+
         # Create a list of links with their text and URL
         footer_links = []
         for link in links:
             href = link.get("href")
             if not href or href.startswith(("#", "javascript:", "mailto:")):
                 continue
-                
+
             # Get text - both display text and title attribute
             text = link.get_text().strip().lower()
             title = link.get("title", "").lower()
             combined_text = f"{text} {title}"
-            
+
             # Create absolute URL if necessary
             if base_url and href.startswith("/"):
                 abs_url = urljoin(base_url, href)
             else:
                 abs_url = href
-                
+
             footer_links.append(
                 {"element": link, "text": combined_text, "url": abs_url}
             )
-            
+
         # Score and sort based on relevance to the policy type
         scored_links = []
         for link in footer_links:
             url_lower = link["url"].lower()
             text = link["text"]
             score = 0
-            
+
             # Check for exact matches first (highest priority)
             for term in policy_terms["exact_matches"]:
                 if term in text:
                     score += 12  # Highest score for exact matches
                     break
-                    
+
             # Check for policy-type specific terms in URL
             for term in policy_terms["url_patterns"]:
                 if term in url_lower:
                     score += 8
                     break
-                    
+
             # Check for general policy indicators in text
             for term in policy_terms["general_indicators"]:
                 if term in text:
                     score += 5
                     break
-            
+
             # Avoid false positives
             if is_likely_false_positive(url_lower, policy_type):
                 score = 0
-            
+
             # Only consider links with positive scores
             if score > 0:
                 scored_links.append(
                     {"url": link["url"], "score": score, "method": "footer_text_match"}
                 )
-        
+
         # If we found some good candidates in this footer, add the best one
         if scored_links:
             best_match = max(scored_links, key=lambda x: x["score"])
             candidates.append(best_match)
-    
+
     # 2. Check navigation elements
     nav_elements = soup.select('nav, [role="navigation"], [class*="nav"], [id*="nav"]')
     for nav in nav_elements:
@@ -957,137 +957,137 @@ def find_policy_by_class_id(
             c in str(nav.get("class")).lower() for c in ["main", "primary"]
         ):
             continue
-            
+
         links = nav.find_all("a", href=True)
         nav_links = []
-        
+
         for link in links:
             href = link.get("href")
             if not href or href.startswith(("#", "javascript:", "mailto:")):
                 continue
-                
+
             # Get text - both display text and title attribute
             text = link.get_text().strip().lower()
             title = link.get("title", "").lower()
             combined_text = f"{text} {title}"
-            
+
             # Create absolute URL if necessary
             if base_url and href.startswith("/"):
                 abs_url = urljoin(base_url, href)
             else:
                 abs_url = href
-                
+
             # Avoid false positives
             if is_likely_false_positive(abs_url, policy_type):
                 continue
-                
+
             nav_links.append({"element": link, "text": combined_text, "url": abs_url})
-            
+
         # Score links based on policy indicators
         scored_nav_links = []
         for link in nav_links:
             url_lower = link["url"].lower()
             text = link["text"]
             score = 0
-            
+
             # Check for exact matches first
             for term in policy_terms["exact_matches"]:
                 if term in text:
                     score += 10  # High score but slightly lower than footer
                     break
-                    
+
             # Check for policy-type specific terms in URL
             for term in policy_terms["url_patterns"]:
                 if term in url_lower:
                     score += 6
                     break
-                    
+
             # Check for general policy indicators
             for term in policy_terms["general_indicators"]:
                 if term in text:
                     score += 3
                     break
-            
+
             # Only consider links with positive scores
             if score > 0:
                 scored_nav_links.append(
                     {"url": link["url"], "score": score, "method": "nav_text_match"}
                 )
-                
+
         # If we found some good candidates in navigation, add the best one
         if scored_nav_links:
             best_match = max(scored_nav_links, key=lambda x: x["score"])
             candidates.append(best_match)
-    
+
     # 3. Check for policy-specific containers by class/id
     policy_containers = soup.select(
         f'[class*="{policy_type}"], [id*="{policy_type}"], [class*="legal"], [id*="legal"]'
     )
-    
+
     for container in policy_containers:
         links = container.find_all("a", href=True)
         container_links = []
-        
+
         for link in links:
             href = link.get("href")
             if not href or href.startswith(("#", "javascript:", "mailto:")):
                 continue
-                
+
             # Get text - both display text and title attribute
             text = link.get_text().strip().lower()
             title = link.get("title", "").lower()
             combined_text = f"{text} {title}"
-            
+
             # Create absolute URL if necessary
             if base_url and href.startswith("/"):
                 abs_url = urljoin(base_url, href)
             else:
                 abs_url = href
-                
+
             # Avoid false positives
             if is_likely_false_positive(abs_url, policy_type):
                 continue
-                
+
             container_links.append(
                 {"element": link, "text": combined_text, "url": abs_url}
             )
-            
+
         # Score links based on policy indicators
         scored_container_links = []
         for link in container_links:
             url_lower = link["url"].lower()
             text = link["text"]
             score = 0
-            
+
             # Check for exact matches first
             for term in policy_terms["exact_matches"]:
                 if term in text:
                     score += 8
                     break
-                    
+
             # Check for policy-type specific terms in URL
             for term in policy_terms["url_patterns"]:
                 if term in url_lower:
                     score += 5
                     break
-                    
+
             # Check for general policy indicators
             for term in policy_terms["general_indicators"]:
                 if term in text:
                     score += 2
                     break
-            
+
             # Only consider links with positive scores
             if score > 0:
                 scored_container_links.append(
                     {"url": link["url"], "score": score, "method": "container_match"}
                 )
-                
+
         # If we found some good candidates in this container, add the best one
         if scored_container_links:
             best_match = max(scored_container_links, key=lambda x: x["score"])
             candidates.append(best_match)
-    
+
     # Return the best match across all methods if found
     if candidates:
         best_candidate = max(candidates, key=lambda x: x["score"])
@@ -1095,7 +1095,7 @@ def find_policy_by_class_id(
             f"Found best candidate for {policy_type} via {best_candidate['method']}: {best_candidate['url']} (Score: {best_candidate['score']})"
         )
         return best_candidate["url"]
-        
+
     return None
 
 
@@ -1103,10 +1103,10 @@ def get_policy_terms(policy_type: str) -> dict:
     """
     Get policy-specific terms organized by categories.
     Enhanced with comprehensive terms across multiple languages.
-    
+
     Args:
         policy_type: 'privacy' or 'tos'
-        
+
     Returns:
         Dictionary with categorized terms
     """
