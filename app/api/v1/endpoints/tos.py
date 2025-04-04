@@ -10,11 +10,11 @@ import asyncio
 from playwright.async_api import async_playwright
 import logging
 from .utils import (
-    normalize_url, 
-    prepare_url_variations, 
-    get_footer_score, 
-    get_domain_score, 
-    get_common_penalties, 
+    normalize_url,
+    prepare_url_variations,
+    get_footer_score,
+    get_domain_score,
+    get_common_penalties,
     is_on_policy_page,
     is_likely_article_link,
     get_root_domain,
@@ -27,6 +27,11 @@ from .utils import (
 import inspect
 import time
 import aiohttp
+from .social_platforms import (
+    detect_policy_page,
+    get_alternative_policy_urls,
+    extract_policy_urls_from_page,
+)
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -64,18 +69,18 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     Returns the absolute URL to the ToS if found, otherwise None.
     """
     start_time = time.time()
-    
+
     try:
         # Parse the URL to get the domain
         parsed_url = urlparse(url)
         domain = parsed_url.netloc.lower()
         base_url = f"{parsed_url.scheme}://{domain}"
-        
+
         # Check if we're already on a ToS page
         if is_on_policy_page(url, "tos"):
             logger.info(f"Already on a ToS page: {url}")
             return url
-            
+
         # First try to find by checking head element links
         head_element = soup.find("head")
         if head_element:
@@ -84,10 +89,10 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 href = link.get("href", "").strip()
                 if not href or href.startswith(("#", "javascript:", "mailto:")):
                     continue
-                    
+
                 link_text = link.get_text().strip().lower()
                 link_title = link.get("title", "").lower()
-                
+
                 # Check for terms-related terms in link or attributes
                 if (
                     "terms" in link_text
@@ -95,51 +100,51 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                     or "tos" in href.lower()
                     or "terms" in href.lower()
                 ):
-                    
+
                     absolute_url = urljoin(url, href)
                     logger.info(f"Found ToS link in head: {absolute_url}")
                     return absolute_url
-                    
+
             # Also check link elements with rel="terms" or similar
             link_elements = head_element.find_all("link", rel=True, href=True)
             for link in link_elements:
                 rel = link.get("rel", [""])[0].lower()
                 href = link.get("href", "").strip()
-                
+
                 if "terms" in rel or "tos" in rel or "legal" in rel:
                     absolute_url = urljoin(url, href)
                     logger.info(
                         f"Found ToS link with rel attribute in head: {absolute_url}"
                     )
                     return absolute_url
-        
+
         # Try to find by structure like footer, header navigation, etc.
         structural_result = find_policy_by_class_id(soup, "tos", base_url)
         if structural_result:
             logger.info(f"Found ToS link via structural search: {structural_result}")
             return structural_result
-            
+
         # Special domain-specific handling for common sites
         # Rest of the function...
-        
+
         # If not found, proceed with the general scoring approach (as fallback)
         logger.info("Structural search failed, proceeding with general link scoring...")
-        
+
         # Parse and cache domain data (avoid repeated parsing)
         parsed_url = urlparse(url)
         current_domain = parsed_url.netloc.lower()
         base_domain = get_root_domain(current_domain)
         is_legal_page = is_on_policy_page(url, "tos")
-        
+
         # Get patterns once (avoid repeated function calls)
         exact_patterns, strong_url_patterns = get_policy_patterns("tos")
-        
+
         # Track high-potential links to reduce processing time
         candidates = []
         promising_candidates = (
             []
         )  # Track especially promising candidates for early return
-        
+
         # Additional patterns to filter out false positives
         false_positive_patterns = [
             "/learn",
@@ -154,7 +159,7 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             "/examples",
             "/showcase",
         ]
-        
+
         # Look for links only in relevant areas first (faster than processing all links)
         footer_elements = soup.select(
             'footer, [class*="footer"], [id*="footer"], [role="contentinfo"]'
@@ -165,27 +170,27 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         policy_elements = soup.select(
             '[class*="legal"], [id*="legal"], [class*="terms"], [id*="terms"], [class*="policies"], [id*="policies"]'
         )
-        
+
         # Process high-value elements first
         priority_elements = footer_elements + nav_elements + policy_elements
-        
+
         # Fast path - check high-priority elements first before doing full scan
         for element in priority_elements:
             for link in element.find_all("a", href=True):
                 href = link.get("href", "").strip()
                 if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
                     continue
-                    
+
                 # Compute absolute URL once
                 absolute_url = urljoin(url, href)
-                
+
                 # Skip URLs with false positive patterns
                 if any(
                     pattern in absolute_url.lower()
                     for pattern in false_positive_patterns
                 ):
                     continue
-                    
+
                 # Fast check for obvious matches
                 url_lower = absolute_url.lower()
                 if (
@@ -201,26 +206,26 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                             f"Found clear ToS link in priority element: {absolute_url}"
                         )
                         return absolute_url
-                        
+
                 # Skip privacy URLs when looking for ToS
                 if "/privacy" in url_lower or "privacy-policy" in url_lower:
                     continue
-                    
+
                 # Get text once to avoid repeating the expensive text extraction
                 link_text = " ".join(
                     [
-                    link.get_text().strip(),
+                        link.get_text().strip(),
                         link.get("title", "").strip(),
                         link.get("aria-label", "").strip(),
                     ]
                 ).lower()
-                
+
                 # Skip privacy text
                 if "privacy" in link_text and not any(
                     term in link_text for term in ["terms", "tos", "conditions"]
                 ):
                     continue
-                    
+
                 # If text has clear ToS keywords, prioritize
                 if (
                     "terms of service" in link_text
@@ -240,68 +245,68 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                                 f"Found promising ToS candidate in priority scan: {promising_candidates[0][0]}"
                             )
                             return promising_candidates[0][0]
-        
+
         # If we found any promising candidates, use them
         if promising_candidates:
             promising_candidates.sort(key=lambda x: x[1], reverse=True)
             logger.info(f"Using best promising candidate: {promising_candidates[0][0]}")
             return promising_candidates[0][0]
-        
+
         # Only do full scan if priority elements didn't yield results
         # Iterate through all links to find the Terms of Service
         for link in soup.find_all("a", href=True):
             href = link.get("href", "").strip()
             if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
                 continue
-            
+
             try:
                 absolute_url = urljoin(url, href)
-                
+
                 # Skip likely false positives (early rejection)
                 if is_likely_false_positive(absolute_url, "tos"):
                     continue
-                
+
                 # Extra check - filter out known false positive patterns
                 url_lower = absolute_url.lower()
                 if any(pattern in url_lower for pattern in false_positive_patterns):
                     continue
-                    
+
                 # Extra check - skip privacy policy URLs when looking for ToS
                 if "/privacy" in url_lower or "privacy-policy" in url_lower:
                     continue
-                    
+
                 # Check if this is a different domain from the original site
                 target_domain = urlparse(absolute_url).netloc.lower()
                 target_base_domain = get_root_domain(target_domain)
                 is_cross_domain = current_domain != target_domain
-                
+
                 if is_cross_domain:
                     # For cross-domain links, be stricter - require explicit terms references
                     if not any(
                         term in url_lower for term in ["/terms", "/tos", "/legal/terms"]
                     ):
                         continue
-                    
+
                 # Ensure this is not a Privacy URL
                 if not is_correct_policy_type(absolute_url, "tos"):
                     continue
-                
+
                 # Get text once to avoid repeated operations
                 link_text = " ".join(
                     [
-                    link.get_text().strip(),
+                        link.get_text().strip(),
                         link.get("title", "").strip(),
                         link.get("aria-label", "").strip(),
                     ]
                 ).lower()
-                
+
                 # Skip links that are explicitly privacy policies
                 if "privacy" in link_text and not any(
                     term in link_text for term in ["terms", "tos", "conditions"]
                 ):
                     continue
-                    
-                # Skip educational links with terms like "learn" 
+
+                # Skip educational links with terms like "learn"
                 if any(
                     edu_term in link_text
                     for edu_term in [
@@ -317,44 +322,44 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                         term in link_text for term in ["terms", "legal", "conditions"]
                     ):
                         continue
-                    
+
                 if len(link_text.strip()) < 3:
                     continue
-        
+
                 # Calculate all scores in one batch
                 score = 0.0
                 footer_score = get_footer_score(link)
                 domain_score = get_domain_score(absolute_url, base_domain)
-                
+
                 if domain_score < 0:
                     continue
-                
+
                 # Apply domain bonuses/penalties
                 href_domain = target_domain  # Reuse already parsed domain
-                
+
                 if href_domain == current_domain:
                     score += 15.0  # Same-domain bonus
                 elif is_cross_domain:
                     score -= 8.0  # Cross-domain penalty
-                
+
                 if is_legal_page and href_domain != base_domain:
                     continue
-                
+
                 # Apply exact pattern bonuses
                 if any(re.search(pattern, link_text) for pattern in exact_patterns):
                     score += 6.0
-                
+
                 # Apply URL pattern bonuses
                 if any(pattern in url_lower for pattern in strong_url_patterns):
                     score += 4.0
-                
+
                 # Add special bonus for terms links in footers
                 if footer_score > 0 and ("terms" in link_text or "legal" in link_text):
                     score += 5.0
-                
+
                 # Apply policy score bonuses
                 score += get_policy_score(link_text, absolute_url, "tos")
-                
+
                 # Apply common penalties
                 for pattern, penalty in get_common_penalties():
                     if pattern in url_lower:
@@ -364,30 +369,30 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 final_score = (
                     (score * 1.5) + (footer_score * 2.5) + (domain_score * 1.0)
                 )
-                
+
                 # Set dynamic threshold based on context
                 threshold = 5.0
                 if footer_score > 0:
                     threshold = 4.0
                 if any(re.search(pattern, link_text) for pattern in exact_patterns):
                     threshold = 3.5
-                
+
                 if final_score > threshold:
                     candidates.append((absolute_url, final_score))
-                
+
             except Exception as e:
                 logger.error(f"Error processing link: {e}")
                 continue
-        
+
         if candidates:
             candidates.sort(key=lambda x: x[1], reverse=True)
             logger.info(
                 f"Sorted ToS policy candidates: {candidates[:3]}"
             )  # Only log top 3 for efficiency
             return candidates[0][0]
-        
+
         return None
-    
+
     except Exception as e:
         logger.error(f"Error processing ToS link: {e}")
         return None
@@ -400,15 +405,19 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
     """
     try:
         logger.info(f"Verifying candidate ToS link: {tos_link}")
-        
+
         tos_link_lower = tos_link.lower()
         parsed_url = urlparse(tos_link_lower)
         domain = parsed_url.netloc
         path = parsed_url.path
         query = parsed_url.query
-        
+
+        # Fast path - check if this URL matches policy patterns
+        if detect_policy_page(tos_link, "tos"):
+            logger.info(f"URL {tos_link} matches ToS patterns")
+            return True
+
         # STEP 1: Fast path for obvious ToS URLs - don't even need to visit these
-        
         # Common ToS patterns in URL paths
         primary_tos_patterns = [
             "/legal/terms",
@@ -425,17 +434,33 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
             "/policies",
             "/policies_center",
             "/terms",
+            "/policies?ref=pf",  # Common pattern without hardcoding specific sites
         ]
 
         # Check for obvious ToS path patterns
-        if any(pattern in path for pattern in primary_tos_patterns):
+        if (
+            any(pattern in path for pattern in primary_tos_patterns)
+            or "policies" in path
+        ):
             logger.info(f"URL has primary ToS path pattern: {tos_link}")
             # For these high-confidence URLs, accept more easily even with access issues
             high_confidence = True
-            return True
+
+            # If the URL contains "policies" with no other indicators, we need additional checks
+            # to distinguish between general policies pages and actual ToS pages
+            if "policies" in path and not any(
+                p in path for p in ["/terms", "/tos", "conditions"]
+            ):
+                # Use our pattern detection instead of hardcoded domains
+                if detect_policy_page(tos_link, "tos"):
+                    return True
+                # For other sites, be more cautious with just "policies"
+                high_confidence = False
+            else:
+                return True
         else:
             high_confidence = False
-        
+
         # Special case: App store ToS checks for app-specific vs. general terms
         if "apple.com" in domain and any(
             pattern in path
@@ -448,17 +473,17 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     f"Looking for app-specific terms rather than general terms"
                 )
                 return False
-                
+
         # STEP 2: Check URL patterns before making any requests
-        
         # Check for ToS-related query parameters
         if any(
-            param in query for param in ["cou", "terms", "conditions", "tos", "legal"]
+            param in query
+            for param in ["cou", "terms", "conditions", "tos", "legal", "ref=pf"]
         ):
             # Valid ToS link with parameters
             logger.info(f"URL has ToS-related query parameters: {tos_link}")
             return True
-        
+
         # Check for obvious ToS path patterns
         if any(pattern in path for pattern in primary_tos_patterns):
             logger.info(f"URL has primary ToS path pattern: {tos_link}")
@@ -466,7 +491,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
             high_confidence = True
         else:
             high_confidence = False
-            
+
         # Check for obvious non-ToS patterns in URL - reject early
         if not high_confidence and any(
             pattern in query for pattern in ["utm_", "source=", "campaign="]
@@ -484,7 +509,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         f"Rejecting URL with tracking params and no ToS indicators: {tos_link}"
                     )
                     return False
-        
+
         # STEP 3: Try to fetch the page and analyze content
         try:
             # Add additional headers to help with access
@@ -502,10 +527,10 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     "Sec-Fetch-Site": "same-origin",
                 }
             )
-            
+
             # Make the request
             response = session.get(tos_link, headers=enhanced_headers, timeout=15)
-            
+
             # Handle different status codes
             if response.status_code == 200:
                 # Got content, analyze it
@@ -520,14 +545,18 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     logger.info(
                         f"Accepting high-confidence ToS URL despite access issues: {tos_link}"
                     )
-            return True
+                    return True
+
+                # Check if domain is in known ToS URLs list
+                known_tos_urls = {}  # This should be defined elsewhere in your code
                 if domain in known_tos_urls:
                     for pattern in known_tos_urls[domain]:
                         if pattern in path:
                             logger.info(
                                 f"Accepting known ToS pattern despite access issues: {tos_link}"
                             )
-                return True
+                            return True
+
                 # Otherwise, need to reject due to lack of verification
                 return False
             else:
@@ -536,19 +565,18 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     f"ToS verification failed: status code {response.status_code} for {tos_link}"
                 )
                 if high_confidence:
-            return True
+                    return True
                 return False
-                
+
             # Parse the content
             soup = BeautifulSoup(response.text, "html.parser")
-            
+
             # STEP 4: Analyze page content
-            
             # Check page title
             title_elem = soup.find("title")
             if title_elem:
                 title_text = title_elem.text.lower()
-                
+
                 # Terms indicators in title
                 tos_title_terms = [
                     "terms",
@@ -558,12 +586,13 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     "legal",
                     "user agreement",
                     "eula",
+                    "policies",  # Added policies as valid title term
                 ]
-                
+
                 if any(term in title_text for term in tos_title_terms):
                     logger.info(f"Found terms indicator in page title: {title_text}")
-            return True
-                    
+                    return True
+
                 # Non-ToS indicators in title
                 not_tos_title_terms = [
                     "products",
@@ -577,7 +606,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     "cart",
                     "buy",
                 ]
-                
+
                 # Only reject if multiple non-ToS indicators and high confidence
                 non_tos_matches = sum(
                     1 for term in not_tos_title_terms if term in title_text
@@ -591,7 +620,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         f"Page title suggests this is not a ToS page: {title_text}"
                     )
                     return False
-            
+
             # Check for headers with terms indicators
             headers_with_terms = soup.find_all(
                 ["h1", "h2", "h3", "h4"],
@@ -606,16 +635,17 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         "acceptable use",
                         "service agreement",
                         "eula",
+                        "policies",  # Added policies as valid header term
                     ]
                 ),
             )
-            
+
             if headers_with_terms:
                 logger.info(
                     f"Found {len(headers_with_terms)} headers with terms indicators"
                 )
-            return True
-            
+                return True
+
             # Check for terms containers
             terms_containers = soup.find_all(
                 ["div", "section"],
@@ -625,7 +655,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     for term in ["terms", "conditions", "legal", "tos"]
                 ),
             )
-            
+
             if not terms_containers:
                 terms_containers = soup.find_all(
                     ["div", "section"],
@@ -635,18 +665,18 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         for term in ["terms", "conditions", "legal", "tos"]
                     ),
                 )
-                
+
             if terms_containers:
                 # Filter out footer containers that just contain links to legal pages
                 valid_containers = []
                 for container in terms_containers:
                     # Ignore small containers (like footers with just links)
                     container_text = container.get_text().strip()
-                    
+
                     # Skip containers that are likely navigation/footer elements
                     classes = container.get("class", [])
                     class_str = " ".join(classes).lower() if classes else ""
-                    
+
                     # Skip obvious footer/navigation containers
                     if any(
                         nav_term in class_str
@@ -655,7 +685,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         # Require more substantial content for these containers
                         if len(container_text) < 300:  # Footer links are usually brief
                             continue
-                    
+
                     # Check for actual terms content, not just links to terms
                     legal_phrases = [
                         "terms of service",
@@ -672,7 +702,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         "privacy policy",
                         "governing law",
                     ]
-                    
+
                     # Require multiple legal phrases for a valid container
                     matches = sum(
                         1
@@ -683,19 +713,19 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         matches >= 3 and len(container_text) > 500
                     ):  # Need substantial content
                         valid_containers.append(container)
-                
+
                 # Only accept if we have valid containers with actual terms content
                 if valid_containers:
                     logger.info(
                         f"Found {len(valid_containers)} containers with substantial terms content"
                     )
-            return True
+                    return True
                 else:
                     logger.warning(
                         "Found terms containers but they appear to be navigation/footer elements"
                     )
                     # Continue checks rather than accepting immediately
-            
+
             # Look for paragraphs with terms content
             paragraphs_with_terms = soup.find_all(
                 "p",
@@ -717,7 +747,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     ]
                 ),
             )
-            
+
             if paragraphs_with_terms:
                 # Check that we have substantial paragraph content (not just links)
                 substantial_paragraphs = [
@@ -727,12 +757,12 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     logger.info(
                         f"Found {len(substantial_paragraphs)} substantial paragraphs with terms content"
                     )
-            return True
-            
+                    return True
+
             # Check for bulleted lists with legal terms
             list_elements = soup.find_all(["ol", "ul"])
             list_with_terms = []
-            
+
             for list_elem in list_elements:
                 # Skip navigation and menu lists
                 if list_elem.parent:
@@ -745,18 +775,18 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         for nav_term in ["nav", "menu", "footer", "header"]
                     ):
                         continue
-                
+
                 list_items = list_elem.find_all("li")
                 if len(list_items) >= 3:
                     # Convert list items to text
                     list_texts = [
                         item.get_text().strip().lower() for item in list_items
                     ]
-                    
+
                     # Check for short navigation items (likely menu)
                     if all(len(text) < 30 for text in list_texts):
                         continue
-                    
+
                     # Check for terms commonly found in footer/navigation lists
                     nav_terms = [
                         "home",
@@ -771,7 +801,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         "login",
                         "register",
                     ]
-                    
+
                     # Skip lists that are likely navigation
                     nav_matches = sum(
                         1
@@ -780,10 +810,10 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     )
                     if nav_matches > 2:
                         continue
-                    
+
                     # Join all text for deeper analysis
                     list_text = " ".join(list_texts)
-                    
+
                     # Look for legal terms with higher threshold
                     legal_terms = [
                         "terms of service",
@@ -808,7 +838,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         "indemnification",
                         "severability",
                     ]
-                    
+
                     # Require multiple specific legal terms for a terms-related list
                     term_matches = [term for term in legal_terms if term in list_text]
                     if (
@@ -817,7 +847,7 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                         list_with_terms.append(
                             {"element": list_elem, "matches": term_matches}
                         )
-                        
+
             if list_with_terms:
                 # Don't accept terms based on just a list unless high confidence or many matches
                 if high_confidence or any(
@@ -826,13 +856,13 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                     logger.info(
                         f"Found {len(list_with_terms)} lists with terms content: {[item['matches'] for item in list_with_terms]}"
                     )
-            return True
+                    return True
                 else:
                     logger.warning(
                         "Found lists with some terms content but not enough for certainty"
                     )
                     # Continue to checks instead of accepting
-            
+
             # Check for legal term density
             page_text = soup.get_text().lower()
             legal_terms = [
@@ -862,24 +892,24 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                 "waiver",
                 "governing law",
             ]
-            
+
             term_count = sum(1 for term in legal_terms if term in page_text)
-            
+
             if term_count >= 5:  # Lower threshold for high confidence URLs
                 logger.info(f"Found {term_count} legal terms in page content")
-            return True
-                
+                return True
+
             # Final check for high confidence URLs - be more lenient
             if high_confidence:
                 logger.info(
                     f"Accepting high confidence ToS URL despite limited content indicators: {tos_link}"
                 )
-            return True
-                
+                return True
+
             # Not enough evidence
             logger.warning(f"Insufficient indicators that {tos_link} is a ToS page")
             return False
-            
+
         except requests.RequestException as e:
             logger.warning(f"Request error for {tos_link}: {str(e)}")
             # For high confidence URLs, accept even with access issues
@@ -887,9 +917,9 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                 logger.info(
                     f"Accepting high confidence ToS URL despite access issues: {tos_link}"
                 )
-            return True
+                return True
             return False
-            
+
     except Exception as e:
         logger.error(f"Error verifying ToS link: {str(e)}")
         return False
@@ -903,34 +933,97 @@ async def standard_tos_finder(
     With fallback to privacy policy page if direct terms detection isn't reliable.
     """
     all_potential_tos_links = []
-    
+
+    # First check if this URL matches policy patterns - if so, try common paths
+    first_url = variations_to_try[0][0]
+
+    # Get common policy URLs to try first
+    policy_urls = get_alternative_policy_urls(first_url, "tos")
+    if policy_urls:
+        logger.info(f"Trying {len(policy_urls)} common policy URLs first")
+        for policy_url in policy_urls:
+            try:
+                logger.info(f"Checking policy URL: {policy_url}")
+
+                # Check if this URL passes verification
+                if detect_policy_page(policy_url, "tos"):
+                    return TosResponse(
+                        url=first_url,
+                        tos_url=policy_url,
+                        success=True,
+                        message=f"Terms of Service found using policy pattern matching",
+                        method_used="pattern_match",
+                    )
+
+                # Otherwise try to access the URL
+                try:
+                    response = session.head(
+                        policy_url, headers=headers, timeout=10, allow_redirects=True
+                    )
+                    if response.status_code < 400:
+                        return TosResponse(
+                            url=first_url,
+                            tos_url=policy_url,
+                            success=True,
+                            message=f"Terms of Service found using common policy URL",
+                            method_used="common_policy_url",
+                        )
+                except Exception as e:
+                    logger.warning(f"Error checking policy URL {policy_url}: {str(e)}")
+                    continue
+
+            except Exception as e:
+                logger.error(f"Error processing policy URL {policy_url}: {str(e)}")
+                continue
+
+    # Continue with standard approach if pattern-matching approach failed
     for url, variation_type in variations_to_try:
         try:
             logger.info(f"Trying URL variation: {url} ({variation_type})")
-            
+
             # First do a HEAD request to check for redirects
             head_response = session.head(
                 url, headers=headers, timeout=10, allow_redirects=True
             )
             head_response.raise_for_status()
-            
+
             # Get the final URL after redirects
             final_url = head_response.url
             if final_url != url:
                 logger.info(f"Followed redirect: {url} -> {final_url}")
-            
+
             # Now get the content of the final URL
             logger.info(f"Fetching content from {final_url}")
             response = session.get(final_url, headers=headers, timeout=15)
             response.raise_for_status()
-            
+
             # Parse the HTML content
             soup = BeautifulSoup(response.text, "html.parser")
-            
+
             # Find the ToS link from the page
             logger.info(f"Searching for ToS link in {final_url}")
             tos_link = find_tos_link(final_url, soup)
-            
+
+            # If standard search didn't find anything, try pattern-based extraction
+            if not tos_link:
+                logger.info(
+                    f"Standard method didn't find ToS link, trying pattern-based extraction"
+                )
+                policy_candidates = extract_policy_urls_from_page(
+                    final_url, soup, "tos"
+                )
+
+                if policy_candidates:
+                    logger.info(
+                        f"Found {len(policy_candidates)} policy candidates via pattern extraction"
+                    )
+                    # Try each candidate
+                    for candidate in policy_candidates:
+                        if detect_policy_page(candidate, "tos"):
+                            logger.info(f"Candidate {candidate} matches ToS patterns")
+                            tos_link = candidate
+                            break
+
             if tos_link:
                 # Additional check for false positives
                 if is_likely_false_positive(tos_link, "tos"):
@@ -938,21 +1031,21 @@ async def standard_tos_finder(
                         f"Found link {tos_link} appears to be a false positive, skipping"
                     )
                     continue
-                    
+
                 # Check if this is a correct policy type
                 if not is_correct_policy_type(tos_link, "tos"):
                     logger.warning(
                         f"Found link {tos_link} appears to be a privacy policy, not ToS, skipping"
                     )
                     continue
-                
+
                 # Ensure the link is absolute
                 if tos_link.startswith("/"):
                     parsed_final_url = urlparse(final_url)
                     base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
                     tos_link = urljoin(base_url, tos_link)
                     logger.info(f"Converted relative URL to absolute URL: {tos_link}")
-                
+
                 # Verify that this is actually a ToS page by visiting it
                 if not verify_tos_link(session, tos_link, headers):
                     logger.warning(
@@ -963,7 +1056,7 @@ async def standard_tos_finder(
                         (tos_link, final_url, variation_type, "failed_verification")
                     )
                     continue
-                
+
                 # If we make it here, we have a verified ToS link
                 logger.info(
                     f"Verified ToS link: {tos_link} in {final_url} ({variation_type})"
@@ -982,13 +1075,13 @@ async def standard_tos_finder(
                 )
             else:
                 logger.info(f"No ToS link found in {final_url} ({variation_type})")
-                
+
                 # If direct ToS detection failed, try to find a privacy policy link
                 from .privacy import find_privacy_link
 
                 logger.info(f"Trying to find privacy policy link in {final_url}")
                 privacy_link = find_privacy_link(final_url, soup)
-                
+
                 if privacy_link:
                     # Make it absolute if needed
                     if privacy_link.startswith("/"):
@@ -997,7 +1090,7 @@ async def standard_tos_finder(
                             f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
                         )
                         privacy_link = urljoin(base_url, privacy_link)
-                    
+
                     logger.info(
                         f"Found privacy link: {privacy_link}, will check this page for ToS"
                     )
@@ -1009,10 +1102,10 @@ async def standard_tos_finder(
                         privacy_soup = BeautifulSoup(
                             privacy_response.text, "html.parser"
                         )
-                        
+
                         # Now look for terms links in the privacy page
                         terms_from_privacy = find_tos_link(privacy_link, privacy_soup)
-                        
+
                         if terms_from_privacy:
                             # Make it absolute if needed
                             if terms_from_privacy.startswith("/"):
@@ -1021,7 +1114,7 @@ async def standard_tos_finder(
                                 terms_from_privacy = urljoin(
                                     base_url, terms_from_privacy
                                 )
-                            
+
                             # Verify this ToS link
                             if verify_tos_link(session, terms_from_privacy, headers):
                                 logger.info(
@@ -1040,14 +1133,14 @@ async def standard_tos_finder(
                                 )
                     except Exception as e:
                         logger.error(f"Error finding ToS via privacy page: {str(e)}")
-                    
+
         except requests.RequestException as e:
             logger.error(f"RequestException for {url} ({variation_type}): {str(e)}")
             continue
         except Exception as e:
             logger.error(f"Exception for {url} ({variation_type}): {str(e)}")
             continue
-    
+
     # If we get here and have collected potential links, check them in order
     if all_potential_tos_links:
         logger.info(f"Checking {len(all_potential_tos_links)} potential ToS links")
@@ -1058,14 +1151,14 @@ async def standard_tos_finder(
                 logger.info(f"Double-checking potential ToS link: {tos_link}")
                 link_response = session.get(tos_link, headers=headers, timeout=15)
                 link_soup = BeautifulSoup(link_response.text, "html.parser")
-                
+
                 # Check page title and headers for terms-related keywords
                 title = link_soup.find("title")
                 title_text = title.get_text().lower() if title else ""
-                
+
                 h1_elements = link_soup.find_all("h1")
                 h1_texts = [h1.get_text().lower() for h1 in h1_elements]
-                
+
                 # If the page has terms-related keywords in title or headings
                 terms_keywords = [
                     "terms",
@@ -1090,13 +1183,13 @@ async def standard_tos_finder(
                     )
             except Exception as e:
                 logger.error(f"Error verifying potential ToS link {tos_link}: {str(e)}")
-    
+
     # Try one more fallback - look for terms in the footer of the main page
     try:
         original_url = variations_to_try[0][0]
         response = session.get(original_url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
-        
+
         # Look specifically for footer links with terms-related text
         footer_elements = soup.find_all(
             ["footer", "div"],
@@ -1106,25 +1199,25 @@ async def standard_tos_finder(
             ["footer", "div"],
             id=lambda i: i and ("footer" in i.lower() if i else False),
         )
-        
+
         for footer in footer_elements:
             for link in footer.find_all("a", href=True):
                 href = link.get("href", "").strip()
                 if not href:
                     continue
-                    
+
                 link_text = link.get_text().lower().strip()
                 if any(term in link_text for term in ["terms", "conditions", "legal"]):
                     # This looks like a terms link in the footer
                     absolute_url = urljoin(original_url, href)
                     logger.info(f"Found potential terms link in footer: {absolute_url}")
-                    
+
                     # Skip learn pages and other likely false positives
                     if "/learn" in absolute_url.lower() or is_likely_false_positive(
                         absolute_url, "tos"
                     ):
                         continue
-                    
+
                     # Verify this footer ToS link
                     if verify_tos_link(session, absolute_url, headers):
                         logger.info(f"Verified terms link from footer: {absolute_url}")
@@ -1139,15 +1232,15 @@ async def standard_tos_finder(
                         logger.warning(
                             f"Footer terms link failed verification: {absolute_url}"
                         )
-        
+
         # Try to extract provider platform information
         site_host = urlparse(original_url).netloc.lower()
         platform_info = detect_site_platform(soup, original_url)
-        
+
         if platform_info:
             platform_name, platform_domain = platform_info
             logger.info(f"Detected site platform: {platform_name} ({platform_domain})")
-            
+
             # If the site is using a platform, try the platform's legal pages
             if platform_domain and platform_domain != site_host:
                 # First try direct access to the main ToS page - this is most reliable
@@ -1171,7 +1264,7 @@ async def standard_tos_finder(
                             )
                 except Exception as e:
                     logger.error(f"Error checking primary ToS URL: {str(e)}")
-                
+
                 # Then try the legal hub page to find other ToS links
                 platform_legal = f"https://{platform_domain}/legal"
                 try:
@@ -1183,28 +1276,28 @@ async def standard_tos_finder(
                             platform_response.text, "html.parser"
                         )
                         platform_links = platform_soup.find_all("a", href=True)
-                        
+
                         # Prioritize links by importance
                         primary_terms_links = []
                         secondary_terms_links = []
-                        
+
                         for link in platform_links:
                             href = link.get("href", "").strip()
                             if not href:
                                 continue
-                                
+
                             link_text = link.get_text().lower().strip()
                             absolute_url = urljoin(platform_legal, href)
-                            
+
                             # Skip non-terms links
                             if not any(
                                 term in link_text for term in ["terms", "conditions"]
                             ):
                                 continue
-                                
+
                             # Categorize by importance
                             href_lower = absolute_url.lower()
-                            
+
                             # Primary ToS links - general Terms of Service/Use
                             if (
                                 "/terms" in href_lower or "/tos" in href_lower
@@ -1222,7 +1315,7 @@ async def standard_tos_finder(
                             # Secondary ToS links - specific terms
                             else:
                                 secondary_terms_links.append((absolute_url, link_text))
-                        
+
                         # First check primary links
                         for absolute_url, link_text in primary_terms_links:
                             logger.info(f"Checking primary terms link: {absolute_url}")
@@ -1234,7 +1327,7 @@ async def standard_tos_finder(
                                     message=f"Terms of Service found via platform ({platform_name}) legal page: {absolute_url}",
                                     method_used="platform_legal_primary",
                                 )
-                        
+
                         # Then check secondary links only if no primary links work
                         for absolute_url, link_text in secondary_terms_links:
                             logger.info(
@@ -1250,10 +1343,10 @@ async def standard_tos_finder(
                                 )
                 except Exception as e:
                     logger.error(f"Error with platform legal fallback: {str(e)}")
-                    
+
     except Exception as e:
         logger.error(f"Error in footer fallback search: {str(e)}")
-    
+
     return TosResponse(
         url=variations_to_try[0][0],  # Use the original URL
         success=False,
@@ -1271,7 +1364,7 @@ def detect_site_platform(
     """
     try:
         html_content = str(soup)
-        
+
         # Look for common platform indicators in the HTML
         platforms = [
             # (platform name, detection string, legal domain)
@@ -1288,13 +1381,13 @@ def detect_site_platform(
             ("AWS Amplify", "amplifyapp.com", "aws.amazon.com"),
             ("Heroku", "herokuapp.com", "heroku.com"),
         ]
-        
+
         # Check for platform indicators in the HTML
         for platform_name, detection_string, platform_domain in platforms:
             if detection_string in html_content:
                 logger.info(f"Detected platform: {platform_name} based on HTML content")
                 return platform_name, platform_domain
-        
+
         # Check for platform-specific meta tags
         generator_tag = soup.find("meta", {"name": "generator"})
         if generator_tag and generator_tag.get("content"):
@@ -1310,14 +1403,14 @@ def detect_site_platform(
                 return "Squarespace", "squarespace.com"
             elif "webflow" in generator_content:
                 return "Webflow", "webflow.com"
-            
+
         # Check for platform in URL
         url_lower = url.lower()
         for platform_name, detection_string, platform_domain in platforms:
             if detection_string in url_lower:
                 logger.info(f"Detected platform: {platform_name} based on URL")
                 return platform_name, platform_domain
-                
+
         return None, None
     except Exception as e:
         logger.error(f"Error detecting platform: {str(e)}")
@@ -1328,7 +1421,7 @@ def detect_site_platform(
     "/tos",
     response_model=TosResponse,
     responses={
-    200: {"description": "Terms of Service found successfully"},
+        200: {"description": "Terms of Service found successfully"},
         404: {"description": "Terms of Service not found", "model": TosResponse},
     },
 )
@@ -1340,7 +1433,7 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
     """
     original_url = request.url
     logger.info(f"Processing ToS request for URL: {original_url}")
-    
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -1353,17 +1446,17 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
 
     # Try multiple methods to find the ToS
     url_variations = prepare_url_variations(original_url)
-    
+
     # Create a list of (url, variation_type) tuples for standard finder
     variations_to_try = [(url, "original") for url in url_variations]
-    
+
     # Approach 1: Standard web requests with fallbacks
     with requests.Session() as session:
         standard_result = await standard_tos_finder(variations_to_try, headers, session)
-    
+
     if standard_result.success:
         return standard_result
-    
+
     # Approach 2: Try common URL patterns
     common_patterns_result = await try_common_tos_patterns(original_url, headers)
 
@@ -1372,10 +1465,10 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
 
     # Approach 3: Use Playwright for JavaScript-rendered content
     playwright_result = await playwright_tos_finder(original_url)
-    
+
     if playwright_result.success:
         return playwright_result
-    
+
     # Approach 4: Final fallback - scan complete HTML as last resort
     logger.info(
         f"All previous methods failed, trying complete HTML scan for {original_url}"
@@ -1404,88 +1497,88 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
     """
     try:
         logger.info(f"Using specialized App Store ToS handling for: {url}")
-        
+
         # First, try to get the app name for better logging
         session = requests.Session()
         app_name = None
         app_id = None
-        
+
         # Parse URL to get app ID
         parsed_url = urlparse(url)
         if parsed_url.path:
             id_match = re.search(r"/id(\d+)", parsed_url.path)
             if id_match:
                 app_id = id_match.group(1)
-                
+
         try:
             response = session.get(url, headers=headers, timeout=15)
             soup = BeautifulSoup(response.text, "html.parser")
-            
+
             # Look for app name
             title_elem = soup.find("title")
             if title_elem:
                 app_name = title_elem.text.strip().split("-")[0].strip()
-            
+
             if not app_name:
                 h1_elem = soup.find("h1")
                 if h1_elem:
                     app_name = h1_elem.text.strip()
         except Exception as e:
             logger.error(f"Error extracting app name: {str(e)}")
-            
+
         app_info = f"App {'(' + app_name + ')' if app_name else f'ID {app_id}' if app_id else ''}"
-        
+
         # Step 1: Try to find the privacy policy of the app and derive ToS from there
         logger.info(
             f"Looking for privacy policy link to derive ToS link for {app_info}"
         )
-        
+
         # Import here to avoid circular imports
         from .privacy import find_privacy_link
-        
+
         # First, we find the privacy policy of the app
         try:
             response = session.get(url, headers=headers, timeout=15)
             soup = BeautifulSoup(response.text, "html.parser")
-            
+
             # Look for privacy policy links
             privacy_link = find_privacy_link(url, soup)
-            
+
             if privacy_link:
                 logger.info(
                     f"Found privacy policy link for App Store item: {privacy_link}"
                 )
-                
+
                 # Make sure the link is absolute
                 if privacy_link.startswith("/"):
                     privacy_link = urljoin(url, privacy_link)
-                
+
                 # Get the base domain of the privacy policy
                 pp_parsed = urlparse(privacy_link)
                 pp_base_domain = f"{pp_parsed.scheme}://{pp_parsed.netloc}"
                 logger.info(
                     f"Extracted base domain from privacy policy: {pp_base_domain}"
                 )
-                
+
                 # New Step: Try common ToS paths directly on the privacy policy domain first
-                # This addresses the issue where we find privacy policy at controlgame.com/privacy/ 
+                # This addresses the issue where we find privacy policy at controlgame.com/privacy/
                 # and want to directly check controlgame.com/terms without checking the privacy page first
                 logger.info(
                     f"Trying common ToS paths directly on privacy policy domain: {pp_base_domain}"
                 )
-                
+
                 # Extract privacy path components to create matching terms paths
                 pp_path = pp_parsed.path
                 logger.info(f"Privacy policy path: {pp_path}")
-                
+
                 # If the privacy URL contains specific patterns, try corresponding terms patterns
                 specific_candidates = []
-                
+
                 if "/privacy" in pp_path:
                     # If we have /privacy, try /terms
                     terms_path = pp_path.replace("/privacy", "/terms")
                     specific_candidates.append(terms_path)
-                    
+
                 if "/privacy-policy" in pp_path:
                     # If we have /privacy-policy, try /terms-of-service, /terms-of-use, etc.
                     specific_candidates.append(
@@ -1497,7 +1590,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                     specific_candidates.append(
                         pp_path.replace("/privacy-policy", "/terms-and-conditions")
                     )
-                    
+
                 # Regular common paths
                 common_tos_paths = [
                     "/terms",
@@ -1511,7 +1604,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                     "/legal/terms.html",
                     "/eula",
                 ]
-                
+
                 # Try specific domain-based candidates first
                 for path in specific_candidates:
                     try:
@@ -1519,7 +1612,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                         logger.info(
                             f"Checking candidate ToS URL based on privacy path: {candidate_tos_url}"
                         )
-                        
+
                         # Skip if this is Apple's domain - we want app-specific terms only
                         candidate_parsed = urlparse(candidate_tos_url)
                         if candidate_parsed.netloc == "www.apple.com":
@@ -1527,7 +1620,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                                 f"Skipping Apple's domain for candidate ToS URL: {candidate_tos_url} - we only want app-specific terms"
                             )
                             continue
-                            
+
                         tos_check_response = session.get(
                             candidate_tos_url, headers=headers, timeout=15
                         )
@@ -1539,8 +1632,8 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                                         f"Rejecting Apple's general terms: {candidate_tos_url}"
                                     )
                                     continue
-                                
-        return TosResponse(
+
+                                return TosResponse(
                                     url=url,
                                     tos_url=candidate_tos_url,
                                     success=True,
@@ -1551,7 +1644,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                         logger.error(
                             f"Error checking specific ToS path {path}: {str(e)}"
                         )
-                
+
                 # Then try common paths
                 for path in common_tos_paths:
                     try:
@@ -1559,7 +1652,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                         logger.info(
                             f"Checking candidate ToS URL directly: {candidate_tos_url}"
                         )
-                        
+
                         # Skip if this is Apple's domain - we want app-specific terms only
                         candidate_parsed = urlparse(candidate_tos_url)
                         if candidate_parsed.netloc == "www.apple.com":
@@ -1567,7 +1660,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                                 f"Skipping Apple's domain for candidate ToS URL: {candidate_tos_url} - we only want app-specific terms"
                             )
                             continue
-                            
+
                         tos_check_response = session.get(
                             candidate_tos_url, headers=headers, timeout=15
                         )
@@ -1579,7 +1672,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                                         f"Rejecting Apple's general terms: {candidate_tos_url}"
                                     )
                                     continue
-                                
+
                                 return TosResponse(
                                     url=url,
                                     tos_url=candidate_tos_url,
@@ -1589,16 +1682,16 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                                 )
                     except Exception as e:
                         logger.error(f"Error checking ToS path {path}: {str(e)}")
-                
+
                 # If direct domain approach failed, try to get the ToS from the privacy page
                 try:
                     # First try to visit the privacy page to find ToS links
                     pp_response = session.get(privacy_link, headers=headers, timeout=15)
                     pp_soup = BeautifulSoup(pp_response.text, "html.parser")
-                    
+
                     # Search for ToS links on the privacy page
                     tos_from_pp = find_tos_link(privacy_link, pp_soup)
-                    
+
                     if tos_from_pp:
                         # Skip if this is Apple's domain - we want app-specific terms only
                         tos_parsed = urlparse(tos_from_pp)
@@ -1627,7 +1720,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                     logger.error(f"Error fetching privacy page: {str(e)}")
         except Exception as e:
             logger.error(f"Error in App Store ToS detection: {str(e)}")
-            
+
         # If we get here and haven't found app-specific terms, return failure
         logger.warning(f"No app-specific Terms of Service found for {app_info}")
         return TosResponse(
@@ -1636,7 +1729,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
             message=f"No app-specific Terms of Service found for {app_info}. Apple's general terms will not be used as a substitute.",
             method_used="app_store_no_specific_terms",
         )
-            
+
     except Exception as e:
         logger.error(f"Error in App Store ToS handler: {str(e)}")
         return TosResponse(
@@ -1654,12 +1747,12 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
     """
     try:
         logger.info(f"Using specialized Play Store ToS handling for: {url}")
-        
+
         # First, try to get the app name and ID for better logging
         session = requests.Session()
         app_name = None
         app_id = None
-        
+
         # Parse URL to get app ID
         parsed_url = urlparse(url)
         query_params = parsed_url.query
@@ -1669,33 +1762,33 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
             if "=" in param
         }
         app_id = query_dict.get("id")
-                
+
         try:
             response = session.get(url, headers=headers, timeout=15)
             soup = BeautifulSoup(response.text, "html.parser")
-            
+
             # Look for app name
             title_elem = soup.find("title")
             if title_elem:
                 app_name = title_elem.text.strip().split("-")[0].strip()
-            
+
             if not app_name:
                 h1_elem = soup.find("h1")
                 if h1_elem:
                     app_name = h1_elem.text.strip()
         except Exception as e:
             logger.error(f"Error extracting app name: {str(e)}")
-            
+
         app_info = f"App {'(' + app_name + ')' if app_name else f'ID {app_id}' if app_id else ''}"
-        
+
         # Step 1: Try to find the privacy policy link and use that to locate ToS
         logger.info(
             f"Looking for privacy policy link to derive ToS link for {app_info}"
         )
-        
+
         # Import here to avoid circular imports
         from .privacy import find_privacy_link
-        
+
         # First, we try to see if there's an app data safety page
         data_safety_url = url
         if app_id:
@@ -1709,48 +1802,48 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
             )
             data_safety_soup = BeautifulSoup(data_safety_response.text, "html.parser")
             privacy_link = find_privacy_link(data_safety_url, data_safety_soup)
-            
+
             if not privacy_link:
                 # Try the main app page
                 response = session.get(url, headers=headers, timeout=15)
                 soup = BeautifulSoup(response.text, "html.parser")
                 privacy_link = find_privacy_link(url, soup)
-            
+
             if privacy_link:
                 logger.info(
                     f"Found privacy policy link for Play Store item: {privacy_link}"
                 )
-                
+
                 # Make sure the link is absolute
                 if privacy_link.startswith("/"):
                     privacy_link = urljoin(url, privacy_link)
-                
+
                 # Get the base domain of the privacy policy
                 pp_parsed = urlparse(privacy_link)
                 pp_base_domain = f"{pp_parsed.scheme}://{pp_parsed.netloc}"
                 logger.info(
                     f"Extracted base domain from privacy policy: {pp_base_domain}"
                 )
-                
+
                 # New Step: Try common ToS paths directly on the privacy policy domain first
-                # This addresses the issue where we find privacy policy at example.com/privacy/ 
+                # This addresses the issue where we find privacy policy at example.com/privacy/
                 # and want to directly check example.com/terms without visiting the privacy page first
                 logger.info(
                     f"Trying common ToS paths directly on privacy policy domain: {pp_base_domain}"
                 )
-                
+
                 # Extract privacy path components to create matching terms paths
                 pp_path = pp_parsed.path
                 logger.info(f"Privacy policy path: {pp_path}")
-                
+
                 # If the privacy URL contains specific patterns, try corresponding terms patterns
                 specific_candidates = []
-                
+
                 if "/privacy" in pp_path:
                     # If we have /privacy, try /terms
                     terms_path = pp_path.replace("/privacy", "/terms")
                     specific_candidates.append(terms_path)
-                    
+
                 if "/privacy-policy" in pp_path:
                     # If we have /privacy-policy, try /terms-of-service, /terms-of-use, etc.
                     specific_candidates.append(
@@ -1762,7 +1855,7 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                     specific_candidates.append(
                         pp_path.replace("/privacy-policy", "/terms-and-conditions")
                     )
-                    
+
                 # Regular common paths
                 common_tos_paths = [
                     "/terms",
@@ -1776,7 +1869,7 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                     "/legal/terms.html",
                     "/eula",
                 ]
-                
+
                 # Try specific domain-based candidates first
                 for path in specific_candidates:
                     try:
@@ -1784,7 +1877,7 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                         logger.info(
                             f"Checking candidate ToS URL based on privacy path: {candidate_tos_url}"
                         )
-                        
+
                         tos_check_response = session.get(
                             candidate_tos_url, headers=headers, timeout=15
                         )
@@ -1801,7 +1894,7 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                         logger.error(
                             f"Error checking specific ToS path {path}: {str(e)}"
                         )
-                
+
                 # Then try common paths
                 for path in common_tos_paths:
                     try:
@@ -1809,7 +1902,7 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                         logger.info(
                             f"Checking candidate ToS URL directly: {candidate_tos_url}"
                         )
-                        
+
                         tos_check_response = session.get(
                             candidate_tos_url, headers=headers, timeout=15
                         )
@@ -1824,41 +1917,41 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                                 )
                     except Exception as e:
                         logger.error(f"Error checking ToS path {path}: {str(e)}")
-                
+
                 # If direct domain approach failed, try to get the ToS from the privacy page
                 try:
                     # First try to visit the privacy page to find ToS links
                     pp_response = session.get(privacy_link, headers=headers, timeout=15)
                     pp_soup = BeautifulSoup(pp_response.text, "html.parser")
-                    
+
                     # Search for ToS links on the privacy page
                     tos_from_pp = find_tos_link(privacy_link, pp_soup)
-                    
+
                     if tos_from_pp:
-                                # Verify this is actually a ToS link
-                                if verify_tos_link(session, tos_from_pp, headers):
-                                    return TosResponse(
-                                        url=url,
-                                        tos_url=tos_from_pp,
-                                        success=True,
-                                        message=f"Terms of Service found via app's privacy policy page for {app_info}",
+                        # Verify this is actually a ToS link
+                        if verify_tos_link(session, tos_from_pp, headers):
+                            return TosResponse(
+                                url=url,
+                                tos_url=tos_from_pp,
+                                success=True,
+                                message=f"Terms of Service found via app's privacy policy page for {app_info}",
                                 method_used="play_store_pp_to_tos",
-                                    )
+                            )
                 except Exception as e:
                     logger.error(f"Error fetching privacy page: {str(e)}")
         except Exception as e:
             logger.error(f"Error in Play Store ToS detection: {str(e)}")
-            
+
         # If we get here, we couldn't find a developer-specific ToS through the privacy policy
         # Instead of falling back to Google's standard ToS, return a failure response
         logger.warning(f"No Terms of Service found for Play Store app: {app_info}")
-                    return TosResponse(
-                        url=url,
+        return TosResponse(
+            url=url,
             success=False,
             message=f"No Terms of Service found for Play Store app: {app_info}",
             method_used="play_store_no_tos_found",
         )
-            
+
     except Exception as e:
         logger.error(f"Error in Play Store ToS handler: {str(e)}")
         return TosResponse(
@@ -1881,10 +1974,10 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             )
-            
+
             page = await context.new_page()
             page.set_default_timeout(45000)  # 45 seconds
-            
+
             try:
                 logger.info(f"Trying to load URL with Playwright: {url}")
                 await page.goto(url, wait_until="networkidle", timeout=60000)
@@ -1905,7 +1998,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                     )
 
                 tos_link = find_tos_link(final_url, soup)
-                
+
                 if not tos_link:
                     # Try to find and click buttons that might reveal ToS content
                     consent_buttons = await page.query_selector_all(
@@ -1924,7 +2017,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                                 break
                         except:
                             continue
-                
+
                     if not tos_link:
                         # Try to explicitly look for policy links with common text patterns
                         logger.info("Trying explicit link text search with Playwright")
@@ -1965,7 +2058,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                             continue
 
                 await browser.close()
-                
+
                 if tos_link:
                     # Additional check for false positives
                     if is_likely_false_positive(tos_link, "tos"):
@@ -1978,7 +2071,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                             message=f"Found ToS link was a false positive: {tos_link}",
                             method_used="playwright_false_positive",
                         )
-                        
+
                     # Check if this is a correct policy type
                     if not is_correct_policy_type(tos_link, "tos"):
                         logger.warning(
@@ -1990,7 +2083,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                             message=f"Found link appears to be a privacy policy, not Terms of Service: {tos_link}",
                             method_used="playwright_wrong_policy_type",
                         )
-                        
+
                     # Ensure the link is absolute
                     if tos_link.startswith("/"):
                         parsed_final_url = urlparse(final_url)
@@ -2001,7 +2094,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                         logger.info(
                             f"Converted relative URL to absolute URL: {tos_link}"
                         )
-                    
+
                     return TosResponse(
                         url=final_url,
                         tos_url=tos_link,
@@ -2016,7 +2109,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                         message=f"No Terms of Service link found even with JavaScript-enabled browser rendering on page: {final_url}",
                         method_used="playwright_failed",
                     )
-            
+
             except Exception as e:
                 await browser.close()
                 if "Timeout" in str(e) or "timeout" in str(e).lower():
@@ -2040,7 +2133,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                         message=f"Error using Playwright to process URL {url}: {str(e)}",
                         method_used="playwright_failed",
                     )
-    
+
     except Exception as e:
         error_msg = f"Error using Playwright to process URL {url}: {str(e)}"
         logger.error(error_msg)

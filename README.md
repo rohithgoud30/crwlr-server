@@ -34,6 +34,19 @@ A simple but enterprise-structured FastAPI backend for the CRWLR project.
   - Detailed error messages directly in the response
   - JavaScript support: Falls back to Playwright browser automation when standard scraping fails
 
+### Advanced Privacy Policy Detection
+
+The CRWLR Server now includes enhanced privacy policy detection capabilities that can find privacy policies on websites with complex layouts:
+
+- **Pattern-based detection** - Uses flexible patterns instead of hardcoded domains
+- **Hidden menu detection** - Identifies policies in dropdowns, footers, and popups
+- **JavaScript integration** - Extracts links from JS variables and interacts with menus
+- **Confidence scoring** - Prioritizes results by likelihood of correctness
+
+This approach works across a wide range of websites without requiring site-specific rules.
+
+See [Privacy Detection Documentation](./docs/privacy_detection.md) for technical details.
+
 ## Requirements
 
 - Python 3.8+
@@ -116,13 +129,26 @@ app/
 
 ## API Endpoints
 
+The CRWLR API provides the following key endpoints:
+
+- `GET /api/v1/health`: Simple health check endpoint
+- `POST /api/v1/tos/find`: Finds the Terms of Service page URL for a given website
+- `POST /api/v1/privacy/find`: Finds the Privacy Policy page URL for a given website
+- `POST /api/v1/extract`: Extracts raw text content from a given URL
+- `POST /api/v1/summary`: Generates a human-readable summary of a privacy policy or terms of service document
+
+Legacy compatibility endpoints are also available:
+
+- `POST /api/v1/tos`: Legacy endpoint for Terms of Service detection
+- `POST /api/v1/privacy`: Legacy endpoint for Privacy Policy detection
+
 ### Health Check
 
 - `GET /api/v1/health`: Returns the health status of the API
 
 ### Terms of Service Finder
 
-- `POST /api/v1/tos`: Finds the Terms of Service page URL for a given website
+- `POST /api/v1/tos/find`: Finds the Terms of Service page URL for a given website
   - Request body: `{ "url": "example.com" }` or `{ "url": "https://example.com" }` or `{ "url": "https://example.com/specific/page" }`
   - Special handling for different URL types:
     - Regular websites: Searches for ToS links on the page/domain
@@ -170,7 +196,7 @@ app/
 
 ### Privacy Policy Finder
 
-- `POST /api/v1/privacy`: Finds the Privacy Policy page URL for a given website
+- `POST /api/v1/privacy/find`: Finds the Privacy Policy page URL for a given website
   - Request body: `{ "url": "example.com" }` or `{ "url": "https://example.com" }` or `{ "url": "https://example.com/specific/page" }`
   - Special handling for different URL types:
     - Regular websites: Searches for privacy policy links on the page/domain
