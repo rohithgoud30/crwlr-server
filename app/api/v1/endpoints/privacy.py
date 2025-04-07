@@ -5,11 +5,11 @@ import requests
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import warnings
 import re
-from typing import Optional, Any, List, Tuple
-import asyncio
+from typing import Optional
 from playwright.async_api import async_playwright
 import logging
-from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id, is_likely_false_positive, is_correct_policy_type
+from .utils import normalize_url, prepare_url_variations, get_footer_score, get_domain_score, get_common_penalties, is_on_policy_page, get_policy_patterns, get_policy_score, find_policy_by_class_id, is_likely_false_positive, is_correct_policy_type, find_policy_link_prioritized
+import inspect
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -563,7 +563,14 @@ async def handle_play_store_privacy(url: str, app_id: str) -> PrivacyResponse:
 
 
 async def standard_privacy_finder(variations_to_try, headers, session) -> PrivacyResponse:
-    """Standard approach using requests and BeautifulSoup."""
+    """
+    Standard approach using requests and BeautifulSoup.
+    Prioritizes scanning for privacy policy links in a specific order:
+    1. By class/ID patterns
+    2. In footer elements
+    3. In header elements
+    4. In all links with policy-related text
+    """
     
     # For each variation, try to follow redirects to the final destination
     for url, variation_type in variations_to_try:
@@ -610,13 +617,23 @@ async def standard_privacy_finder(variations_to_try, headers, session) -> Privac
                     logger.info(f"Converted relative URL to absolute URL: {privacy_link}")
                     
                 logger.info(f"Found privacy link: {privacy_link} in {final_url} ({variation_type})")
+                
+                # Determine method used for more informative response
+                method_used = "standard"
+                if "footer" in inspect.currentframe().f_back.f_locals.get('method_info', ''):
+                    method_used = "standard_footer"
+                elif "header" in inspect.currentframe().f_back.f_locals.get('method_info', ''):
+                    method_used = "standard_header"
+                elif "class/ID" in inspect.currentframe().f_back.f_locals.get('method_info', ''):
+                    method_used = "standard_class_id"
+                
                 return PrivacyResponse(
                     url=final_url,  # Return the actual URL after redirects
                     pp_url=privacy_link,
                     success=True,
                     message=f"Privacy Policy link found on final destination page: {final_url}" + 
                             (f" (Found at {variation_type})" if variation_type != "original exact url" else ""),
-                    method_used="standard"
+                    method_used=method_used
                 )
             else:
                 logger.info(f"No privacy link found in {final_url} ({variation_type})")
@@ -819,116 +836,8 @@ async def playwright_privacy_finder(url: str) -> PrivacyResponse:
 
 def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     """Find privacy policy link in the HTML soup."""
-    # First try the high-priority class/ID based approach
-    class_id_result = find_policy_by_class_id(soup, 'privacy')
-    if class_id_result:
-        return class_id_result
-        
-    # If not found, proceed with the existing approach
-    base_domain = urlparse(url).netloc.lower()
-    is_legal_page = is_on_policy_page(url, 'privacy')
-    exact_patterns, strong_url_patterns = get_policy_patterns('privacy')
-    candidates = []
-    
-    # Get current domain info for domain-matching rules
-    current_domain = urlparse(url).netloc.lower()
-    
-    # Iterate through all links to find the privacy policy
-    for link in soup.find_all('a', href=True):
-        href = link.get('href', '').strip()
-        if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-            continue
-            
-        try:
-            absolute_url = urljoin(url, href)
-            
-            # Skip likely false positives
-            if is_likely_false_positive(absolute_url, 'privacy'):
-                continue
-    
-            # Check if this is a different domain from the original site
-            target_domain = urlparse(absolute_url).netloc.lower()
-            base_domain = get_root_domain(current_domain)
-            target_base_domain = get_root_domain(target_domain)
-            
-            if target_base_domain != base_domain:
-                # For cross-domain links, require explicit privacy references
-                if not any(term in absolute_url.lower() for term in ['/privacy', 'privacy-policy', '/gdpr']):
-                    logger.warning(f"Skipping cross-domain non-privacy URL: {absolute_url}")
-                continue
-            
-            # Ensure this is not a ToS URL
-            if not is_correct_policy_type(absolute_url, 'privacy'):
-                continue
-    
-            link_text = ' '.join([
-                link.get_text().strip(),
-                link.get('title', '').strip(),
-                absolute_url
-            ]).lower()
-            
-            score = get_policy_score(link_text, absolute_url, 'privacy')
-            
-            if score <= 0:
-                continue
-            
-            domain_score = get_domain_score(absolute_url, base_domain)
-            
-            if domain_score < 0:
-                continue
-            
-            href_domain = urlparse(absolute_url).netloc.lower()
-            
-            # Domain-specific scoring adjustments
-            if href_domain == current_domain:
-                # Strongly prefer same-domain links
-                score += 15.0
-                logger.info(f"Applied same-domain bonus for {absolute_url}")
-            elif target_base_domain != base_domain:
-                # Apply penalty for cross-domain links
-                score -= 8.0
-                logger.info(f"Applied cross-domain penalty for {absolute_url}")
-                
-            if is_legal_page and href_domain != base_domain:
-                continue
-            
-            if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                score += 6.0
-            
-            href_lower = absolute_url.lower()
-            if any(pattern in href_lower for pattern in strong_url_patterns):
-                score += 4.0
-            
-            score += get_policy_score(link_text, absolute_url, 'privacy')
-            
-            for pattern, penalty in get_common_penalties():
-                if pattern in href_lower:
-                    score += penalty
-            
-            final_score = (score * 2.0) + (get_footer_score(link) * 3.0) + (domain_score * 1.0)
-            
-            threshold = 5.0
-            if get_footer_score(link) > 0:
-                threshold = 4.0
-            if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                threshold = 4.0
-            
-            if is_legal_page and href_domain != base_domain:
-                threshold += 3.0
-            
-            if final_score > threshold:
-                candidates.append((absolute_url, final_score))
-        
-        except Exception as e:
-            logger.error(f"Error processing link: {e}")
-            continue
-    
-    if candidates:
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        logger.info(f"Sorted privacy policy candidates: {candidates}")
-        return candidates[0][0]
-    
-    return None
+    # Use the prioritized approach to find privacy policy links
+    return find_policy_link_prioritized(url, soup, 'privacy')
 
 def get_root_domain(domain: str) -> str:
     """Extract root domain from a domain name."""

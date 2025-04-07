@@ -22,7 +22,8 @@ from .utils import (
     get_policy_score,
     find_policy_by_class_id,
     is_likely_false_positive,
-    is_correct_policy_type
+    is_correct_policy_type,
+    find_policy_link_prioritized
 )
 import inspect
 
@@ -58,157 +59,8 @@ class TosResponse(BaseModel):
 
 def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     """Find Terms of Service link in the HTML soup."""
-    # First try the high-priority class/ID based approach
-    class_id_result = find_policy_by_class_id(soup, 'tos')
-    if class_id_result:
-        return class_id_result
-        
-    # If not found, proceed with the existing approach
-    base_domain = urlparse(url).netloc.lower()
-    is_legal_page = is_on_policy_page(url, 'tos')
-    exact_patterns, strong_url_patterns = get_policy_patterns('tos')
-    candidates = []
-    
-    # Get current domain info for domain-matching rules
-    current_domain = urlparse(url).netloc.lower()
-    
-    # Additional patterns to filter out false positives
-    false_positive_patterns = [
-        '/learn', '/tutorial', '/course', '/education', '/docs', 
-        '/documentation', '/guide', '/start', '/getting-started',
-        '/examples', '/showcase'
-    ]
-    
-    # Iterate through all links to find the ToS
-    for link in soup.find_all('a', href=True):
-        href = link.get('href', '').strip()
-        if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
-            continue
-            
-        try:
-            absolute_url = urljoin(url, href)
-            
-            # Skip likely false positives
-            if is_likely_false_positive(absolute_url, 'tos'):
-                continue
-            
-            # Extra check - filter out known false positive patterns
-            if any(pattern in absolute_url.lower() for pattern in false_positive_patterns):
-                logger.warning(f"Skipping likely false positive URL: {absolute_url}")
-                continue
-                
-            # Extra check - skip privacy policy URLs when looking for ToS
-            url_lower = absolute_url.lower()
-            if '/privacy' in url_lower or 'privacy-policy' in url_lower or '/gdpr' in url_lower:
-                logger.warning(f"Skipping privacy policy URL in ToS search: {absolute_url}")
-                continue
-                
-            # General cross-domain policy handling
-            # Check if this is a different domain from the original site
-            target_domain = urlparse(absolute_url).netloc.lower()
-            is_cross_domain = current_domain != target_domain
-            
-            if is_cross_domain:
-                # For cross-domain links, be stricter - require explicit terms references
-                if not any(term in url_lower for term in ['/terms', '/tos', '/legal/terms']):
-                    logger.warning(f"Skipping cross-domain non-terms URL: {absolute_url}")
-                    continue
-                    
-            # Ensure this is not a Privacy URL
-            if not is_correct_policy_type(absolute_url, 'tos'):
-                continue
-            
-            link_text = ' '.join([
-                link.get_text().strip(),
-                link.get('title', '').strip(),
-                link.get('aria-label', '').strip()
-            ]).lower()
-            
-            # Skip links that are explicitly privacy policies
-            if 'privacy' in link_text and not any(term in link_text for term in ['terms', 'tos', 'conditions']):
-                logger.warning(f"Skipping privacy link text in ToS search: {link_text}")
-                continue
-                
-            # Skip educational links with terms like "learn" 
-            if any(edu_term in link_text for edu_term in ['learn', 'tutorial', 'course', 'guide', 'start', 'example']):
-                if not any(term in link_text for term in ['terms', 'legal', 'conditions']):
-                    logger.warning(f"Skipping educational link in ToS search: {link_text}")
-                    continue
-                
-            if len(link_text.strip()) < 3:
-                    continue
-                    
-            score = 0.0
-            footer_score = get_footer_score(link)
-            domain_score = get_domain_score(absolute_url, base_domain)
-            
-            if domain_score < 0:
-                continue
-            
-            href_domain = urlparse(absolute_url).netloc.lower()
-            
-            # Domain-specific scoring adjustments
-            if href_domain == current_domain:
-                # Strongly prefer same-domain links
-                score += 15.0
-                logger.info(f"Applied same-domain bonus for {absolute_url}")
-            elif is_cross_domain:
-                # Apply penalty for cross-domain links
-                score -= 8.0
-                logger.info(f"Applied cross-domain penalty for {absolute_url}")
-            
-            if is_legal_page and href_domain != base_domain:
-                continue
-                
-            if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                score += 6.0
-            
-            href_lower = absolute_url.lower()
-            if any(pattern in href_lower for pattern in strong_url_patterns):
-                score += 4.0
-            
-            score += get_policy_score(link_text, absolute_url, 'tos')
-            
-            for pattern, penalty in get_common_penalties():
-                if pattern in href_lower:
-                    score += penalty
-                    
-            # Apply additional penalty for URLs with privacy terms
-            if 'privacy' in url_lower:
-                score -= 10.0
-                
-            # Apply strong penalty for educational content
-            if any(pattern in url_lower for pattern in false_positive_patterns):
-                score -= 20.0
-            
-            final_score = (score * 2.0) + (footer_score * 3.0) + (domain_score * 1.0)
-            
-            # Big bonus for footer links containing "terms" text
-            if footer_score > 0 and ('terms' in link_text or 'conditions' in link_text):
-                final_score += 10.0
-            
-            threshold = 5.0
-            if footer_score > 0:
-                threshold = 4.0
-            if any(re.search(pattern, link_text) for pattern in exact_patterns):
-                threshold = 4.0
-            
-            if is_legal_page and href_domain != base_domain:
-                threshold += 3.0
-            
-            if final_score > threshold:
-                candidates.append((absolute_url, final_score))
-        
-        except Exception as e:
-            logger.error(f"Error processing link: {e}")
-            continue
-                
-    if candidates:
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        logger.info(f"Sorted ToS candidates: {candidates}")
-        return candidates[0][0]
-    
-    return None
+    # Use the prioritized approach to find ToS links
+    return find_policy_link_prioritized(url, soup, 'tos')
 
 
 def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> bool:
@@ -382,11 +234,15 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
 
 async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers: dict, session: requests.Session) -> TosResponse:
     """
-    Try to find ToS link using standard requests + BeautifulSoup method.
-    With fallback to privacy policy page if direct terms detection isn't reliable.
+    Standard approach using requests and BeautifulSoup.
+    Prioritizes scanning for ToS links in a specific order:
+    1. By class/ID patterns
+    2. In footer elements
+    3. In header elements
+    4. In all links with policy-related text
     """
-    all_potential_tos_links = []
     
+    # For each variation, try to follow redirects to the final destination
     for url, variation_type in variations_to_try:
         try:
             logger.info(f"Trying URL variation: {url} ({variation_type})")
@@ -408,7 +264,7 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
             # Parse the HTML content
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Find the ToS link from the page
+            # Find the Terms of Service link from the page
             logger.info(f"Searching for ToS link in {final_url}")
             tos_link = find_tos_link(final_url, soup)
             
@@ -422,254 +278,100 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
                 if not is_correct_policy_type(tos_link, 'tos'):
                     logger.warning(f"Found link {tos_link} appears to be a privacy policy, not ToS, skipping")
                     continue
-                
+                    
                 # Ensure the link is absolute
                 if tos_link.startswith('/'):
                     parsed_final_url = urlparse(final_url)
                     base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
                     tos_link = urljoin(base_url, tos_link)
                     logger.info(f"Converted relative URL to absolute URL: {tos_link}")
+                    
+                logger.info(f"Found ToS link: {tos_link} in {final_url} ({variation_type})")
                 
-                # Verify that this is actually a ToS page by visiting it
-                if not verify_tos_link(session, tos_link, headers):
-                    logger.warning(f"Candidate ToS link failed verification: {tos_link}")
-                    # Add to potential links for further inspection
-                    all_potential_tos_links.append((tos_link, final_url, variation_type, 'failed_verification'))
-                    continue
+                # Determine method used for more informative response
+                method_used = "standard"
+                if "footer" in inspect.currentframe().f_back.f_locals.get('method_info', ''):
+                    method_used = "standard_footer"
+                elif "header" in inspect.currentframe().f_back.f_locals.get('method_info', ''):
+                    method_used = "standard_header"
+                elif "class/ID" in inspect.currentframe().f_back.f_locals.get('method_info', ''):
+                    method_used = "standard_class_id"
                 
-                # If we make it here, we have a verified ToS link
-                logger.info(f"Verified ToS link: {tos_link} in {final_url} ({variation_type})")
                 return TosResponse(
                     url=final_url,  # Return the actual URL after redirects
                     tos_url=tos_link,
                     success=True,
-                    message=f"Verified Terms of Service link found on final destination page: {final_url}" + 
+                    message=f"Terms of Service link found on final destination page: {final_url}" + 
                             (f" (Found at {variation_type})" if variation_type != "original exact url" else ""),
-                    method_used="standard_verified"
+                    method_used=method_used
                 )
             else:
                 logger.info(f"No ToS link found in {final_url} ({variation_type})")
-                
-                # If direct ToS detection failed, try to find a privacy policy link
-                from .privacy import find_privacy_link
-                logger.info(f"Trying to find privacy policy link in {final_url}")
-                privacy_link = find_privacy_link(final_url, soup)
-                
-                if privacy_link:
-                    # Make it absolute if needed
-                    if privacy_link.startswith('/'):
-                        parsed_final_url = urlparse(final_url)
-                        base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
-                        privacy_link = urljoin(base_url, privacy_link)
-                    
-                    logger.info(f"Found privacy link: {privacy_link}, will check this page for ToS")
-                    try:
-                        # Visit the privacy policy page to find ToS link there
-                        privacy_response = session.get(privacy_link, headers=headers, timeout=15)
-                        privacy_soup = BeautifulSoup(privacy_response.text, 'html.parser')
-                        
-                        # Now look for terms links in the privacy page
-                        terms_from_privacy = find_tos_link(privacy_link, privacy_soup)
-                        
-                        if terms_from_privacy:
-                            # Make it absolute if needed
-                            if terms_from_privacy.startswith('/'):
-                                parsed_privacy_url = urlparse(privacy_link)
-                                base_url = f"{parsed_privacy_url.scheme}://{parsed_privacy_url.netloc}"
-                                terms_from_privacy = urljoin(base_url, terms_from_privacy)
-                            
-                            # Verify this ToS link
-                            if verify_tos_link(session, terms_from_privacy, headers):
-                                logger.info(f"Verified ToS link from privacy page: {terms_from_privacy}")
-                                return TosResponse(
-                                    url=final_url,
-                                    tos_url=terms_from_privacy,
-                success=True,
-                                    message=f"Verified Terms of Service link found via privacy policy page from: {final_url}",
-                                    method_used="privacy_page_to_terms_verified"
-                                )
-                            else:
-                                logger.warning(f"ToS link from privacy page failed verification: {terms_from_privacy}")
-                    except Exception as e:
-                        logger.error(f"Error finding ToS via privacy page: {str(e)}")
                     
         except requests.RequestException as e:
             logger.error(f"RequestException for {url} ({variation_type}): {str(e)}")
+            # If this variation fails, try the next one
             continue
         except Exception as e:
             logger.error(f"Exception for {url} ({variation_type}): {str(e)}")
+            # For non-request exceptions, try the next one
             continue
     
-    # If we get here and have collected potential links, check them in order
-    if all_potential_tos_links:
-        logger.info(f"Checking {len(all_potential_tos_links)} potential ToS links")
-        # Check any links that were classified as potential "learn" links
-        for tos_link, final_url, variation_type, reason in all_potential_tos_links:
-            # For each potential link, try to determine if it's a valid terms by looking at its content
-            try:
-                logger.info(f"Double-checking potential ToS link: {tos_link}")
-                link_response = session.get(tos_link, headers=headers, timeout=15)
-                link_soup = BeautifulSoup(link_response.text, 'html.parser')
-                
-                # Check page title and headers for terms-related keywords
-                title = link_soup.find('title')
-                title_text = title.get_text().lower() if title else ""
-                
-                h1_elements = link_soup.find_all('h1')
-                h1_texts = [h1.get_text().lower() for h1 in h1_elements]
-                
-                # If the page has terms-related keywords in title or headings
-                terms_keywords = ['terms', 'conditions', 'tos', 'terms of service', 'terms of use', 'legal', 'agreement']
-                
-                if any(keyword in title_text for keyword in terms_keywords) or any(any(keyword in h1 for keyword in terms_keywords) for h1 in h1_texts):
-                    logger.info(f"Verified ToS link based on page content: {tos_link}")
-                    return TosResponse(
-                        url=final_url,
-                        tos_url=tos_link,
-                success=True,
-                        message=f"Terms of Service link verified by content analysis: {tos_link}",
-                        method_used="content_verification"
-                    )
-            except Exception as e:
-                logger.error(f"Error verifying potential ToS link {tos_link}: {str(e)}")
-    
-    # Try one more fallback - look for terms in the footer of the main page
+    # If we get here, we tried all variations but didn't find a ToS link
     try:
-        original_url = variations_to_try[0][0]
-        response = session.get(original_url, headers=headers, timeout=15)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Try one more time with the original URL for a better error message
+        base_url = variations_to_try[0][0]  # Original URL
+        head_response = session.head(base_url, headers=headers, timeout=10, allow_redirects=True)
+        final_url = head_response.url
         
-        # Look specifically for footer links with terms-related text
-        footer_elements = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower() if c else False))
-        footer_elements += soup.find_all(['footer', 'div'], id=lambda i: i and ('footer' in i.lower() if i else False))
+        response = session.get(final_url, headers=headers, timeout=15)
+        response.raise_for_status()
         
-        for footer in footer_elements:
-            for link in footer.find_all('a', href=True):
-                href = link.get('href', '').strip()
-                if not href:
-                    continue
-                    
-                link_text = link.get_text().lower().strip()
-                if any(term in link_text for term in ['terms', 'conditions', 'legal']):
-                    # This looks like a terms link in the footer
-                    absolute_url = urljoin(original_url, href)
-                    logger.info(f"Found potential terms link in footer: {absolute_url}")
-                    
-                    # Skip learn pages and other likely false positives
-                    if '/learn' in absolute_url.lower() or is_likely_false_positive(absolute_url, 'tos'):
-                        continue
-                    
-                    # Verify this footer ToS link
-                    if verify_tos_link(session, absolute_url, headers):
-                        logger.info(f"Verified terms link from footer: {absolute_url}")
-                        return TosResponse(
-                            url=original_url,
-                            tos_url=absolute_url,
-                            success=True,
-                            message=f"Verified Terms of Service link found in footer: {absolute_url}",
-                            method_used="footer_search_verified"
-                        )
-                    else:
-                        logger.warning(f"Footer terms link failed verification: {absolute_url}")
-        
-        # Try to extract provider platform information
-        site_host = urlparse(original_url).netloc.lower()
-        platform_info = detect_site_platform(soup, original_url)
-        
-        if platform_info:
-            platform_name, platform_domain = platform_info
-            logger.info(f"Detected site platform: {platform_name} ({platform_domain})")
-            
-            # If the site is using a platform, try the platform's legal pages
-            if platform_domain and platform_domain != site_host:
-                # First try direct access to the main ToS page - this is most reliable
-                primary_tos_url = f"https://{platform_domain}/legal/terms"
-                try:
-                    primary_tos_response = session.get(primary_tos_url, headers=headers, timeout=15)
-                    if primary_tos_response.status_code == 200:
-                        # Check if this is actually a ToS page
-                        if verify_tos_link(session, primary_tos_url, headers):
-                            logger.info(f"Found primary ToS link for platform: {primary_tos_url}")
-                            return TosResponse(
-                                url=original_url,
-                                tos_url=primary_tos_url,
-                                success=True,
-                                message=f"Terms of Service found via platform ({platform_name}): {primary_tos_url}",
-                                method_used="platform_primary_tos"
-                            )
-                except Exception as e:
-                    logger.error(f"Error checking primary ToS URL: {str(e)}")
-                
-                # Then try the legal hub page to find other ToS links
-                platform_legal = f"https://{platform_domain}/legal"
-                try:
-                    platform_response = session.get(platform_legal, headers=headers, timeout=15)
-                    if platform_response.status_code == 200:
-                        platform_soup = BeautifulSoup(platform_response.text, 'html.parser')
-                        platform_links = platform_soup.find_all('a', href=True)
-                        
-                        # Prioritize links by importance
-                        primary_terms_links = []
-                        secondary_terms_links = []
-                        
-                        for link in platform_links:
-                            href = link.get('href', '').strip()
-                            if not href:
-                                continue
-                                
-                            link_text = link.get_text().lower().strip()
-                            absolute_url = urljoin(platform_legal, href)
-                            
-                            # Skip non-terms links
-                            if not any(term in link_text for term in ['terms', 'conditions']):
-                                continue
-                                
-                            # Categorize by importance
-                            href_lower = absolute_url.lower()
-                            
-                            # Primary ToS links - general Terms of Service/Use
-                            if (('/terms' in href_lower or '/tos' in href_lower) and 
-                                not any(specific in href_lower for specific in 
-                                       ['/event-', '/partner-', '/enterprise-', '/services-', '/specific-'])):
-                                primary_terms_links.append((absolute_url, link_text))
-                            # Secondary ToS links - specific terms
-                            else:
-                                secondary_terms_links.append((absolute_url, link_text))
-                        
-                        # First check primary links
-                        for absolute_url, link_text in primary_terms_links:
-                            logger.info(f"Checking primary terms link: {absolute_url}")
-                            if verify_tos_link(session, absolute_url, headers):
-                                return TosResponse(
-                                    url=original_url,
-                                    tos_url=absolute_url,
-                                    success=True,
-                                    message=f"Terms of Service found via platform ({platform_name}) legal page: {absolute_url}",
-                                    method_used="platform_legal_primary"
-                                )
-                        
-                        # Then check secondary links only if no primary links work
-                        for absolute_url, link_text in secondary_terms_links:
-                            logger.info(f"Checking secondary terms link: {absolute_url}")
-                            if verify_tos_link(session, absolute_url, headers):
-                                return TosResponse(
-                                    url=original_url,
-                                    tos_url=absolute_url,
-                                    success=True,
-                                    message=f"Specific Terms of Service found via platform ({platform_name}) legal page: {absolute_url}",
-                                    method_used="platform_legal_secondary"
-                                )
-                except Exception as e:
-                    logger.error(f"Error with platform legal fallback: {str(e)}")
-                    
-    except Exception as e:
-        logger.error(f"Error in footer fallback search: {str(e)}")
-    
-    return TosResponse(
-        url=variations_to_try[0][0],  # Use the original URL
+        return TosResponse(
+            url=final_url,  # Return the final URL after redirects
             success=False,
-        message="No Terms of Service link found with standard method",
-        method_used="standard_failed"
+            message=f"No Terms of Service link found with standard method on the final destination page: {final_url}.",
+            method_used="standard_failed"
+        )
+    except requests.RequestException as e:
+        error_msg = ""
+        
+        # Handle request errors with more specific messages
+        if hasattr(e, 'response') and e.response is not None:
+            status_code = e.response.status_code
+            if status_code == 404:
+                error_msg = f"The URL {base_url} returned a 404 Not Found error."
+            elif status_code == 403:
+                error_msg = f"Access to {base_url} was denied (HTTP 403 Forbidden). The site is likely blocking web scraping."
+            elif status_code == 401:
+                error_msg = f"Access to {base_url} requires authentication (HTTP 401 Unauthorized)."
+            elif status_code == 400:
+                error_msg = f"The server at {base_url} returned HTTP 400 Bad Request. This often happens when a site blocks scraping attempts or requires cookies/JavaScript."
+            elif status_code == 429:
+                error_msg = f"Too many requests to {base_url} (HTTP 429). The site is rate-limiting requests."
+            elif status_code >= 500:
+                error_msg = f"The server at {base_url} encountered an error (HTTP {status_code})."
+            else:
+                error_msg = f"Error fetching {base_url}: HTTP status code {status_code}."
+        else:
+            error_msg = f"Error connecting to {base_url}: {str(e)}"
+        
+        # Return the error in the response
+        return TosResponse(
+            url=base_url,
+            success=False,
+            message=error_msg,
+            method_used="standard_failed"
+        )
+    except Exception as e:
+        error_msg = f"Error processing URL {base_url} with standard method: {str(e)}"
+        
+        # Return the error in the response
+        return TosResponse(
+            url=base_url,
+            success=False,
+            message=error_msg,
+            method_used="standard_failed"
         )
 
 

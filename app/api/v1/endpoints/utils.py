@@ -3,6 +3,7 @@ import logging
 import re
 from bs4 import BeautifulSoup
 from typing import Optional, Tuple, List
+import inspect
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -688,4 +689,256 @@ def find_policy_by_class_id(soup: BeautifulSoup, policy_type: str = 'privacy') -
         # Return the highest-scoring candidate
         return candidates[0][0]
     
+    return None
+
+def find_policy_link_prioritized(url: str, soup: BeautifulSoup, policy_type: str = 'tos') -> Optional[str]:
+    """
+    Find policy links (ToS or Privacy Policy) in a prioritized order:
+    1. Check specific class/ID patterns first
+    2. Check footer elements
+    3. Check header elements
+    4. Check all links with policy-related text
+    
+    Args:
+        url: The URL of the page being searched
+        soup: BeautifulSoup object of the page
+        policy_type: Either 'tos' or 'privacy'
+        
+    Returns:
+        URL of the policy page if found, None otherwise
+    """
+    logger.info(f"Searching for {policy_type} link using prioritized approach")
+    
+    # Store information about how the link was found in the frame locals
+    # This will be used by the calling functions to determine method_used
+    method_info = ""
+    
+    # 1. First try the class/ID based approach (highest priority)
+    class_id_result = find_policy_by_class_id(soup, policy_type)
+    if class_id_result:
+        logger.info(f"Found {policy_type} link by class/ID: {class_id_result}")
+        method_info = "found_by_class_ID"
+        # Store method info in the caller's frame locals
+        try:
+            inspect.currentframe().f_back.f_locals['method_info'] = method_info
+        except:
+            pass
+        return class_id_result
+    
+    base_domain = urlparse(url).netloc.lower()
+    is_policy_page = is_on_policy_page(url, policy_type)
+    exact_patterns, strong_url_patterns = get_policy_patterns(policy_type)
+    
+    # Get current domain info for domain-matching rules
+    current_domain = urlparse(url).netloc.lower()
+    
+    # 2. Check footer elements second (very common location)
+    footer_candidates = []
+    footer_elements = soup.find_all(['footer', 'div'], class_=lambda c: c and ('footer' in c.lower() if c else False))
+    footer_elements += soup.find_all(['footer', 'div'], id=lambda i: i and ('footer' in i.lower() if i else False))
+    
+    for footer in footer_elements:
+        for link in footer.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                continue
+                
+            try:
+                absolute_url = urljoin(url, href)
+                
+                # Skip likely false positives
+                if is_likely_false_positive(absolute_url, policy_type):
+                    continue
+                
+                # Check if this is correct policy type
+                if not is_correct_policy_type(absolute_url, policy_type):
+                    continue
+                
+                link_text = ' '.join([
+                    link.get_text().strip(),
+                    link.get('title', '').strip(),
+                    absolute_url
+                ]).lower()
+                
+                score = get_policy_score(link_text, absolute_url, policy_type)
+                if score <= 0:
+                    continue
+                
+                domain_score = get_domain_score(absolute_url, base_domain)
+                if domain_score < 0:
+                    continue
+                
+                final_score = (score * 2.0) + (3.0 * 3.0) + (domain_score * 1.0)  # Higher footer score
+                
+                if final_score > 5.0:  # Lower threshold for footer
+                    footer_candidates.append((absolute_url, final_score))
+            except Exception as e:
+                logger.error(f"Error processing footer link: {e}")
+                continue
+    
+    if footer_candidates:
+        footer_candidates.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"Found {policy_type} link in footer: {footer_candidates[0][0]}")
+        method_info = "found_in_footer"
+        # Store method info in the caller's frame locals
+        try:
+            inspect.currentframe().f_back.f_locals['method_info'] = method_info
+        except:
+            pass
+        return footer_candidates[0][0]
+    
+    # 3. Check header elements third
+    header_candidates = []
+    header_elements = soup.find_all(['header', 'nav', 'div'], class_=lambda c: c and any(term in c.lower() for term in ['header', 'nav', 'menu', 'top']) if c else False)
+    header_elements += soup.find_all(['header', 'nav', 'div'], id=lambda i: i and any(term in i.lower() for term in ['header', 'nav', 'menu', 'top']) if i else False)
+    
+    for header in header_elements:
+        for link in header.find_all('a', href=True):
+            href = link.get('href', '').strip()
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                continue
+                
+            try:
+                absolute_url = urljoin(url, href)
+                
+                # Skip likely false positives
+                if is_likely_false_positive(absolute_url, policy_type):
+                    continue
+                
+                # Check if this is correct policy type
+                if not is_correct_policy_type(absolute_url, policy_type):
+                    continue
+                
+                link_text = ' '.join([
+                    link.get_text().strip(),
+                    link.get('title', '').strip(),
+                    absolute_url
+                ]).lower()
+                
+                score = get_policy_score(link_text, absolute_url, policy_type)
+                if score <= 0:
+                    continue
+                
+                domain_score = get_domain_score(absolute_url, base_domain)
+                if domain_score < 0:
+                    continue
+                
+                final_score = (score * 2.0) + (2.0 * 3.0) + (domain_score * 1.0)  # Slightly lower than footer
+                
+                if final_score > 6.0:  # Higher threshold for header
+                    header_candidates.append((absolute_url, final_score))
+            except Exception as e:
+                logger.error(f"Error processing header link: {e}")
+                continue
+    
+    if header_candidates:
+        header_candidates.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"Found {policy_type} link in header: {header_candidates[0][0]}")
+        method_info = "found_in_header"
+        # Store method info in the caller's frame locals
+        try:
+            inspect.currentframe().f_back.f_locals['method_info'] = method_info
+        except:
+            pass
+        return header_candidates[0][0]
+    
+    # 4. Finally, check all links with policy-related text
+    all_candidates = []
+    for link in soup.find_all('a', href=True):
+        href = link.get('href', '').strip()
+        if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+            continue
+            
+        try:
+            absolute_url = urljoin(url, href)
+            
+            # Skip likely false positives
+            if is_likely_false_positive(absolute_url, policy_type):
+                continue
+            
+            # Check if this is a different domain from the original site
+            target_domain = urlparse(absolute_url).netloc.lower()
+            base_domain = get_root_domain(current_domain)
+            target_base_domain = get_root_domain(target_domain)
+            
+            # For cross-domain links, apply strict checks
+            if target_base_domain != base_domain:
+                if policy_type == 'tos' and not any(term in absolute_url.lower() for term in ['/terms', '/tos', 'terms-of-service']):
+                    continue
+                elif policy_type == 'privacy' and not any(term in absolute_url.lower() for term in ['/privacy', 'privacy-policy']):
+                    continue
+            
+            # Ensure this is the correct policy type
+            if not is_correct_policy_type(absolute_url, policy_type):
+                continue
+            
+            link_text = ' '.join([
+                link.get_text().strip(),
+                link.get('title', '').strip(),
+                absolute_url
+            ]).lower()
+            
+            score = get_policy_score(link_text, absolute_url, policy_type)
+            
+            if score <= 0:
+                continue
+            
+            domain_score = get_domain_score(absolute_url, base_domain)
+            
+            if domain_score < 0:
+                continue
+            
+            href_domain = urlparse(absolute_url).netloc.lower()
+            
+            # Domain-specific scoring adjustments
+            if href_domain == current_domain:
+                # Strongly prefer same-domain links
+                score += 15.0
+            elif target_base_domain != base_domain:
+                # Apply penalty for cross-domain links
+                score -= 8.0
+                
+            if is_policy_page and href_domain != base_domain:
+                continue
+            
+            if any(re.search(pattern, link_text) for pattern in exact_patterns):
+                score += 6.0
+            
+            href_lower = absolute_url.lower()
+            if any(pattern in href_lower for pattern in strong_url_patterns):
+                score += 4.0
+            
+            for pattern, penalty in get_common_penalties():
+                if pattern in href_lower:
+                    score += penalty
+            
+            final_score = (score * 2.0) + (get_footer_score(link) * 3.0) + (domain_score * 1.0)
+            
+            threshold = 7.0  # Higher threshold for general links
+            
+            if final_score > threshold:
+                all_candidates.append((absolute_url, final_score))
+        
+        except Exception as e:
+            logger.error(f"Error processing link: {e}")
+            continue
+    
+    if all_candidates:
+        all_candidates.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"Found {policy_type} link in general scan: {all_candidates[0][0]}")
+        method_info = "found_in_general_scan"
+        # Store method info in the caller's frame locals
+        try:
+            inspect.currentframe().f_back.f_locals['method_info'] = method_info
+        except:
+            pass
+        return all_candidates[0][0]
+    
+    logger.info(f"No {policy_type} link found using any method")
+    method_info = "not_found"
+    # Store method info in the caller's frame locals
+    try:
+        inspect.currentframe().f_back.f_locals['method_info'] = method_info
+    except:
+        pass
     return None
