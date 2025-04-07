@@ -400,6 +400,29 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
         if any(term in text_lower for term in ['privacy policy', 'privacy notice', 'data protection']):
             logger.debug(f"Penalizing for privacy text patterns: {text_lower}")
             score -= 10.0
+        
+        # New: Apply stronger penalties for non-ToS legal pages
+        non_tos_indicators = [
+            'community guidelines', 'copyright', 'dmca', 'intellectual property',
+            'dsa', 'citation', 'referencing', 'attribution', 'guidelines',
+            'trademark', 'takedown'
+        ]
+        
+        for indicator in non_tos_indicators:
+            if indicator in text_lower:
+                score -= 20.0
+                logger.debug(f"Applying strong penalty for non-ToS legal page: {indicator} in {text_lower}")
+                break
+                
+        # New: Check URL for non-ToS indicators
+        url_non_tos_indicators = [
+            'community-guidelines', 'community_guidelines', 'communityguidelines',
+            'copyright', 'dmca', 'ip-policy', 'dsa', 'citation'
+        ]
+        
+        if any(indicator in url_lower for indicator in url_non_tos_indicators):
+            score -= 25.0
+            logger.debug(f"Applying strong URL-based penalty for non-ToS page: {url}")
     
     # Handle combined policies - less specific but still valid
     combined_patterns = [
@@ -451,6 +474,21 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
         matches = sum(1 for pattern in strong_terms_matches if pattern in text_lower)
         score += (matches * 5.0)
         
+        # New: Add MUCH stronger bonus for exact ToS matches to outweigh other legal pages
+        exact_tos_matches = [
+            'terms of service', 'terms of use', 'terms and conditions', 
+            'user agreement', 'service agreement', 'general terms'
+        ]
+        
+        if any(exact_match in text_lower for exact_match in exact_tos_matches):
+            score += 30.0
+            logger.debug(f"Applying strong bonus for exact ToS text match: {text_lower}")
+        
+        # Check for explicit "terms" in text and URL for maximum confidence
+        if ('terms' in text_lower or 'tos' in text_lower) and ('/terms' in url_lower or '/tos' in url_lower):
+            score += 20.0
+            logger.debug(f"Applying strong bonus for 'terms' in both text and URL: {text_lower}, {url_lower}")
+            
         # Additional bonus for explicit matches
         if any(exact in text_lower for exact in ['terms of service', 'terms of use', 'terms and conditions', 'conditions of use']):
             score += 8.0
@@ -477,6 +515,15 @@ def get_policy_score(text: str, url: str, policy_type: str) -> float:
                       'conditions-of-use', 'condition-of-use']
         url_matches = sum(1 for pattern in url_patterns if pattern in url_lower)
         score += (url_matches * 3.0)
+        
+        # New: Give much stronger boost to URLs that are most likely ToS
+        strong_tos_urls = [
+            '/terms-of-service', '/terms-of-use', '/terms-and-conditions',
+            '/tos.html', '/terms.html', '/terms/', '/tos/', '/general-terms/'
+        ]
+        if any(pattern in url_lower for pattern in strong_tos_urls):
+            score += 25.0
+            logger.debug(f"Applying strong bonus for clear ToS URL pattern: {url_lower}")
     
     # Additional URL pattern scoring
     if re.search(r'/(?:legal|policies)/(?:privacy|data)', url_lower):
@@ -519,6 +566,25 @@ def is_likely_false_positive(url: str, policy_type: str) -> bool:
     
     for domain in common_false_positives:
         if domain in url_lower:
+            return True
+    
+    # Strong indicators of non-ToS pages that should be rejected
+    if policy_type == 'tos':
+        non_tos_indicators = [
+            'community-guidelines', 'community_guidelines', 'communityguidelines',
+            'copyright', 'dmca', 'intellectual-property', 'ip-policy',
+            'dsa', 'citation', 'referencing', 'attribution',
+            'right', '/faq/', '/help/', '/support/'
+        ]
+        
+        if any(indicator in url_lower for indicator in non_tos_indicators) and not (
+            '/terms' in url_lower or 
+            '/tos' in url_lower or 
+            'terms-of-service' in url_lower or 
+            'terms-of-use' in url_lower
+        ):
+            # If the URL contains one of these indicators but doesn't also have a strong
+            # ToS term, consider it a false positive
             return True
     
     # Check for "support policy" in privacy detection - this is a false positive
@@ -768,6 +834,24 @@ def find_policy_link_prioritized(url: str, soup: BeautifulSoup, policy_type: str
                 if domain_score < 0:
                     continue
                 
+                # Generic scoring adjustments for ToS links
+                if policy_type == 'tos':
+                    # Penalize links that are known to be not ToS related
+                    if any(term in absolute_url.lower() or term in link_text.lower() for term in 
+                           ['community-guidelines', 'copyright', 'dsa', 'right', 'citation']):
+                        score -= 15.0
+                        logger.info(f"Applying penalty to link that appears to be non-ToS content: {absolute_url}")
+                    
+                    # Boost actual terms links without domain-specific checks
+                    if ('terms' in link_text.lower() or 'terms' in absolute_url.lower()):
+                        score += 10.0
+                        logger.info(f"Boosting score for link that explicitly mentions terms: {absolute_url}")
+                        
+                        # Additional boost for stronger terms indicators in link text or URL
+                        if any(indicator in link_text.lower() or indicator in absolute_url.lower() for indicator in 
+                              ['terms of service', 'terms-of-service', 'terms and conditions', 'terms-and-conditions']):
+                            score += 5.0
+                
                 final_score = (score * 2.0) + (3.0 * 3.0) + (domain_score * 1.0)  # Higher footer score
                 
                 if final_score > 5.0:  # Lower threshold for footer
@@ -822,6 +906,18 @@ def find_policy_link_prioritized(url: str, soup: BeautifulSoup, policy_type: str
                 domain_score = get_domain_score(absolute_url, base_domain)
                 if domain_score < 0:
                     continue
+                
+                # Apply the same generic scoring adjustments
+                if policy_type == 'tos':
+                    if any(term in absolute_url.lower() or term in link_text.lower() for term in 
+                           ['community-guidelines', 'copyright', 'dsa', 'right', 'citation']):
+                        score -= 15.0
+                    if ('terms' in link_text.lower() or 'terms' in absolute_url.lower()):
+                        score += 10.0
+                        # Additional boost for stronger terms indicators
+                        if any(indicator in link_text.lower() or indicator in absolute_url.lower() for indicator in 
+                              ['terms of service', 'terms-of-service', 'terms and conditions', 'terms-and-conditions']):
+                            score += 5.0
                 
                 final_score = (score * 2.0) + (2.0 * 3.0) + (domain_score * 1.0)  # Slightly lower than footer
                 
@@ -911,6 +1007,18 @@ def find_policy_link_prioritized(url: str, soup: BeautifulSoup, policy_type: str
             for pattern, penalty in get_common_penalties():
                 if pattern in href_lower:
                     score += penalty
+            
+            # Apply the same generic scoring adjustments
+            if policy_type == 'tos':
+                if any(term in absolute_url.lower() or term in link_text.lower() for term in 
+                       ['community-guidelines', 'copyright', 'dsa', 'right', 'citation']):
+                    score -= 15.0
+                if ('terms' in link_text.lower() or 'terms' in absolute_url.lower()):
+                    score += 10.0
+                    # Additional boost for stronger terms indicators
+                    if any(indicator in link_text.lower() or indicator in absolute_url.lower() for indicator in 
+                          ['terms of service', 'terms-of-service', 'terms and conditions', 'terms-and-conditions']):
+                        score += 5.0
             
             final_score = (score * 2.0) + (get_footer_score(link) * 3.0) + (domain_score * 1.0)
             

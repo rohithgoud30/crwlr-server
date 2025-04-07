@@ -148,9 +148,9 @@ def verify_tos_link(session: requests.Session, tos_link: str, headers: dict) -> 
                 if not any(specific in title_text for specific in non_primary_patterns):
                     logger.info(f"Verified primary ToS link by title: {tos_link}")
                     return True
-                else:
-                    logger.info(f"Verified specific ToS link by title: {tos_link}")
-                    # For specific ToS pages, continue checking to see if there's a better general ToS
+                
+                logger.info(f"Verified specific ToS link by title: {tos_link}")
+                # For specific ToS pages, continue checking to see if there's a better general ToS
             
             # Check for terms-related keywords in title
             if any(keyword in title_text for keyword in ['terms', 'conditions', 'tos', 'legal', 'agreement']):
@@ -436,7 +436,7 @@ def detect_site_platform(soup: BeautifulSoup, url: str) -> Tuple[Optional[str], 
 
 
 @router.post("/tos", response_model=TosResponse, responses={
-    200: {"description": "Terms of Service found successfully"},
+        200: {"description": "Terms of Service found successfully"},
     404: {"description": "Terms of Service not found", "model": TosResponse}
 })
 async def find_tos(request: TosRequest, response: Response) -> TosResponse:
@@ -495,24 +495,27 @@ async def find_tos(request: TosRequest, response: Response) -> TosResponse:
     
     logger.info(f"URL variations to try: {variations_with_types}")
     
+    # New approach: Try Playwright first for ALL sites to ensure consistent handling
+    # This helps with sites like Scribbr that need full JavaScript rendering
+    logger.info(f"Starting with Playwright for better detection on all sites")
+    playwright_result = await playwright_tos_finder(original_url)
+    if playwright_result.success:
+        logger.info(f"Found ToS link with Playwright first attempt: {playwright_result.tos_url}")
+        return playwright_result
+    
+    # If Playwright fails, try standard method as fallback
+    logger.info(f"Playwright didn't find ToS, trying standard method")
     standard_result = await standard_tos_finder(variations_with_types, headers, session)
     if standard_result.success:
         logger.info(f"Found ToS link with standard method: {standard_result.tos_url}")
         return standard_result
-    
-    logger.info(f"Standard method failed for {original_url}, trying with Playwright")
-    playwright_result = await playwright_tos_finder(original_url)
-    
-    if playwright_result.success:
-        logger.info(f"Found ToS link with Playwright: {playwright_result.tos_url}")
-        return playwright_result
     
     logger.info(f"No ToS link found for {original_url} with any method")
     response.status_code = 404
     return TosResponse(
         url=original_url,
         success=False,
-        message="No Terms of Service link found. Tried both standard scraping and JavaScript-enabled browser rendering.",
+        message="No Terms of Service link found. Tried both JavaScript-enabled browser rendering and standard scraping.",
         method_used="both_failed"
     )
 
@@ -622,7 +625,7 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                         if candidate_parsed.netloc == "www.apple.com":
                             logger.warning(f"Skipping Apple's domain for candidate ToS URL: {candidate_tos_url} - we only want app-specific terms")
                             continue
-                            
+
                         tos_check_response = session.get(candidate_tos_url, headers=headers, timeout=15)
                         if tos_check_response.status_code == 200:
                             if verify_tos_link(session, candidate_tos_url, headers):
@@ -707,7 +710,6 @@ async def handle_app_store_tos(url: str, headers: dict) -> TosResponse:
                 
                 except Exception as e:
                     logger.error(f"Error fetching privacy page: {str(e)}")
-            
         except Exception as e:
             logger.error(f"Error in App Store ToS detection: {str(e)}")
             
@@ -902,7 +904,6 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
                                         message=f"Terms of Service found via app's privacy policy page for {app_info}",
                                         method_used="play_store_pp_to_tos"
                                     )
-                
                 except Exception as e:
                     logger.error(f"Error fetching privacy page: {str(e)}")
             
@@ -977,7 +978,11 @@ async def handle_play_store_tos(url: str, headers: dict) -> TosResponse:
 async def playwright_tos_finder(url: str) -> TosResponse:
     """
     Find Terms of Service links using Playwright for JavaScript-rendered content.
-    This is a fallback method for when the standard approach fails.
+    This function will:
+    1. Render the page with JavaScript
+    2. Look for ToS links in headers, footers and general content
+    3. Score and verify candidates by following links and checking content
+    4. Return the best verified ToS link
     """
     try:
         async with async_playwright() as p:
@@ -986,81 +991,347 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
             )
-            
+
             page = await context.new_page()
             page.set_default_timeout(45000)  # 45 seconds
-            
+
             try:
+                logger.info(f"Loading page with Playwright: {url}")
                 await page.goto(url, wait_until="networkidle", timeout=60000)
                 final_url = page.url
-                content = await page.content()
-                soup = BeautifulSoup(content, 'html.parser')
-                tos_link = find_tos_link(final_url, soup)
-                
-                if not tos_link:
-                    # Try to find and click buttons that might reveal ToS content
-                    consent_buttons = await page.query_selector_all('button:text-matches("(accept|agree|got it|cookie|consent)", "i")')
+                logger.info(f"Page loaded: {final_url}")
+
+                # Try to handle cookie consent or popup banners that might be blocking content
+                try:
+                    consent_buttons = await page.query_selector_all('button:text-matches("(accept|agree|got it|cookie|consent|allow)", "i")')
                     for button in consent_buttons:
                         try:
                             await button.click()
                             await page.wait_for_timeout(1000)
-                            content_after_click = await page.content()
-                            soup_after_click = BeautifulSoup(content_after_click, 'html.parser')
-                            tos_link = find_tos_link(final_url, soup_after_click)
-                            if tos_link:
+                        except Exception as e:
+                            logger.debug(f"Could not click consent button: {str(e)}")
+                except Exception as e:
+                    logger.debug(f"Error handling consent buttons: {str(e)}")
+                
+                # List to store all potential ToS candidates for comparison
+                tos_candidates = []
+                
+                # First check: scan the initial page content for ToS links
+                logger.info("Scanning initial page content for ToS links")
+                content = await page.content()
+                soup = BeautifulSoup(content, 'html.parser')
+                initial_tos_link = find_tos_link(final_url, soup)
+                
+                if initial_tos_link:
+                    # Calculate a confidence score for this link
+                    if not is_likely_false_positive(initial_tos_link, 'tos'):
+                        # Get the link text for scoring
+                        link_text = ""
+                        for link in soup.find_all('a', href=True):
+                            href = link.get('href', '').strip()
+                            if href and urljoin(final_url, href) == initial_tos_link:
+                                link_text = link.get_text().strip()
                                 break
-                        except Exception:
+                                
+                        score = get_policy_score(link_text, initial_tos_link, 'tos')
+                        tos_candidates.append((initial_tos_link, score, "initial_scan"))
+                        logger.info(f"Found initial ToS candidate: {initial_tos_link} with score {score}")
+                
+                # Second check: scroll to the bottom of the page to reveal footer content
+                logger.info("Scrolling to the bottom of the page to reveal potential footer links")
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(2000)  # Wait for any lazy-loaded content
+                
+                # Get updated content after scrolling
+                content_after_scroll = await page.content()
+                soup_after_scroll = BeautifulSoup(content_after_scroll, 'html.parser')
+                scroll_tos_link = find_tos_link(final_url, soup_after_scroll)
+                
+                if scroll_tos_link and scroll_tos_link != initial_tos_link:
+                    # Calculate a confidence score for this link
+                    if not is_likely_false_positive(scroll_tos_link, 'tos'):
+                        # Get the link text for scoring
+                        link_text = ""
+                        for link in soup_after_scroll.find_all('a', href=True):
+                            href = link.get('href', '').strip()
+                            if href and urljoin(final_url, href) == scroll_tos_link:
+                                link_text = link.get_text().strip()
+                                break
+                                
+                        # Give a small boost to footer links
+                        score = get_policy_score(link_text, scroll_tos_link, 'tos') + 5.0
+                        tos_candidates.append((scroll_tos_link, score, "scroll_scan"))
+                        logger.info(f"Found additional ToS candidate after scrolling: {scroll_tos_link} with score {score}")
+                
+                # Look for potential ToS-related links directly
+                logger.info("Looking for potential ToS-related links")
+                
+                # Define patterns for ToS detection
+                potential_tos_indicators = [
+                    "terms", "tos", "conditions", "legal", "agreement", "general terms"
+                ]
+                
+                # First locate links in footer areas - these are more likely to contain ToS
+                footer_selectors = [
+                    'footer', 
+                    'div[class*="footer"]', 'div[id*="footer"]',
+                    'div[class*="bottom"]', 'div[id*="bottom"]',
+                    'div[class*="legal"]', 'div[id*="legal"]'
+                ]
+                
+                # Try each footer selector
+                for selector in footer_selectors:
+                    footer_elements = await page.query_selector_all(selector)
+                    for footer in footer_elements:
+                        footer_links = await footer.query_selector_all('a')
+                        for link in footer_links:
+                            try:
+                                # Get the text and href of the link
+                                link_text = await link.text_content()
+                                href = await link.get_attribute('href')
+                                
+                                if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                                    continue
+
+                                link_text_lower = link_text.lower().strip()
+                                
+                                # Check if the link might be a ToS link
+                                if any(indicator in link_text_lower for indicator in potential_tos_indicators) and not any(
+                                    non_tos in link_text_lower for non_tos in ['community', 'copyright', 'guidelines', 'citation']
+                                ):
+                                    try:
+                                        absolute_url = urljoin(final_url, href)
+                                        
+                                        # Skip if already in our candidates list
+                                        if any(candidate[0] == absolute_url for candidate in tos_candidates):
+                                            continue
+
+                                        # Check if this is likely to be a real ToS link
+                                        if is_likely_false_positive(absolute_url, 'tos'):
+                                            continue
+                                            
+                                        # Calculate score based on text and URL
+                                        score = get_policy_score(link_text, absolute_url, 'tos') + 10.0  # Boost for footer links
+                                        tos_candidates.append((absolute_url, score, "footer_link"))
+                                        logger.info(f"Found potential ToS link in footer: {link_text} ({absolute_url}) with score {score}")
+                                    except Exception as e:
+                                        logger.debug(f"Error processing footer link {href}: {str(e)}")
+                            except Exception as e:
+                                logger.debug(f"Error with footer link: {str(e)}")
+
+                # Get all links on the page as a fallback
+                all_links = await page.query_selector_all('a')
+                
+                for link in all_links:
+                    try:
+                        # Get the text and href of the link
+                        link_text = await link.text_content()
+                        href = await link.get_attribute('href')
+                        
+                        if not href or href.startswith(('javascript:', 'mailto:', 'tel:', '#')):
+                            continue
+                        
+                        link_text_lower = link_text.lower().strip()
+                        absolute_url = urljoin(final_url, href)
+                        
+                        # Skip if already in our candidates list
+                        if any(candidate[0] == absolute_url for candidate in tos_candidates):
                             continue
 
-                # Process the results after browser interaction
-                if tos_link:
-                    # Additional check for false positives
-                    if is_likely_false_positive(tos_link, 'tos'):
-                        logger.warning(f"Found link {tos_link} appears to be a false positive, skipping")
-                        await browser.close()
-                        return TosResponse(
-                            url=final_url,
-                            success=False,
-                            message=f"Found ToS link was a false positive: {tos_link}",
-                            method_used="playwright_false_positive"
-                        )
-                        
-                    # Check if this is a correct policy type
-                    if not is_correct_policy_type(tos_link, 'tos'):
-                        logger.warning(f"Found link {tos_link} appears to be a privacy policy, not ToS")
-                        await browser.close()
-                        return TosResponse(
-                            url=final_url,
-                            success=False,
-                            message=f"Found link appears to be a privacy policy, not Terms of Service: {tos_link}",
-                            method_used="playwright_wrong_policy_type"
-                        )
-                        
-                    # Ensure the link is absolute
-                    if tos_link.startswith('/'):
-                        parsed_final_url = urlparse(final_url)
-                        base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
-                        tos_link = urljoin(base_url, tos_link)
-                        logger.info(f"Converted relative URL to absolute URL: {tos_link}")
+                        # Check if the link might be a ToS link - use more strict criteria for general links
+                        if any(indicator == link_text_lower.strip() for indicator in ["terms", "terms of service", "terms of use"]):
+                            if not is_likely_false_positive(absolute_url, 'tos'):
+                                # Higher score for exact matches
+                                score = get_policy_score(link_text, absolute_url, 'tos') + 15.0
+                                tos_candidates.append((absolute_url, score, "exact_match"))
+                                logger.info(f"Found exact ToS link match: {link_text} ({absolute_url}) with score {score}")
+                                
+                        # For links with terms mentioned but not exact match, check with lower score
+                        elif ('terms' in link_text_lower or 'tos' in link_text_lower) and not any(
+                            non_tos in link_text_lower for non_tos in ['community', 'copyright', 'guidelines']
+                        ):
+                            if not is_likely_false_positive(absolute_url, 'tos'):
+                                score = get_policy_score(link_text, absolute_url, 'tos')
+                                tos_candidates.append((absolute_url, score, "potential_match"))
+                                logger.info(f"Found potential ToS link: {link_text} ({absolute_url}) with score {score}")
+                    except Exception as e:
+                        logger.debug(f"Error processing link: {str(e)}")
+                
+                # If we have candidates, sort by score and verify them
+                if tos_candidates:
+                    tos_candidates.sort(key=lambda x: x[1], reverse=True)
+                    logger.info(f"Found {len(tos_candidates)} ToS candidates, best is: {tos_candidates[0][0]} with score {tos_candidates[0][1]}")
                     
-                    await browser.close()
-                    return TosResponse(
-                        url=final_url,
-                        tos_url=tos_link,
-                        success=True,
-                        message=f"Terms of Service link found using JavaScript-enabled browser rendering on page: {final_url}",
-                        method_used="playwright"
-                    )
+                    # Verify content of top candidates by following links
+                    verified_candidates = []
+                    
+                    # Try to verify the top 3 candidates (or fewer if we don't have that many)
+                    for i in range(min(3, len(tos_candidates))):
+                        candidate_url = tos_candidates[i][0]
+                        candidate_score = tos_candidates[i][1]
+                        method_info = tos_candidates[i][2]
+                        
+                        logger.info(f"Verifying candidate {i+1}: {candidate_url}")
+                        
+                        try:
+                            # Create a new page to visit the candidate URL
+                            verification_page = await context.new_page()
+                            await verification_page.goto(candidate_url, wait_until="networkidle", timeout=30000)
+                            
+                            # Get the page content
+                            verify_content = await verification_page.content()
+                            verify_soup = BeautifulSoup(verify_content, 'html.parser')
+                            
+                            # Check page content for ToS indicators
+                            title_elem = verify_soup.find('title')
+                            h1_elems = verify_soup.find_all('h1')
+                            h2_elems = verify_soup.find_all('h2')
+                            paragraphs = verify_soup.find_all('p')
+                            
+                            title_text = title_elem.get_text().lower() if title_elem else ""
+                            h1_texts = [h.get_text().lower() for h in h1_elems]
+                            h2_texts = [h.get_text().lower() for h in h2_elems]
+                            para_texts = [p.get_text().lower() for p in paragraphs[:10]]  # Check first 10 paragraphs
+                            
+                            # Define strong indicators of ToS content
+                            tos_indicators = [
+                                "terms of service", "terms of use", "terms and conditions",
+                                "user agreement", "legal terms", "conditions of use"
+                            ]
+                            
+                            # Define non-ToS indicators that suggest a false positive
+                            non_tos_indicators = [
+                                "community guidelines", "copyright", "citation", 
+                                "guidelines", "trademark"
+                            ]
+                            
+                            # Calculate a verification score based on page content
+                            verification_score = 0
+                            
+                            # Check title
+                            if any(indicator in title_text for indicator in tos_indicators):
+                                verification_score += 30
+                                logger.info(f"Found ToS indicator in title: {title_text}")
+                            elif any(indicator in title_text for indicator in non_tos_indicators):
+                                verification_score -= 20
+                                logger.info(f"Found non-ToS indicator in title: {title_text}")
+                                
+                            # Check h1 elements (strongest signal)
+                            for h1 in h1_texts:
+                                if any(indicator in h1 for indicator in tos_indicators):
+                                    verification_score += 50
+                                    logger.info(f"Found ToS indicator in h1: {h1}")
+                                    break
+                                elif any(indicator in h1 for indicator in non_tos_indicators):
+                                    verification_score -= 30
+                                    logger.info(f"Found non-ToS indicator in h1: {h1}")
+                                    
+                            # Check h2 elements
+                            for h2 in h2_texts:
+                                if any(indicator in h2 for indicator in tos_indicators):
+                                    verification_score += 30
+                                    logger.info(f"Found ToS indicator in h2: {h2}")
+                                    break
+                                elif any(indicator in h2 for indicator in non_tos_indicators):
+                                    verification_score -= 20
+                                    logger.info(f"Found non-ToS indicator in h2: {h2}")
+                            
+                            # Check paragraphs
+                            tos_paragraph_count = 0
+                            for para in para_texts:
+                                if any(indicator in para for indicator in tos_indicators):
+                                    tos_paragraph_count += 1
+                            
+                            if tos_paragraph_count >= 2:
+                                verification_score += 40
+                                logger.info(f"Found multiple ToS paragraphs: {tos_paragraph_count}")
+                            elif tos_paragraph_count == 1:
+                                verification_score += 20
+                                logger.info(f"Found one ToS paragraph")
+                                
+                            # Check URL patterns
+                            url_lower = candidate_url.lower()
+                            if any(pattern in url_lower for pattern in ['/terms', '/tos', 'terms-of-service', 'terms-of-use']):
+                                verification_score += 25
+                                logger.info(f"URL pattern indicates ToS: {url_lower}")
+                                
+                            # Final decision
+                            logger.info(f"Verification score for {candidate_url}: {verification_score}")
+                            if verification_score >= 30:  # Threshold for acceptance
+                                # Combine original score with verification score
+                                final_score = candidate_score + (verification_score / 10)  # Scale verification score
+                                verified_candidates.append((candidate_url, final_score, method_info))
+                                logger.info(f"Verified {candidate_url} as ToS with final score {final_score}")
+                            else:
+                                logger.info(f"Rejected {candidate_url} as ToS with low verification score {verification_score}")
+                                
+                            # Close the verification page
+                            await verification_page.close()
+                            
+                        except Exception as e:
+                            logger.warning(f"Error verifying candidate {candidate_url}: {str(e)}")
+                            try:
+                                await verification_page.close()
+                            except:
+                                pass
+                    
+                    # After verification, choose the best verified candidate
+                    if verified_candidates:
+                        verified_candidates.sort(key=lambda x: x[1], reverse=True)
+                        best_candidate = verified_candidates[0][0]
+                        method_info = verified_candidates[0][2]
+                        logger.info(f"Best verified ToS link: {best_candidate}")
+                        
+                        # Ensure the link is absolute
+                        if best_candidate.startswith('/'):
+                            parsed_final_url = urlparse(final_url)
+                            base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
+                            best_candidate = urljoin(base_url, best_candidate)
+                            logger.info(f"Converted relative URL to absolute URL: {best_candidate}")
+                        
+                        await browser.close()
+                        return TosResponse(
+                            url=final_url,
+                            tos_url=best_candidate,
+                            success=True,
+                            message=f"Terms of Service link found and verified using JavaScript-enabled browser rendering.",
+                            method_used=f"playwright_verified_{method_info}"
+                        )
+                    else:
+                        # If no candidates were verified, fall back to the highest scoring candidate
+                        tos_link = tos_candidates[0][0]
+                        method_info = tos_candidates[0][2]
+                        
+                        # Ensure the link is absolute
+                        if tos_link.startswith('/'):
+                            parsed_final_url = urlparse(final_url)
+                            base_url = f"{parsed_final_url.scheme}://{parsed_final_url.netloc}"
+                            tos_link = urljoin(base_url, tos_link)
+                            logger.info(f"Converted relative URL to absolute URL: {tos_link}")
+                        
+                        await browser.close()
+                        return TosResponse(
+                            url=final_url,
+                            tos_url=tos_link,
+                            success=True,
+                            message=f"Terms of Service link found using JavaScript-enabled browser rendering (not verified).",
+                            method_used=f"playwright_{method_info}"
+                        )
                 else:
+                    logger.info(f"No ToS candidates found for {url}")
                     await browser.close()
                     return TosResponse(
                         url=final_url,
                         success=False,
-                        message=f"No Terms of Service link found even with JavaScript-enabled browser rendering on page: {final_url}",
+                        message=f"No Terms of Service link found even with JavaScript-enabled browser rendering.",
                         method_used="playwright_failed"
                     )
             except Exception as e:
-                await browser.close()
+                try:
+                    await browser.close()
+                except:
+                    pass
+                
                 if "Timeout" in str(e) or "timeout" in str(e).lower():
                     return TosResponse(
                         url=url,
@@ -1082,7 +1353,6 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                         message=f"Error using Playwright to process URL {url}: {str(e)}",
                         method_used="playwright_failed"
                     )
-                    
     except Exception as e:
         error_msg = f"Error using Playwright to process URL {url}: {str(e)}"
         logger.error(error_msg)
@@ -1092,5 +1362,3 @@ async def playwright_tos_finder(url: str) -> TosResponse:
             message=error_msg,
             method_used="playwright_failed"
         )
-
-# Rest of the file stays the same
