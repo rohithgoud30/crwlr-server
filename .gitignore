@@ -63,4 +63,13 @@ docker-compose.yml
 
 # Nginx
 nginx/
-nginx.conf 
+nginx.conf
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*~
+
+# Clean script
+clean.py 
