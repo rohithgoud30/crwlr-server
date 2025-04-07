@@ -1,10 +1,8 @@
-from fastapi import APIRouter, Response, HTTPException
+from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 import httpx
-import json
 import logging
-import os
 import re
 from app.core.config import settings
 
