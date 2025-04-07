@@ -1,5 +1,7 @@
 # Python
 __pycache__/
+*/__pycache__/
+*/**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -57,4 +59,8 @@ logs/
 # Docker
 Dockerfile
 docker-compose.yml
-*.dockerignore 
+*.dockerignore
+
+# Nginx
+nginx/
+nginx.conf 

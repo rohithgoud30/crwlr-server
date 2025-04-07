@@ -10,9 +10,9 @@ import asyncio
 from playwright.async_api import async_playwright
 import logging
 from .utils import (
-    normalize_url, 
+    normalize_url,
     prepare_url_variations, 
-    get_footer_score, 
+    get_footer_score,
     get_domain_score, 
     get_common_penalties, 
     is_on_policy_page,
@@ -113,7 +113,7 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                 if not any(term in url_lower for term in ['/terms', '/tos', '/legal/terms']):
                     logger.warning(f"Skipping cross-domain non-terms URL: {absolute_url}")
                     continue
-                
+                    
             # Ensure this is not a Privacy URL
             if not is_correct_policy_type(absolute_url, 'tos'):
                 continue
@@ -136,8 +136,8 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
                     continue
                 
             if len(link_text.strip()) < 3:
-                continue
-    
+                    continue
+                    
             score = 0.0
             footer_score = get_footer_score(link)
             domain_score = get_domain_score(absolute_url, base_domain)
@@ -159,7 +159,7 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
             
             if is_legal_page and href_domain != base_domain:
                 continue
-            
+                
             if any(re.search(pattern, link_text) for pattern in exact_patterns):
                 score += 6.0
             
@@ -202,7 +202,7 @@ def find_tos_link(url: str, soup: BeautifulSoup) -> Optional[str]:
         except Exception as e:
             logger.error(f"Error processing link: {e}")
             continue
-    
+                
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
         logger.info(f"Sorted ToS candidates: {candidates}")
@@ -484,7 +484,7 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
                                 return TosResponse(
                                     url=final_url,
                                     tos_url=terms_from_privacy,
-                                    success=True,
+                success=True,
                                     message=f"Verified Terms of Service link found via privacy policy page from: {final_url}",
                                     method_used="privacy_page_to_terms_verified"
                                 )
@@ -526,7 +526,7 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
                     return TosResponse(
                         url=final_url,
                         tos_url=tos_link,
-                        success=True,
+                success=True,
                         message=f"Terms of Service link verified by content analysis: {tos_link}",
                         method_used="content_verification"
                     )
@@ -667,10 +667,10 @@ async def standard_tos_finder(variations_to_try: List[Tuple[str, str]], headers:
     
     return TosResponse(
         url=variations_to_try[0][0],  # Use the original URL
-        success=False,
+            success=False,
         message="No Terms of Service link found with standard method",
         method_used="standard_failed"
-    )
+        )
 
 
 def detect_site_platform(soup: BeautifulSoup, url: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1307,15 +1307,15 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                             tos_link = find_tos_link(final_url, soup_after_click)
                             if tos_link:
                                 break
-                        except:
+                        except Exception:
                             continue
-                
-                await browser.close()
-                
+
+                # Process the results after browser interaction
                 if tos_link:
                     # Additional check for false positives
                     if is_likely_false_positive(tos_link, 'tos'):
                         logger.warning(f"Found link {tos_link} appears to be a false positive, skipping")
+                        await browser.close()
                         return TosResponse(
                             url=final_url,
                             success=False,
@@ -1326,6 +1326,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                     # Check if this is a correct policy type
                     if not is_correct_policy_type(tos_link, 'tos'):
                         logger.warning(f"Found link {tos_link} appears to be a privacy policy, not ToS")
+                        await browser.close()
                         return TosResponse(
                             url=final_url,
                             success=False,
@@ -1340,6 +1341,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                         tos_link = urljoin(base_url, tos_link)
                         logger.info(f"Converted relative URL to absolute URL: {tos_link}")
                     
+                    await browser.close()
                     return TosResponse(
                         url=final_url,
                         tos_url=tos_link,
@@ -1348,13 +1350,13 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                         method_used="playwright"
                     )
                 else:
+                    await browser.close()
                     return TosResponse(
                         url=final_url,
                         success=False,
                         message=f"No Terms of Service link found even with JavaScript-enabled browser rendering on page: {final_url}",
                         method_used="playwright_failed"
                     )
-            
             except Exception as e:
                 await browser.close()
                 if "Timeout" in str(e) or "timeout" in str(e).lower():
@@ -1378,7 +1380,7 @@ async def playwright_tos_finder(url: str) -> TosResponse:
                         message=f"Error using Playwright to process URL {url}: {str(e)}",
                         method_used="playwright_failed"
                     )
-    
+                    
     except Exception as e:
         error_msg = f"Error using Playwright to process URL {url}: {str(e)}"
         logger.error(error_msg)
