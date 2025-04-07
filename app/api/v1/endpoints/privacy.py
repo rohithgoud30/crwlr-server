@@ -848,8 +848,8 @@ def find_privacy_link(url: str, soup: BeautifulSoup) -> Optional[str]:
     
             # Check if this is a different domain from the original site
             target_domain = urlparse(absolute_url).netloc.lower()
-            base_domain = get_base_domain(current_domain)
-            target_base_domain = get_base_domain(target_domain)
+            base_domain = get_root_domain(current_domain)
+            target_base_domain = get_root_domain(target_domain)
             
             if target_base_domain != base_domain:
                 # For cross-domain links, require explicit privacy references

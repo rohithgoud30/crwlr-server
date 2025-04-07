@@ -45,10 +45,16 @@ ENV/
 .vscode/
 *.swp
 *.swo
+.cursor/
 
 # OS specific
 .DS_Store
 
 # Project specific
 logs/
-.pytest_cache/ 
+.pytest_cache/
+
+# Docker
+Dockerfile
+docker-compose.yml
+*.dockerignore 
