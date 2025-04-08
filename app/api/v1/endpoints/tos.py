@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 class TermsRequest(BaseModel):
     """Request model for Terms of Service detection endpoints"""
     url: str
-    use_advanced_detection: Optional[bool] = True
     
     @validator('url')
     def validate_url(cls, v):
@@ -89,7 +88,7 @@ async def find_terms_of_service(request: TermsRequest) -> TermsResponse:
     - Content verification
     
     Args:
-        request (TermsRequest): Request body containing the URL to search and options
+        request (TermsRequest): Request body containing the URL to search
         
     Returns:
         TermsResponse: Response containing the Terms URL or error message
@@ -99,7 +98,7 @@ async def find_terms_of_service(request: TermsRequest) -> TermsResponse:
     
     try:
         # URL is already normalized in the validator
-        return await detect_terms_url(request.url, request.use_advanced_detection)
+        return await detect_terms_url(request.url)
     except ValueError as e:
         # Handle validation errors
         return TermsResponse(
@@ -568,7 +567,7 @@ async def verify_final_link(page: Page, context: BrowserContext) -> Optional[str
     
     return None
 
-async def detect_terms_url(url: str, use_advanced_detection: bool = True) -> TermsResponse:
+async def detect_terms_url(url: str) -> TermsResponse:
     """Main function to detect Terms of Service URL using enhanced techniques"""
     browser = None
     
@@ -630,7 +629,7 @@ async def detect_terms_url(url: str, use_advanced_detection: bool = True) -> Ter
             method_used = "javascript_detection"
             
             # If no link found, try with matching link patterns
-            if not visited_url and use_advanced_detection:
+            if not visited_url:
                 logger.info("No links found with JavaScript. Trying matching link patterns...")
                 visited_url, final_page = await find_matching_link(page, context)
                 method_used = "pattern_matching"
