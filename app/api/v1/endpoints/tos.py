@@ -122,12 +122,12 @@ async def find_matching_link(page: Page, context: BrowserContext) -> Tuple[Optio
             
             # Set up event handlers for navigation
             try:
-                page_promise = context.wait_for_event('page', timeout=1000)
+                page_promise = context.wait_for_event('page', timeout=500)
             except:
                 page_promise = None
                 
             try:
-                nav_promise = page.wait_for_navigation(timeout=2000)
+                nav_promise = page.wait_for_navigation(timeout=1000)
             except:
                 nav_promise = None
             
@@ -135,7 +135,7 @@ async def find_matching_link(page: Page, context: BrowserContext) -> Tuple[Optio
             await element.click()
             
             # Check for URL change first
-            await page.wait_for_timeout(300)
+            await page.wait_for_timeout(200)
             if page.url != starting_url:
                 return page.url, page
             
@@ -144,7 +144,7 @@ async def find_matching_link(page: Page, context: BrowserContext) -> Tuple[Optio
                 if page_promise:
                     try:
                         new_page = await page_promise
-                        await new_page.wait_for_load_state('domcontentloaded')
+                        await new_page.wait_for_load_state('domcontentloaded', timeout=1500)
                         return new_page.url, new_page
                     except Exception as e:
                         page_promise = None
@@ -164,7 +164,7 @@ async def find_matching_link(page: Page, context: BrowserContext) -> Tuple[Optio
                 nav_promise = None
             
             # Final URL check
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(300)
             if page.url != starting_url:
                 return page.url, page
                 
@@ -301,7 +301,7 @@ async def find_all_links_js(page: Page, context: BrowserContext) -> Tuple[Option
                 # Try direct navigation for absolute URLs
                 if 'absoluteHref' in link and link['absoluteHref'] and link['absoluteHref'].startswith('http'):
                     try:
-                        await page.goto(link['absoluteHref'], timeout=3000, wait_until='domcontentloaded')
+                        await page.goto(link['absoluteHref'], timeout=2000, wait_until='domcontentloaded')
                         
                         # Check for Cloudflare challenge
                         is_challenge = await page.evaluate("""() => {
@@ -339,12 +339,12 @@ async def find_all_links_js(page: Page, context: BrowserContext) -> Tuple[Option
                     
                     # Handle navigation
                     try:
-                        page_promise = context.wait_for_event('page', timeout=1000)
+                        page_promise = context.wait_for_event('page', timeout=500)
                     except:
                         page_promise = None
                         
                     try:
-                        nav_promise = page.wait_for_navigation(timeout=2000)
+                        nav_promise = page.wait_for_navigation(timeout=1000)
                     except:
                         nav_promise = None
                     
@@ -358,10 +358,10 @@ async def find_all_links_js(page: Page, context: BrowserContext) -> Tuple[Option
                             await element.click()
                     except Exception:
                         if 'absoluteHref' in link and link['absoluteHref']:
-                            await page.goto(link['absoluteHref'], timeout=3000)
+                            await page.goto(link['absoluteHref'], timeout=2000)
                     
                     # Check for URL change
-                    await page.wait_for_timeout(300)
+                    await page.wait_for_timeout(200)
                     if page.url != starting_url:
                         return page.url, page
                     
@@ -384,14 +384,14 @@ async def find_all_links_js(page: Page, context: BrowserContext) -> Tuple[Option
                             pass
                     
                     # Final URL check
-                    await page.wait_for_timeout(500)
+                    await page.wait_for_timeout(300)
                     if page.url != starting_url:
                         return page.url, page
                     
                     # Last resort: direct navigation
                     if 'absoluteHref' in link and link['absoluteHref']:
                         try:
-                            await page.goto(link['absoluteHref'], timeout=3000)
+                            await page.goto(link['absoluteHref'], timeout=2000)
                             return page.url, page
                         except:
                             pass
@@ -508,12 +508,12 @@ async def verify_final_link(page: Page, context: BrowserContext) -> Optional[str
             # Resolve URL if relative
             href = top_link['href']
             if not href.startswith('http'):
-                if href.startswith('/'):
+                if href.startsWith('/'):
                     base_url = '/'.join(page.url.split('/')[:3])
                     href = base_url + href
                 else:
                     base_url = page.url.split('?')[0].split('#')[0]
-                    if base_url.endswith('/'):
+                    if base_url.endsWith('/'):
                         href = base_url + href
                     else:
                         href = base_url + '/' + href
@@ -528,7 +528,7 @@ async def verify_final_link(page: Page, context: BrowserContext) -> Optional[str
             
             # Check the link content
             logger.info(f"Checking potential final terms link: {href}")
-            await page.goto(href, timeout=5000)
+            await page.goto(href, timeout=3000)
             
             # Verify content quality
             is_better = await page.evaluate("""() => {
@@ -585,14 +585,23 @@ async def detect_terms_url(url: str, use_advanced_detection: bool = True) -> Ter
     
     try:
         async with async_playwright() as p:
+            # Launch with faster timeouts
             browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
+            context = await browser.new_context(
+                viewport={'width': 1280, 'height': 720},
+                java_script_enabled=True
+            )
+            
+            # Set default timeout for all operations
+            context.set_default_timeout(5000)  # 5 seconds default timeout
+            
             page = await context.new_page()
 
             logger.info(f"Navigating to URL: {url}")
             
             try:
-                await page.goto(url, wait_until='domcontentloaded', timeout=10000)
+                # Faster navigation timeout and wait only for domcontentloaded
+                await page.goto(url, wait_until='domcontentloaded', timeout=5000)
             except Exception as e:
                 logger.error(f"Failed to navigate to URL: {str(e)}")
                 return TermsResponse(
@@ -602,7 +611,8 @@ async def detect_terms_url(url: str, use_advanced_detection: bool = True) -> Ter
                     method_used="navigation_error"
                 )
                 
-            await page.wait_for_timeout(2000)  # Wait for dynamic content
+            # Shorter wait for dynamic content
+            await page.wait_for_timeout(1000)
             
             # Check for Cloudflare challenge
             if await is_cloudflare_challenge(page):
