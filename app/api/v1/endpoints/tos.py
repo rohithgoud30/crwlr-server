@@ -2,10 +2,10 @@ from typing import Optional, Tuple, Dict, Any, List
 import re
 import logging
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, validator
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 import asyncio
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 router = APIRouter()
 
@@ -17,6 +17,16 @@ class TermsRequest(BaseModel):
     """Request model for Terms of Service detection endpoints"""
     url: str
     use_advanced_detection: Optional[bool] = True
+    
+    @validator('url')
+    def validate_url(cls, v):
+        """Validate and normalize URL"""
+        if not v:
+            raise ValueError("URL cannot be empty")
+        
+        # Normalize URL
+        v = normalize_url(v)
+        return v
 
 class TermsResponse(BaseModel):
     """Response model for Terms of Service detection endpoints"""
@@ -32,6 +42,39 @@ STRONG_TERMS_MATCHES = [
     'conditions of use', 'condition of use', 'user agreement',
     'terms', 'tos', 'eula', 'legal terms'
 ]
+
+def normalize_url(url: str) -> str:
+    """
+    Normalize URLs to ensure they're properly formatted.
+    
+    Args:
+        url: The URL to normalize
+        
+    Returns:
+        Normalized URL with proper scheme
+    """
+    url = url.strip()
+    
+    # Add scheme if missing
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    
+    # Parse and reconstruct to handle other normalization
+    try:
+        parsed = urlparse(url)
+        
+        # Remove trailing slash from netloc if present in the path
+        if parsed.path == '/' and url.endswith('/'):
+            url = url[:-1]
+        
+        # Validate that we have a valid netloc/domain
+        if not parsed.netloc:
+            raise ValueError("Invalid URL: missing domain")
+    
+    except Exception as e:
+        logger.warning(f"URL normalization warning: {e}")
+    
+    return url
 
 @router.post("/terms-finder", response_model=TermsResponse)
 async def find_terms_of_service(request: TermsRequest) -> TermsResponse:
@@ -53,8 +96,18 @@ async def find_terms_of_service(request: TermsRequest) -> TermsResponse:
     """
     if not request.url:
         raise HTTPException(status_code=400, detail="URL is required")
-        
-    return await detect_terms_url(request.url, request.use_advanced_detection)
+    
+    try:
+        # URL is already normalized in the validator
+        return await detect_terms_url(request.url, request.use_advanced_detection)
+    except ValueError as e:
+        # Handle validation errors
+        return TermsResponse(
+            url=request.url,
+            success=False,
+            message=f"Invalid URL: {str(e)}",
+            method_used="validation_error"
+        )
 
 async def find_matching_link(page: Page, context: BrowserContext) -> Tuple[Optional[str], Page]:
     """Find a link matching ToS patterns and click it"""
@@ -518,6 +571,18 @@ async def verify_final_link(page: Page, context: BrowserContext) -> Optional[str
 async def detect_terms_url(url: str, use_advanced_detection: bool = True) -> TermsResponse:
     """Main function to detect Terms of Service URL using enhanced techniques"""
     browser = None
+    
+    # Normalize URL if not already done
+    try:
+        url = normalize_url(url)
+    except ValueError as e:
+        return TermsResponse(
+            url=url,
+            success=False,
+            message=f"Invalid URL: {str(e)}",
+            method_used="validation_error"
+        )
+    
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -527,7 +592,7 @@ async def detect_terms_url(url: str, use_advanced_detection: bool = True) -> Ter
             logger.info(f"Navigating to URL: {url}")
             
             try:
-                await page.goto(url, wait_until='domcontentloaded')
+                await page.goto(url, wait_until='domcontentloaded', timeout=10000)
             except Exception as e:
                 logger.error(f"Failed to navigate to URL: {str(e)}")
                 return TermsResponse(
@@ -612,4 +677,4 @@ async def detect_terms_url(url: str, use_advanced_detection: bool = True) -> Ter
         )
     finally:
         if browser:
-            await browser.close() 
+            await browser.close()
