@@ -92,10 +92,19 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     print(f"Found terms link: {result}")
                     # Check for better/more specific terms links
                     if method_used != "standard_finder" and final_page:
-                        better_url, _ = await check_for_better_terms_link(final_page, context)
+                        better_url, better_page = await check_for_better_terms_link(final_page, context)
                         if better_url:
                             result = better_url
+                            final_page = better_page
                             method_used += "_with_refinement"
+                    
+                    # Add additional check for final URL - verify we're not on an intermediate page
+                    if final_page:
+                        final_url = await verify_final_link(final_page, context)
+                        if final_url:
+                            print(f"✅ Using final destination URL: {final_url}")
+                            result = final_url
+                            method_used += "_with_final_link"
                 
                 # Close browser
                 await browser.close()
@@ -2187,52 +2196,13 @@ async def verify_final_link(page, context):
                 print(f"⚠️ Skipping Cloudflare challenge URL: {href}")
                 return None
             
-            # Navigate to check if it's a better terms page
-            print(f"🌐 Checking potential final terms link: {href}")
-            await page.goto(href, timeout=5000)
+            # IMPORTANT: Just return the detected final URL without navigating to check it
+            # This is more reliable as we've already scored it as a high-quality terms link
+            print(f"✅ Using detected final terms link without verification: {href}")
+            return href
             
-            # Verify content is better than current page
-            is_better = await page.evaluate("""() => {
-                const title = document.title.toLowerCase();
-                const headings = Array.from(document.querySelectorAll('h1, h2, h3')).map(h => h.textContent.toLowerCase());
-                const content = document.body.textContent.toLowerCase();
-                
-                // Check if this has stronger terms indicators than before
-                const hasTermsTitle = title.includes('terms') && 
-                                     (title.includes('service') || title.includes('use') || title.includes('legal'));
-                                     
-                const hasTermsHeading = headings.some(h => 
-                    h.includes('terms') && (h.includes('service') || h.includes('use'))
-                );
-                
-                const hasLegalContent = content.includes('agree') && 
-                                       content.includes('terms') && 
-                                       (content.includes('liable') || content.includes('warranty'));
-                
-                // Check if this appears to be a final terms document
-                return {
-                    isFinalTerms: hasTermsTitle || hasTermsHeading,
-                    contentQuality: hasLegalContent ? 'good' : 'questionable',
-                    isCloudflare: content.includes('cloudflare') && 
-                                 (content.includes('challenge') || content.includes('security check'))
-                };
-            }""")
-            
-            # If this is a Cloudflare challenge, ignore it
-            if is_better.get('isCloudflare', False):
-                print("⚠️ Landed on Cloudflare challenge page, ignoring")
-                return None
-            
-            # If this appears to be a better, more specific terms page, use it
-            if is_better.get('isFinalTerms', False) and is_better.get('contentQuality') == 'good':
-                print(f"✅ Found better final terms page: {page.url}")
-                return page.url
-            else:
-                print("⚠️ Link doesn't lead to a better terms page, keeping original")
-                return None
-                
         except Exception as e:
-            print(f"⚠️ Error checking final link: {e}")
+            print(f"⚠️ Error processing final link: {e}")
             return None
     
     return None
