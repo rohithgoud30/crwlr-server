@@ -53,7 +53,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 
                 # Try each method in sequence
                 # Method 1: JavaScript
-                print("Trying to find links using JavaScript method...")
+                print("Trying JavaScript method...")
                 visited_url, final_page = await find_all_links_js(page, context)
                 if visited_url:
                     result = visited_url
@@ -61,7 +61,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 
                 # Method 2: Scrolling
                 if not result:
-                    print("No links found with JavaScript. Trying scrolling method...")
+                    print("Trying scrolling method...")
                     visited_url, final_page = await smooth_scroll_and_click(page, context)
                     if visited_url:
                         result = visited_url
@@ -69,7 +69,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 
                 # Method 3: HTML parsing
                 if not result:
-                    print("All standard methods failed. Trying robust HTML parsing method...")
+                    print("Trying HTML parsing method...")
                     visited_url, final_page = await bs4_fallback_link_finder(page, context)
                     if visited_url:
                         result = visited_url
@@ -77,12 +77,12 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 
                 # Method 4: Standard finder
                 if not result:
-                    print("All dynamic methods failed. Trying standard HTML scraping method...")
+                    print("Trying standard HTML scraping method...")
                     terms_url, _ = await standard_terms_finder(url, headers=None)
                     if terms_url:
                         # Check if this is a Cloudflare URL before accepting it
                         if "cloudflare.com" in terms_url and any(param in terms_url for param in ["challenge", "utm_source=challenge"]):
-                            print(f"⚠️ Ignoring Cloudflare challenge URL: {terms_url}")
+                            print(f"Ignoring Cloudflare challenge URL")
                         else:
                             result = terms_url
                             method_used = "standard_finder"
@@ -102,7 +102,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     if final_page:
                         final_url = await verify_final_link(final_page, context)
                         if final_url:
-                            print(f"✅ Using final destination URL: {final_url}")
+                            print(f"Using final destination URL: {final_url}")
                             result = final_url
                             method_used += "_with_final_link"
                 
@@ -111,7 +111,6 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 browser = None
                 
         except Exception as e:
-            print(f"Error: {str(e)}")
             # Ensure browser is closed on error
             if browser:
                 await browser.close()
@@ -145,7 +144,7 @@ strong_terms_matches = [
 ]
 
 async def find_all_links_js(page, context):
-    print("🔍 Searching for all links using JavaScript...")
+    print("Searching for all links using JavaScript...")
     
     # Check for Cloudflare challenge page
     is_cloudflare = await page.evaluate("""() => {
@@ -158,7 +157,7 @@ async def find_all_links_js(page, context):
     }""")
     
     if is_cloudflare:
-        print("⚠️ Detected Cloudflare challenge page, cannot extract reliable links")
+        print("Detected Cloudflare challenge page, cannot extract reliable links")
         return None, page
     
     # Find all links using JS (this gets everything without scrolling)
@@ -271,28 +270,22 @@ async def find_all_links_js(page, context):
         return links;
     }""")
     
-    print(f"Found {len(links)} potential matching links via JavaScript")
+    print(f"Found {len(links)} potential matching links")
     
     if len(links) > 0:
         for link in links:
-            href_display = link['href'] if link['href'] else '(no href)'
-            abs_href_display = link['absoluteHref'] if 'absoluteHref' in link and link['absoluteHref'] else '(no absolute href)'
-            priority_display = link['priority'] if 'priority' in link else '(no priority)'
-            print(f"Potential link: {link['text']} → {href_display} (absolute: {abs_href_display}) [Priority: {priority_display}]")
-            
             try:
                 # Skip Cloudflare challenge links
                 if (('absoluteHref' in link and link['absoluteHref'] and 'cloudflare.com' in link['absoluteHref'] and 
                      ('challenge' in link['absoluteHref'] or 'utm_source=challenge' in link['absoluteHref'])) or
                     (link['href'] and 'cloudflare.com' in link['href'] and 
                      ('challenge' in link['href'] or 'utm_source=challenge' in link['href']))):
-                    print(f"⚠️ Skipping Cloudflare challenge URL: {abs_href_display}")
                     continue
                 
                 # Try direct navigation for absolute URLs (more reliable than clicking)
                 if 'absoluteHref' in link and link['absoluteHref'] and link['absoluteHref'].startswith('http'):
                     try:
-                        print(f"🌐 Navigating directly to: {link['absoluteHref']}")
+                        print(f"Navigating directly to: {link['absoluteHref']}")
                         # Use a shorter timeout for navigation
                         await page.goto(link['absoluteHref'], timeout=3000, wait_until='domcontentloaded')
                         
@@ -307,13 +300,13 @@ async def find_all_links_js(page, context):
                         }""")
                         
                         if is_cloudflare_challenge:
-                            print("⚠️ Landed on a Cloudflare challenge page, continuing search")
+                            print("Detected Cloudflare challenge page, continuing search")
                             continue
                         
-                        print(f"✅ Direct navigation successful to: {page.url}")
+                        print(f"Direct navigation successful to: {page.url}")
                         return page.url, page
                     except Exception as e:
-                        print(f"⚠️ Direct navigation failed: {e}")
+                        print(f"Direct navigation failed: {e}")
                         # Fall back to clicking
                 
                 # If direct navigation failed or wasn't attempted, try clicking
@@ -342,7 +335,7 @@ async def find_all_links_js(page, context):
                             element = await page.query_selector(f"text='{short_text}'")
                 
                 if element:
-                    print(f"🔗 Found link: '{link['text']}' — Clicking...")
+                    print(f"Found link: '{link['text']}' — Clicking...")
                     
                     # Store starting URL
                     starting_url = page.url
@@ -355,14 +348,12 @@ async def find_all_links_js(page, context):
                         # Much shorter timeout for new tab - just 1 second
                         page_promise = asyncio.create_task(context.wait_for_event('page', timeout=1000))
                     except Exception as e:
-                        print(f"Error setting up page event listener: {e}")
                         page_promise = None
                         
                     try:
                         # Set up navigation listener but with shorter timeout
                         nav_promise = asyncio.create_task(page.wait_for_navigation(timeout=2000))
                     except Exception as e:
-                        print(f"Error setting up navigation listener: {e}")
                         nav_promise = None
                     
                     # Click the element - use middle of the element
@@ -376,7 +367,6 @@ async def find_all_links_js(page, context):
                             # Fall back to regular click
                             await element.click()
                     except Exception as click_error:
-                        print(f"⚠️ Click failed, trying alternate methods: {click_error}")
                         try:
                             # Try JavaScript click as fallback
                             await page.evaluate("(element) => element.click()", element)
@@ -388,7 +378,7 @@ async def find_all_links_js(page, context):
                     # Check for URL change FIRST (fastest check)
                     await page.wait_for_timeout(300)  # Brief delay
                     if page.url != starting_url:
-                        print(f"✅ URL changed to: {page.url}")
+                        print(f"URL changed to: {page.url}")
                         return page.url, page
                     
                     # Then check for new page/tab
@@ -397,16 +387,14 @@ async def find_all_links_js(page, context):
                             try:
                                 new_page = await page_promise
                                 await new_page.wait_for_load_state('domcontentloaded')
-                                print(f"✅ New tab opened with URL: {new_page.url}")
+                                print(f"New tab opened with URL: {new_page.url}")
                                 return new_page.url, new_page
                             except Exception as e:
-                                print(f"No new tab opened within timeout: {e}")
                                 # Clean up
                                 if page_promise and not page_promise.done():
                                     page_promise.cancel()
                                 page_promise = None
                     except Exception as e:
-                        print(f"Error handling new tab: {e}")
                         if page_promise and not page_promise.done():
                             page_promise.cancel()
                         page_promise = None
@@ -417,16 +405,14 @@ async def find_all_links_js(page, context):
                             try:
                                 await nav_promise
                                 if page.url != starting_url:
-                                    print(f"✅ Page navigated to: {page.url}")
+                                    print(f"Page navigated to: {page.url}")
                                     return page.url, page
                             except Exception as e:
-                                print(f"Navigation didn't complete within timeout: {e}")
                                 # Clean up
                                 if nav_promise and not nav_promise.done():
                                     nav_promise.cancel()
                                 nav_promise = None
                     except Exception as e:
-                        print(f"Error handling navigation: {e}")
                         if nav_promise and not nav_promise.done():
                             nav_promise.cancel()
                         nav_promise = None
@@ -434,23 +420,20 @@ async def find_all_links_js(page, context):
                     # Final URL change check with slightly longer delay
                     await page.wait_for_timeout(500)
                     if page.url != starting_url:
-                        print(f"✅ URL changed to: {page.url}")
+                        print(f"URL changed to: {page.url}")
                         return page.url, page
                     
                     # As a very last resort, try direct navigation if we have absolute href
                     if 'absoluteHref' in link and link['absoluteHref'] and link['absoluteHref'].startswith('http'):
                         try:
-                            print(f"🌐 Last resort: Navigating directly to: {link['absoluteHref']}")
+                            print(f"Navigating directly to: {link['absoluteHref']}")
                             await page.goto(link['absoluteHref'], timeout=3000)
-                            print(f"✅ Direct navigation successful to: {page.url}")
+                            print(f"Navigation successful to: {page.url}")
                             return page.url, page
                         except:
                             pass
                     
-                    print("⚠️ No navigation detected after click")
-                    
             except Exception as e:
-                print(f"⚠️ Error with link: {e}")
                 continue
     
     return None, page
@@ -461,7 +444,7 @@ async def find_matching_link(page, context):
         pattern = re.compile(re.escape(keyword), re.IGNORECASE)
         element = await page.query_selector(f"text=/{pattern.pattern}/i")
         if element:
-            print(f"🔗 Found link matching: '{keyword}' — Clicking...")
+            print(f"Found link matching: '{keyword}' — Clicking...")
             
             # Store starting URL
             starting_url = page.url
@@ -490,7 +473,7 @@ async def find_matching_link(page, context):
             # Check for URL change FIRST (fastest check)
             await page.wait_for_timeout(300)  # Brief delay
             if page.url != starting_url:
-                print(f"✅ URL changed to: {page.url}")
+                print(f"URL changed to: {page.url}")
                 # Clean up any pending promises
                 if page_promise and not page_promise.done():
                     page_promise.cancel()
@@ -504,7 +487,7 @@ async def find_matching_link(page, context):
                     try:
                         new_page = await page_promise
                         await new_page.wait_for_load_state('domcontentloaded')
-                        print(f"✅ New tab opened with URL: {new_page.url}")
+                        print(f"New tab opened with URL: {new_page.url}")
                         # Clean up nav_promise if still active
                         if nav_promise and not nav_promise.done():
                             nav_promise.cancel()
@@ -527,7 +510,7 @@ async def find_matching_link(page, context):
                     try:
                         await nav_promise
                         if page.url != starting_url:
-                            print(f"✅ Page navigated to: {page.url}")
+                            print(f"Page navigated to: {page.url}")
                             return page.url, page
                     except Exception as e:
                         print(f"Navigation didn't complete within timeout: {e}")
@@ -544,15 +527,15 @@ async def find_matching_link(page, context):
             # Final URL change check with slightly longer delay
             await page.wait_for_timeout(500)
             if page.url != starting_url:
-                print(f"✅ URL changed to: {page.url}")
+                print(f"URL changed to: {page.url}")
                 return page.url, page
             
-            print("⚠️ No navigation detected after click")
+            print("No navigation detected after click")
                 
     return None, page
 
 async def smooth_scroll_and_click(page, context, step=150, delay=250):
-    print("🔃 Starting smooth scroll with strong term matching...")
+    print("Starting smooth scroll with strong term matching...")
     visited_url = None
     current_page = page
     
@@ -605,10 +588,10 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                         try:
                             element = await current_page.query_selector(f"a[href='{link['href']}']")
                             if element:
-                                print(f"🔗 Clicking on footer link: {link['text']}")
+                                print(f"Clicking on footer link: {link['text']}")
                                 await element.click()
                                 await current_page.wait_for_load_state('domcontentloaded')
-                                print(f"✅ Navigated to: {current_page.url}")
+                                print(f"Navigated to: {current_page.url}")
                                 return current_page.url, current_page
                         except Exception as e:
                             print(f"Error clicking footer link: {e}")
@@ -622,9 +605,9 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                                     else:
                                         href = current_page.url.split('?')[0] + '/' + href
                                 
-                                print(f"🌐 Direct navigation to: {href}")
+                                print(f"Direct navigation to: {href}")
                                 await current_page.goto(href, timeout=3000)
-                                print(f"✅ Navigated to: {current_page.url}")
+                                print(f"Navigated to: {current_page.url}")
                                 return current_page.url, current_page
                             except Exception as nav_error:
                                 print(f"Navigation error: {nav_error}")
@@ -661,7 +644,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                 try:
                     element = await current_page.query_selector(f"a[href='{link['href']}']")
                     if element:
-                        print(f"🔗 Clicking on term link: {link['text']}")
+                        print(f"Clicking on term link: {link['text']}")
                         
                         # Direct navigation is more reliable in many cases
                         href = link['href']
@@ -674,9 +657,9 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                             else:
                                 href = base_url + '/' + href
                         
-                        print(f"🌐 Direct navigation to: {href}")
+                        print(f"Direct navigation to: {href}")
                         await current_page.goto(href, timeout=3000)
-                        print(f"✅ Navigated to: {current_page.url}")
+                        print(f"Navigated to: {current_page.url}")
                         return current_page.url, current_page
                 except Exception as e:
                     print(f"Error with term link: {e}")
@@ -710,7 +693,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
         scroll_attempts += 1
 
         if reached_end:
-            print("✅ Reached the bottom of the page.")
+            print("Reached the bottom of the page.")
             
             # One final check with a longer wait time at the bottom
             await current_page.wait_for_timeout(1000)  # Wait longer to ensure everything loaded
@@ -721,7 +704,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
 
     # If still not found after scrolling, try a different approach with JavaScript
     if not visited_url:
-        print("⚠️ No link found through scrolling. Trying full-page scan...")
+        print("No link found through scrolling. Trying full-page scan...")
         
         # Execute JavaScript to find all links in the page, including those in the footer
         links = await current_page.evaluate("""() => {
@@ -763,16 +746,16 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
             try:
                 element = await current_page.query_selector(f"a[href='{link['href']}']")
                 if element:
-                    print(f"🔗 Clicking on footer link: {link['text']}")
+                    print(f"Clicking on footer link: {link['text']}")
                     await element.click()
                     await current_page.wait_for_load_state('domcontentloaded')
-                    print(f"✅ Navigated to: {current_page.url}")
+                    print(f"Navigated to: {current_page.url}")
                     return current_page.url, current_page
             except Exception as e:
                 print(f"Error clicking footer link: {e}")
     
     # Use content analysis to detect likely areas where terms links might appear
-    print("🔍 Using semantic content analysis to detect terms areas...")
+    print("Using semantic content analysis to detect terms areas...")
     try:
         # Look for semantic hints about where terms might be found
         semantic_hints = await current_page.evaluate("""() => {
@@ -877,7 +860,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                                 else:
                                     href = base_url + '/' + href
                             
-                            print(f"🌐 Direct navigation to potential terms page: {href}")
+                            print(f"Direct navigation to potential terms page: {href}")
                             response = await current_page.goto(href, timeout=3000)
                             
                             # Verify if this page looks like a terms page
@@ -912,10 +895,10 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                             }""")
                             
                             if is_terms_page:
-                                print(f"✅ Found terms page: {current_page.url}")
+                                print(f"Found terms page: {current_page.url}")
                                 return current_page.url, current_page
                             else:
-                                print("⚠️ Page doesn't appear to be a terms page, continuing search...")
+                                print("Page doesn't appear to be a terms page, continuing search...")
                                 # Navigate back for next attempt
                                 await current_page.goto(page.url, timeout=3000)
                     except Exception as e:
@@ -927,7 +910,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
         print(f"Content analysis error: {e}")
     
     # Final attempt: analyze document structure and try browser back functionality
-    print("🔍 Analyzing document structure to locate terms...")
+    print("Analyzing document structure to locate terms...")
     
     try:
         # Look for terms-related links in less common locations
@@ -1031,7 +1014,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                 # Skip Cloudflare challenge URLs
                 if (link['href'] and 'cloudflare.com' in link['href'] and 
                     ('challenge' in link['href'] or 'utm_source=challenge' in link['href'])):
-                    print(f"⚠️ Skipping Cloudflare challenge URL: {link['href']}")
+                    print(f"Skipping Cloudflare challenge URL: {link['href']}")
                     continue
                 
                 # Try direct navigation
@@ -1049,10 +1032,10 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                     # Check if this is likely a Cloudflare challenge URL before navigating
                     if ('cloudflare.com' in href and 
                         ('challenge' in href or 'utm_source=challenge' in href)):
-                        print(f"⚠️ Skipping Cloudflare challenge URL: {href}")
+                        print(f"Skipping Cloudflare challenge URL: {href}")
                         continue
                         
-                    print(f"🌐 Navigating to potential terms link: {href}")
+                    print(f"Navigating to potential terms link: {href}")
                     await current_page.goto(href, timeout=3000)
                     
                     # Check if we landed on a Cloudflare challenge page
@@ -1066,7 +1049,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                     }""")
                     
                     if is_challenge:
-                        print("⚠️ Landed on a Cloudflare challenge page, skipping")
+                        print("Detected Cloudflare challenge page, skipping")
                         return None
                     
                     # Verify if this looks like a terms page
@@ -1091,16 +1074,16 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                     
                     # Skip if it's a Cloudflare challenge
                     if is_terms.get('isCloudflareChallenge', False):
-                        print("⚠️ Detected Cloudflare challenge page, skipping")
+                        print("Detected Cloudflare challenge page, skipping")
                         return None
                     
                     # If this is likely a terms page, return it
                     if ((is_terms['hasTermsInTitle'] or is_terms['hasTermsInHeadings']) and 
                         is_terms['hasTermsContent'] and is_terms['textLength'] > 2000):
-                        print(f"✅ Confirmed terms page: {current_page.url}")
+                        print(f"Confirmed terms page: {current_page.url}")
                         return current_page.url, current_page
                     else:
-                        print("⚠️ Not a terms page, continuing search...")
+                        print("Not a terms page, continuing search...")
                         # Navigate back for next attempt
                         await current_page.goto(page.url, timeout=3000)
             except Exception as e:
@@ -1114,7 +1097,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
     except Exception as e:
         print(f"Document structure analysis error: {e}")
 
-    print("⚠️ Exhausted all dynamic methods. No terms link found.")
+    print("Exhausted all dynamic methods. No terms link found.")
     return visited_url, current_page
 
 async def check_for_better_terms_link(page, context):
@@ -1122,7 +1105,7 @@ async def check_for_better_terms_link(page, context):
     Check if the terms page has any additional terms links that might be more specific.
     Returns the new URL and page if found, otherwise returns None and the original page.
     """
-    print("🔍 Checking for more specific terms links on the terms page...")
+    print("Checking for more specific terms links on the terms page...")
     
     # Store the starting URL before navigation
     starting_url = page.url
@@ -1131,17 +1114,17 @@ async def check_for_better_terms_link(page, context):
     new_url, new_page = await find_all_links_js(page, context)
     
     if new_url and new_url != starting_url:
-        print(f"✅ Found better terms link: {new_url}")
+        print(f"Found better terms link: {new_url}")
         return new_url, new_page
     else:
-        print("ℹ️ No better terms link found, keeping current page")
+        print("No better terms link found, keeping current page")
         return None, page
 
 async def bs4_fallback_link_finder(page, context):
     """
     Use robust HTML parsing as a fallback method to find terms links
     """
-    print("🔄 Using robust HTML parsing to find terms links...")
+    print("Using robust HTML parsing to find terms links...")
     
     # Get the page HTML
     html_content = await page.content()
@@ -1157,7 +1140,7 @@ async def bs4_fallback_link_finder(page, context):
     }""", html_content)
     
     if is_cloudflare_challenge:
-        print("⚠️ Detected Cloudflare challenge page, cannot extract reliable links")
+        print("Detected Cloudflare challenge page, cannot extract reliable links")
         return None, page
     
     # Use more robust attribute-aware parsing to find links even with custom attributes
@@ -1286,7 +1269,7 @@ async def bs4_fallback_link_finder(page, context):
                 
             # Try direct navigation to this link
             if href:
-                print(f"🌐 Navigating directly to: {href}")
+                print(f"Navigating directly to: {href}")
                 try:
                     await page.goto(href, timeout=3000)
                     await page.wait_for_load_state('domcontentloaded')
@@ -1326,12 +1309,12 @@ async def bs4_fallback_link_finder(page, context):
                     }""")
                     
                     if terms_content:
-                        print(f"✅ Found terms content at: {page.url}")
+                        print(f"Found terms content at: {page.url}")
                         return page.url, page
                     else:
-                        print("ℹ️ Page doesn't appear to contain terms content")
+                        print("Page doesn't appear to contain terms content")
                 except Exception as e:
-                    print(f"⚠️ Navigation error: {e}")
+                    print(f"Navigation error: {e}")
         except Exception as e:
             print(f"Error processing link: {e}")
     
@@ -1355,7 +1338,7 @@ async def standard_terms_finder(url: str, headers: dict = None) -> tuple[str, No
     from urllib.parse import urlparse, urljoin
     import re
     
-    print("🔍 Using fully dynamic terms discovery algorithm...")
+    print("Using fully dynamic terms discovery algorithm...")
     
     # Create a session to maintain cookies across requests
     session = requests.Session()
@@ -1427,7 +1410,7 @@ async def standard_terms_finder(url: str, headers: dict = None) -> tuple[str, No
             
             # Check if this is a Cloudflare challenge page
             if is_cloudflare_challenge(soup, current_url):
-                print(f"⚠️ Detected Cloudflare challenge page at {current_url}, skipping this variation")
+                print(f"Detected Cloudflare challenge page at {current_url}, skipping this variation")
                 continue
                 
             # 1.1 SITE METADATA ANALYSIS
@@ -1886,16 +1869,16 @@ async def standard_terms_finder(url: str, headers: dict = None) -> tuple[str, No
             
             # If this is very likely a terms page, return it
             if total_score >= 100 or (content_score >= 50 and candidate['score'] >= 30):
-                print(f"✅ Found terms page: {response.url}")
+                print(f"Found terms page: {response.url}")
                 return response.url, None
             
             # If it's a promising candidate but not entirely sure, keep it as a backup
             if total_score >= 70:
-                print(f"📝 Found promising terms page candidate: {response.url}")
+                print(f"Found promising terms page candidate: {response.url}")
                 
                 # If this is the highest scoring candidate so far, return it
                 if candidate == candidates[0]:
-                    print(f"✅ Using highest scoring candidate as terms page: {response.url}")
+                    print(f"Using highest scoring candidate as terms page: {response.url}")
                     return response.url, None
         
         except Exception as e:
@@ -1904,11 +1887,11 @@ async def standard_terms_finder(url: str, headers: dict = None) -> tuple[str, No
     # If we found any reasonable candidates, return the best one
     if candidates and candidates[0]['score'] >= 40:
         best_url = candidates[0]['url']
-        print(f"✅ Using best available candidate as terms page: {best_url}")
+        print(f"Using best available candidate as terms page: {best_url}")
         return best_url, None
     
     # No good candidates found
-    print("❌ No suitable terms page found with dynamic discovery")
+    print("No suitable terms page found with dynamic discovery")
     return None, None
 
 async def main():
@@ -1946,17 +1929,17 @@ async def main():
                 if terms_url:
                     # Check if this is a Cloudflare URL before accepting it
                     if "cloudflare.com" in terms_url and any(param in terms_url for param in ["challenge", "utm_source=challenge"]):
-                        print(f"⚠️ Ignoring Cloudflare challenge URL: {terms_url}")
+                        print(f"Ignoring Cloudflare challenge URL: {terms_url}")
                         visited_url = None
                         final_page = page
                     else:
-                        print(f"✅ Found terms link with standard method: {terms_url}")
+                        print(f"Found terms link with standard method: {terms_url}")
                         visited_url = terms_url
                         # We don't have a page object, so just reuse the original
                         final_page = page
 
             if visited_url:
-                print(f"✅ Found initial terms link: {visited_url}")
+                print(f"Found initial terms link: {visited_url}")
                 initial_url = visited_url
                 initial_page = final_page
                 
@@ -1965,7 +1948,7 @@ async def main():
 
                 # Cloudflare check on the better URL as well
                 if better_url and "cloudflare.com" in better_url and any(param in better_url for param in ["challenge", "utm_source=challenge"]):
-                    print(f"⚠️ Ignoring Cloudflare challenge URL as better URL: {better_url}")
+                    print(f"Ignoring Cloudflare challenge URL as better URL: {better_url}")
                     better_url = None
                     better_page = initial_page
 
@@ -1974,17 +1957,17 @@ async def main():
                     # Use the better terms page as the final result
                     visited_url = better_url
                     final_page = better_page
-                    print(f"✅ SUCCESS! Final terms URL: {visited_url}")
+                    print(f"SUCCESS! Final terms URL: {visited_url}")
                 else:
                     # Keep the original terms page but be explicit
-                    print(f"✅ SUCCESS! Using initial terms URL: {initial_url}")
+                    print(f"SUCCESS! Using initial terms URL: {initial_url}")
                     visited_url = initial_url
                     final_page = initial_page
                 
                 # Add additional check for final URL - verify we're not on an intermediate page
                 final_check = await verify_final_link(final_page, context)
                 if final_check:
-                    print(f"✅ Verified final destination URL: {final_check}")
+                    print(f"Verified final destination URL: {final_check}")
                     visited_url = final_check
                 
                 # Get page title
@@ -2023,9 +2006,9 @@ async def main():
                     
                     print(f"📝 Content preview: {content_preview}")
                 except Exception as e:
-                    print(f"⚠️ Could not extract content preview: {e}")
+                    print(f"Could not extract content preview: {e}")
             else:
-                print("❌ No terms link was found or clicked with any method")
+                print("No terms link was found or clicked with any method")
             
             # Close browser always
             print("Closing browser...")
@@ -2046,7 +2029,7 @@ async def verify_final_link(page, context):
     Check if the current page contains links to more specific terms pages.
     This handles cases where the initial terms page is a hub/index that links to the actual terms.
     """
-    print("🔍 Verifying if this is the final Terms of Service destination...")
+    print("Verifying if this is the final Terms of Service destination...")
     
     # Look for links with strong indicators that they lead to more specific terms
     final_links = await page.evaluate("""() => {
@@ -2161,7 +2144,7 @@ async def verify_final_link(page, context):
     }""");
     
     if not final_links:
-        print("✅ Current page appears to be the final destination")
+        print("Current page appears to be the final destination")
         return None
     
     print(f"Found {len(final_links)} potential deeper terms links")
@@ -2188,21 +2171,21 @@ async def verify_final_link(page, context):
             
             # Skip if it's the same as current URL
             if href == page.url:
-                print("⚠️ Link points to current page, skipping")
+                print("Link points to current page, skipping")
                 return None
             
             # Skip if it's a Cloudflare challenge URL
             if 'cloudflare.com' in href and ('challenge' in href or 'utm_source=challenge' in href):
-                print(f"⚠️ Skipping Cloudflare challenge URL: {href}")
+                print(f"Skipping Cloudflare challenge URL: {href}")
                 return None
             
             # IMPORTANT: Just return the detected final URL without navigating to check it
             # This is more reliable as we've already scored it as a high-quality terms link
-            print(f"✅ Using detected final terms link without verification: {href}")
+            print(f"Using detected final terms link without verification: {href}")
             return href
             
         except Exception as e:
-            print(f"⚠️ Error processing final link: {e}")
+            print(f"Error processing final link: {e}")
             return None
     
     return None
