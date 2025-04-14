@@ -2,14 +2,25 @@ import asyncio
 import re
 import random
 import logging
+import sys
 from typing import Optional, Tuple, Dict, List, Any
 from urllib.parse import urlparse, urljoin
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PlaywrightTimeoutError
 
-from app.core.config import User_Agents
+# Define User_Agents directly in this file since it's not in config
+User_Agents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+]
+
 from app.models.tos import ToSRequest, ToSResponse
+import requests
+from bs4 import BeautifulSoup
 
 router = APIRouter()
 
@@ -133,14 +144,7 @@ async def setup_browser():
     """
     async with async_playwright() as p:
         # Use random user agent
-        user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-        ]
-        user_agent = random.choice(user_agents)
+        user_agent = random.choice(User_Agents)
         
         # Launch browser with optimized settings
         browser = await p.chromium.launch(
@@ -1059,8 +1063,8 @@ async def find_all_links_js(page, context, unverified_result=None):
                     ];
                     
                     return strongTermMatchers.some(term => text.includes(term));
-                }""")
-                
+                            }""")
+                            
                 if is_terms_page:
                     print("✅ Confirmed this is a terms page")
                     return best_link, page, unverified_result
@@ -1070,7 +1074,6 @@ async def find_all_links_js(page, context, unverified_result=None):
             except Exception as e:
                 print(f"Error navigating to terms page: {e}")
                 return None, page, unverified_result
-                
         return None, page, unverified_result
     except Exception as e:
         print(f"Error in find_all_links_js: {e}")
@@ -1194,7 +1197,7 @@ async def smooth_scroll_and_click(page, context, unverified_result=None, step=15
                                href.includes('conditions') ||
                                href.includes('tos');
                     }).map(link => ({
-                        text: link.textContent.trim(),
+                    text: link.textContent.trim(),
                         href: link.getAttribute('href')
                     }));
                 }""", selector)
@@ -1212,8 +1215,8 @@ async def smooth_scroll_and_click(page, context, unverified_result=None, step=15
                                     return current_page.url, current_page, unverified_result
                         except Exception as e:
                             print(f"Error clicking footer link: {e}")
-                            continue
-
+                    continue
+                
         # Scroll back up to check missed links
         print("Scrolling back up to check for missed links...")
         scroll_positions = [0.75, 0.5, 0.25, 0]
@@ -1288,7 +1291,7 @@ async def bs4_fallback_link_finder(page, context):
             print("Detected Cloudflare challenge page, cannot extract reliable links")
             return None, page
 
-        # Use more robust attribute-aware parsing to find links even with custom attributes
+        # Use robust regex-based parsing to find links
         terms_links = await page.evaluate("""(html) => {
             function extractLinks(html) {
                 const links = [];
@@ -1397,15 +1400,15 @@ async def bs4_fallback_link_finder(page, context):
 
                         const termsHeading = headings.some(h => {
                             const text = h.textContent.toLowerCase();
-                            return text.includes('terms') || 
-                                   text.includes('condition') || 
+                            return text.includes('terms') ||
+                                   text.includes('condition') ||
                                    text.includes('legal agreement') ||
                                    text.includes('service agreement');
                         });
 
                         const title = document.title.toLowerCase();
-                        const termsInTitle = title.includes('terms') || 
-                                             title.includes('tos') || 
+                        const termsInTitle = title.includes('terms') ||
+                                             title.includes('tos') ||
                                              title.includes('conditions');
 
                         const legalContent = paragraphs.slice(0, 5).some(p => {
@@ -1439,10 +1442,6 @@ async def bs4_fallback_link_finder(page, context):
         print(f"Error in bs4_fallback_link_finder: {e}")
         return None, page
 
-
-from typing import Optional
-from urllib.parse import urlparse, urljoin
-
 async def standard_terms_finder(url: str, headers: dict = None) -> tuple[Optional[str], None]:
     """
     Advanced dynamic approach to find Terms of Service links without hardcoded patterns.
@@ -1457,9 +1456,6 @@ async def standard_terms_finder(url: str, headers: dict = None) -> tuple[Optiona
         Tuple of (terms_url, None) or (None, None) if not found
     """
     try:
-        import requests
-        from bs4 import BeautifulSoup
-
         print("Using fully dynamic terms discovery algorithm...")
 
         # Create a session to maintain cookies across requests
@@ -1481,88 +1477,83 @@ async def standard_terms_finder(url: str, headers: dict = None) -> tuple[Optiona
         parsed = urlparse(url)
         base_domain = f"{parsed.scheme}://{parsed.netloc}"
 
-        try:
-            print(f"Analyzing site structure at {base_domain}...")
+        print(f"Analyzing site structure at {base_domain}...")
 
-            # Get the main page content
-            response = session.get(base_domain, headers=headers, timeout=15)
-            if response.status_code != 200:
-                print(f"Failed to access {base_domain}: Status {response.status_code}")
-                return None, None
-
-            # Parse HTML
-            soup = BeautifulSoup(response.text, 'html.parser')
-
-            # Look for footers (where terms are commonly found)
-            footer_sections = soup.select(
-                'footer, .footer, #footer, [class*="footer"], [id*="footer"], .legal, .bottom, [class*="bottom"]'
-            )
-
-            # Extract links from footers
-            candidates = []
-            for footer in footer_sections:
-                for link in footer.find_all('a', href=True):
-                    href = link.get('href')
-                    text = link.get_text().strip().lower()
-
-                    if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
-                        continue
-
-                    # Create absolute URL
-                    abs_url = href if href.startswith(('http://', 'https://')) else urljoin(base_domain, href)
-
-                    # Score the link
-                    score = 0
-                    signals = []
-
-                    # Text analysis
-                    if 'terms' in text:
-                        score += 30
-                        signals.append('terms_in_text')
-                    if 'service' in text and 'terms' in text:
-                        score += 20
-                        signals.append('service_in_text')
-                    if 'conditions' in text:
-                        score += 15
-                        signals.append('conditions_in_text')
-                    if 'legal' in text:
-                        score += 10
-                        signals.append('legal_in_text')
-
-                    # URL analysis
-                    if 'terms' in abs_url.lower():
-                        score += 20
-                        signals.append('terms_in_url')
-                    if 'tos' in abs_url.lower():
-                        score += 15
-                        signals.append('tos_in_url')
-                    if 'legal' in abs_url.lower():
-                        score += 10
-                        signals.append('legal_in_url')
-
-                    # Add to candidates if score is above threshold
-                    if score >= 20:
-                        candidates.append({
-                            'url': abs_url,
-                            'text': text,
-                            'score': score,
-                            'signals': signals
-                        })
-
-            # Sort by score
-            candidates.sort(key=lambda x: x['score'], reverse=True)
-
-            # Get the best candidate
-            if candidates:
-                best_candidate = candidates[0]['url']
-                best_score = candidates[0]['score']
-                return best_candidate, None
-
+        # Get the main page content
+        response = session.get(base_domain, headers=headers, timeout=15)
+        if response.status_code != 200:
+            print(f"Failed to access {base_domain}: Status {response.status_code}")
             return None, None
 
-        except Exception as e:
-            print(f"Error analyzing site: {str(e)}")
-            return None, None
+        # Parse HTML
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Look for footers (where terms are commonly found)
+        footer_sections = soup.select(
+            'footer, .footer, #footer, [class*="footer"], [id*="footer"], .legal, .bottom, [class*="bottom"]'
+        )
+
+        # Extract links from footers
+        candidates = []
+        for footer in footer_sections:
+            for link in footer.find_all('a', href=True):
+                href = link.get('href')
+                text = link.get_text().strip().lower()
+
+                if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
+                    continue
+
+                # Create absolute URL
+                abs_url = href if href.startswith(('http://', 'https://')) else urljoin(base_domain, href)
+
+                # Score the link
+                score = 0
+                signals = []
+
+                # Text analysis
+                if 'terms' in text:
+                    score += 30
+                    signals.append('terms_in_text')
+                if 'service' in text and 'terms' in text:
+                    score += 20
+                    signals.append('service_in_text')
+                if 'conditions' in text:
+                    score += 15
+                    signals.append('conditions_in_text')
+                if 'legal' in text:
+                    score += 10
+                    signals.append('legal_in_text')
+
+                # URL analysis
+                if 'terms' in abs_url.lower():
+                    score += 20
+                    signals.append('terms_in_url')
+                if 'tos' in abs_url.lower():
+                    score += 15
+                    signals.append('tos_in_url')
+                if 'legal' in abs_url.lower():
+                    score += 10
+                    signals.append('legal_in_url')
+
+                # Add to candidates if score is above threshold
+                if score >= 20:
+                    candidates.append({
+                        'url': abs_url,
+                        'text': text,
+                        'score': score,
+                        'signals': signals
+                    })
+
+        # Sort by score
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+
+        # Get the best candidate
+        if candidates:
+            best_candidate = candidates[0]['url']
+            best_score = candidates[0]['score']
+            return best_candidate, None
+
+        return None, None
 
     except Exception as e:
         print(f"Error in standard_terms_finder: {str(e)}")
@@ -1602,7 +1593,7 @@ async def check_for_better_terms_link(page, current_url):
         for link in links:
             if not link['href']:
                 continue
-                
+        
             # Skip links to external domains
             link_domain = urlparse(link['href']).netloc
             if not (link_domain == base_domain or 
@@ -1651,7 +1642,7 @@ async def check_for_better_terms_link(page, current_url):
         for link_url, score in scored_links:
             if score < 50:  # Only use high-confidence matches
                 continue
-                
+            
             print(f"Found potential deeper terms link with score {score}: {link_url}")
             
             try:
@@ -1670,6 +1661,7 @@ async def check_for_better_terms_link(page, current_url):
                         'terms and conditions',
                         'agree to these terms',
                         'by using this site',
+                        'by accessing this site',
                         'legally binding',
                         'liability',
                         'disclaimer',
@@ -1700,7 +1692,7 @@ async def check_for_better_terms_link(page, current_url):
             except Exception as e:
                 print(f"Navigation error checking link: {e}")
                 continue
-                
+            
         return None, page
     except Exception as e:
         print(f"Error checking for better terms links: {e}")
@@ -1797,35 +1789,46 @@ def is_valid_terms_page(content):
     if score >= 70 or (phrase_count >= 5 and terms_count >= 1):
         return True
         
-    # Special case: if page is very large (>5000 chars) and has some legal phrases and terms, it's likely a terms page
+    # If page has substantial legal content, it's likely a terms page
     if len(text) > 5000 and phrase_count >= 3 and terms_count >= 1:
         return True
     
     return False
 
-def get_known_tos_url(domain: str) -> Optional[str]:
-    """
-    Return known TOS URLs for popular domains that might block scraping.
-    This helps bypass crawling for sites with known TOS locations.
-    
-    Args:
-        domain: The domain to check (e.g., 'openai.com')
-        
-    Returns:
-        Optional[str]: The TOS URL if known, None otherwise
-    """
-    # Don't rely on hardcoded URLs - use dynamic discovery instead
-    return None
-
 async def main():
     """Main function for direct script usage."""
-    # This function is not needed as the API endpoint handles the logic
-    pass
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Find Terms of Service page for a given URL.')
+    parser.add_argument('url', help='URL to scan for Terms of Service')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
+    
+    args = parser.parse_args()
+    
+    if args.verbose:
+        print(f"Searching for Terms of Service for: {args.url}")
+    
+    try:
+        request = ToSRequest(url=args.url)
+        response = await find_tos(request)
+        
+        print("\n=== Results ===")
+        print(f"URL: {response.url}")
+        print(f"Terms of Service URL: {response.tos_url if response.tos_url else 'Not found'}")
+        print(f"Success: {response.success}")
+        print(f"Method: {response.method_used}")
+        print(f"Message: {response.message}")
+        
+        return response.tos_url
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return None
 
 # Run the script
 if __name__ == "__main__":
-    # No need to run directly as this is used as an API endpoint
-    pass
+    import asyncio
+    result = asyncio.run(main())
+    sys.exit(0 if result else 1)
 
 async def try_fallback_paths(url, page):
     """Try common fallback paths when direct navigation fails."""
@@ -1862,3 +1865,75 @@ async def try_fallback_paths(url, page):
         return potential_urls[0]
     
     return None
+            
+async def verify_terms_content(page):
+    """
+    Verify if the current page appears to be a terms of service page.
+    
+    Args:
+        page: Playwright page object
+        
+    Returns:
+        Boolean indicating if the page appears to be a terms page
+    """
+    try:
+        # Get the page title
+        title = await page.title()
+        title_lower = title.lower()
+        
+        # Check title for terms indicators
+        if any(term in title_lower for term in ['terms', 'conditions', 'tos', 'legal', 'agreement']):
+            print(f"Page title indicates terms: {title}")
+            return True
+            
+        # Check content for terms indicators using JavaScript
+        has_terms_content = await page.evaluate("""
+        () => {
+            try {
+                const bodyText = document.body.innerText.toLowerCase();
+                
+                // Check for common terms phrases
+                const termsPhrases = [
+                    'terms of service',
+                    'terms of use',
+                    'terms and conditions',
+                    'user agreement',
+                    'by using this site',
+                    'by accessing this site',
+                    'agree to these terms',
+                    'legally binding',
+                    'intellectual property',
+                    'limitation of liability'
+                ];
+                
+                // Check for legal sections
+                const legalSections = [
+                    'governing law',
+                    'applicable law',
+                    'limitation of liability',
+                    'disclaimer of warranties',
+                    'intellectual property',
+                    'termination',
+                    'modifications to terms'
+                ];
+                
+                // Count matches
+                const termsMatches = termsPhrases.filter(phrase => bodyText.includes(phrase)).length;
+                const legalMatches = legalSections.filter(section => bodyText.includes(section)).length;
+                
+                // Return true if enough matches are found
+                return termsMatches >= 2 || legalMatches >= 3 || (termsMatches + legalMatches >= 3);
+            } catch (e) {
+                return false;
+            }
+        }
+        """)
+        
+        if has_terms_content:
+            print("Page content indicates terms page")
+            return True
+            
+        return False
+    except Exception as e:
+        print(f"Error verifying terms content: {e}")
+        return False
