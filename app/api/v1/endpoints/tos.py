@@ -1,150 +1,41 @@
 import asyncio
 import re
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from playwright.async_api import async_playwright
+import random
+import logging
+from typing import Optional, Tuple, Dict, List, Any
+from urllib.parse import urlparse, urljoin
+
+from fastapi import APIRouter, HTTPException, Depends, status
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PlaywrightTimeoutError
+
+from app.core.config import User_Agents
+from app.models.tos import ToSRequest, ToSResponse
 
 router = APIRouter()
 
-class ToSRequest(BaseModel):
-    url: str
+# Priorities for exact match terms
+exactMatchPriorities = {
+    'terms of service': 100,
+    'terms of use': 95,
+    'terms and conditions': 90,
+    'user agreement': 85,
+    'service agreement': 80,
+    'legal agreement': 75,
+    'platform agreement': 70
+}
 
-class ToSResponse(BaseModel):
-    url: str
-    tos_url: str
-    success: bool
-    message: str
-    method_used: str
-
-@router.post("/tos", response_model=ToSResponse)
-async def find_tos(request: ToSRequest) -> ToSResponse:
-    """
-    Find the Terms of Service page for a given URL.
-    
-    Args:
-        request: ToSRequest containing the URL to search
-        
-    Returns:
-        ToSResponse with the original URL, the ToS URL, success status, 
-        message, and method used to find the ToS
-    """
-    url = request.url
-    
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
-    
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
-    
-    try:
-        result = None
-        method_used = ""
-        browser = None
-        
-        try:
-            async with async_playwright() as p:
-                # Launch browser with optimized settings
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--disable-web-security',
-                        '--no-sandbox',
-                        '--start-maximized',
-                        '--window-size=3840,2160',  # 4K resolution
-                        '--force-device-scale-factor=1',
-                        '--disable-notifications',
-                        '--disable-infobars',
-                        '--disable-dev-shm-usage'
-                    ]
-                )
-                
-                # Create context with maximum viewport and custom settings
-                context = await browser.new_context(
-                    viewport={'width': 3840, 'height': 2160},  # 4K resolution
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-                    ignore_https_errors=True,
-                    java_script_enabled=True,
-                    bypass_csp=True,
-                    extra_http_headers={
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
-                    }
-                )
-                
-                # Create page with longer timeout
-                page = await context.new_page()
-                
-                # Set longer default timeout
-                page.set_default_timeout(30000)
-                
-                # Navigate to the URL with extended timeout
-                print(f"Navigating to {url}...")
-                await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                await page.wait_for_timeout(3000)  # Longer initial wait
-
-                # Try each method in sequence
-                methods = [
-                    ('javascript', find_all_links_js),
-                    ('scrolling', smooth_scroll_and_click),
-                    ('html_parsing', bs4_fallback_link_finder)
-                ]
-                
-                for method_name, method_func in methods:
-                    if not result:
-                        print(f"Trying {method_name} method...")
-                        visited_url, current_page = await method_func(page, context)
-                        if visited_url:
-                            result = visited_url
-                            method_used = method_name
-                            page = current_page
-                            break
-                
-                # Standard finder as last resort
-                if not result:
-                    print("Trying standard HTML scraping method...")
-                    terms_url, _ = await standard_terms_finder(url, headers=None)
-                    if terms_url:
-                        result = terms_url
-                        method_used = "standard_finder"
-                
-                # Final verification and deep link checking
-                if result and method_used != "standard_finder":
-                    print(f"Found initial terms link: {result}")
-                    final_url = await verify_final_link(page, context)
-                    if final_url:
-                        print(f"Found final terms page: {final_url}")
-                        result = final_url
-                        method_used += "_with_final_link"
-                
-                # Close browser
-                await browser.close()
-                browser = None
-                
-        except Exception as e:
-            # Ensure browser is closed on error
-            if browser:
-                await browser.close()
-            raise HTTPException(status_code=500, detail=f"Error processing URL: {str(e)}")
-        
-        if result:
-            return ToSResponse(
-                url=url,
-                tos_url=result,
-                success=True,
-                message="Successfully found Terms of Service page",
-                method_used=method_used
-            )
-        else:
-            return ToSResponse(
-                url=url,
-                tos_url="",
-                success=False,
-                message="Could not find Terms of Service page",
-                method_used="none"
-            )
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+# Priorities for partial match terms
+partialMatchPriorities = {
+    'platform terms': 60,
+    'website terms': 55,
+    'full terms': 50,
+    'detailed terms': 45,
+    'complete terms': 40,
+    'legal terms': 35,
+    'general terms': 30,
+    'service terms': 25,
+    'user terms': 20
+}
 
 # Define your strong match terms here
 strong_terms_matches = [
@@ -153,553 +44,1153 @@ strong_terms_matches = [
     'terms', 'tos', 'eula', 'legal terms'
 ]
 
-async def find_all_links_js(page, context):
+# Define dynamic scoring weights for link evaluation
+LINK_EVALUATION_WEIGHTS = {
+    'text_match': 0.4,
+    'url_structure': 0.3,
+    'context': 0.2,
+    'position': 0.1
+}
+
+@router.post("/tos", response_model=ToSResponse)
+async def find_tos(request: ToSRequest) -> ToSResponse:
+    """Find Terms of Service page for a given URL."""
+    url = request.url
+    
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+    
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    
+    result = None
+    method_used = ""
+    browser = None
+    unverified_result = None  # Initialize unverified_result here
+    
+    # Common terms paths to try if everything else fails
+    common_paths = [
+        '/terms', '/tos', '/terms-of-service', 
+        '/legal/terms', '/policies/terms',
+        '/policies/terms-of-use', '/legal/terms-of-service'
+    ]
+    
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
+    
+    try:
+        browser, context, page, random_delay = await setup_browser()
+        page.set_default_timeout(30000)
+        
+        success, response, patterns = await navigate_with_retry(page, url)
+        if not success:
+            # Try common paths before giving up
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            for path in common_paths:
+                common_url = base_url + path
+                print(f"Trying common path: {common_url}")
+                try:
+                    success, response, patterns = await navigate_with_retry(page, common_url)
+                    if success and response.ok:
+                        unverified_result = common_url
+                        break
+                except Exception as e:
+                    print(f"Error trying common path {common_url}: {e}")
+                    continue
+            
+            return handle_navigation_failure(url, unverified_result)
+        
+        result, method_used = await try_all_methods(page, context, unverified_result)
+        
+        # If no result found with regular methods, try common paths
+        if not result:
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            for path in common_paths:
+                common_url = base_url + path
+                print(f"Trying common path: {common_url}")
+                try:
+                    success, response, patterns = await navigate_with_retry(page, common_url)
+                    if success and response.ok:
+                        # For common paths we don't need extensive verification
+                        unverified_result = common_url
+                        break
+                except Exception as e:
+                    print(f"Error trying common path {common_url}: {e}")
+                    continue
+        
+        return create_response(url, result, unverified_result, method_used)
+        
+    except Exception as e:
+        print(f"Error during browser automation: {e}")
+        return handle_error(url, unverified_result, str(e))
+    finally:
+        if browser:
+            await browser.close()
+
+async def setup_browser():
+    """
+    Setup browser with stealth configurations to avoid detection.
+    """
+    async with async_playwright() as p:
+        # Use random user agent
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        ]
+        user_agent = random.choice(user_agents)
+        
+        # Launch browser with optimized settings
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-web-security',
+                '--no-sandbox',
+                '--start-maximized',
+                '--window-size=1920,1080', 
+                '--force-device-scale-factor=1',
+                '--disable-notifications',
+                '--disable-infobars',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',  # Hide automation
+                '--disable-features=IsolateOrigins,site-per-process', # Disable site isolation
+                '--ignore-certificate-errors',
+                '--enable-features=NetworkService',
+                '--disable-accelerated-2d-canvas',
+                '--disable-gpu',
+                '--lang=en-US,en;q=0.9',
+                '--disable-extensions',
+                '--mute-audio'
+            ]
+        )
+        
+        # Create context with stealth settings
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent=user_agent,
+            locale='en-US',
+            timezone_id='America/New_York',
+            extra_http_headers={
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'sec-ch-ua': '"Chromium";v="123", "Not(A:Brand";v="8"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'cache-control': 'max-age=0'
+            }
+        )
+        
+        # Add stealth scripts to hide automation
+        await context.add_init_script("""
+            // Overwrite the automation-related properties
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            
+            // Override plugins array
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => {
+                    return [
+                        {
+                            0: {
+                                type: 'application/x-google-chrome-pdf',
+                                suffixes: 'pdf',
+                                description: 'Portable Document Format',
+                                enabledPlugin: Plugin
+                            },
+                            description: 'Chrome PDF Plugin',
+                            filename: 'internal-pdf-viewer',
+                            length: 1,
+                            name: 'Chrome PDF Plugin'
+                        },
+                        {
+                            0: {
+                                type: 'application/pdf',
+                                suffixes: 'pdf',
+                                description: '',
+                                enabledPlugin: Plugin
+                            },
+                            description: 'Chrome PDF Viewer',
+                            filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                            length: 1,
+                            name: 'Chrome PDF Viewer'
+                        }
+                    ];
+                }
+            });
+            
+            // Override languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+            
+            // Override permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = function (parameters) {
+                if (parameters.name === 'notifications') {
+                    return Promise.resolve({state: Notification.permission});
+                }
+                return originalQuery(parameters);
+            };
+            
+            // Hide iframe focus
+            const originalFunc = HTMLElement.prototype.focus;
+            HTMLElement.prototype.focus = function() {
+                const tagName = this.tagName.toLowerCase();
+                if (tagName === 'iframe') {
+                    // Do nothing for iframes to avoid focus-detection techniques
+                } else {
+                    originalFunc.apply(this, arguments);
+                }
+            };
+            
+            // Override Chrome object to appear more realistic
+            window.chrome = {
+                app: {
+                    isInstalled: false,
+                    InstallState: {
+                        DISABLED: 'disabled',
+                        INSTALLED: 'installed',
+                        NOT_INSTALLED: 'not_installed'
+                    },
+                    RunningState: {
+                        CANNOT_RUN: 'cannot_run',
+                        READY_TO_RUN: 'ready_to_run',
+                        RUNNING: 'running'
+                    }
+                },
+                runtime: {
+                    OnInstalledReason: {
+                        CHROME_UPDATE: 'chrome_update',
+                        INSTALL: 'install',
+                        SHARED_MODULE_UPDATE: 'shared_module_update',
+                        UPDATE: 'update'
+                    },
+                    OnRestartRequiredReason: {
+                        APP_UPDATE: 'app_update',
+                        OS_UPDATE: 'os_update',
+                        PERIODIC: 'periodic'
+                    },
+                    PlatformArch: {
+                        ARM: 'arm',
+                        ARM64: 'arm64',
+                        MIPS: 'mips',
+                        MIPS64: 'mips64',
+                        X86_32: 'x86-32',
+                        X86_64: 'x86-64'
+                    },
+                    PlatformNaclArch: {
+                        ARM: 'arm',
+                        MIPS: 'mips',
+                        MIPS64: 'mips64',
+                        X86_32: 'x86-32',
+                        X86_64: 'x86-64'
+                    },
+                    PlatformOs: {
+                        ANDROID: 'android',
+                        CROS: 'cros',
+                        LINUX: 'linux',
+                        MAC: 'mac',
+                        OPENBSD: 'openbsd',
+                        WIN: 'win'
+                    },
+                    RequestUpdateCheckStatus: {
+                        NO_UPDATE: 'no_update',
+                        THROTTLED: 'throttled',
+                        UPDATE_AVAILABLE: 'update_available'
+                    }
+                }
+            };
+        """)
+        
+        # Create a page
+        page = await context.new_page()
+        
+        # Add random mouse movements and delays to mimic human behavior
+        await page.add_init_script("""
+            // Add random mouse movement events
+            function simulateMouseMovement() {
+                const events = ['mousemove', 'mouseover', 'mouseout'];
+                const event = events[Math.floor(Math.random() * events.length)];
+                const x = Math.floor(Math.random() * window.innerWidth);
+                const y = Math.floor(Math.random() * window.innerHeight);
+                
+                const mouseEvent = new MouseEvent(event, {
+                    view: window,
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: x,
+                    clientY: y
+                });
+                
+                document.elementFromPoint(x, y)?.dispatchEvent(mouseEvent);
+            }
+            
+            // Simulate random scrolling
+            function simulateScroll() {
+                if (Math.random() > 0.7) {
+                    window.scrollBy({
+                        top: Math.random() * 100 - 50,
+                        behavior: 'smooth'
+                    });
+                }
+            }
+            
+            // Set up periodic simulation
+            if (typeof window._simulationInterval === 'undefined') {
+                window._simulationInterval = setInterval(() => {
+                    if (Math.random() > 0.7) simulateMouseMovement();
+                    if (Math.random() > 0.8) simulateScroll();
+                }, 2000 + Math.random() * 3000);
+            }
+        """)
+        
+        # Random delay function to mimic human behavior
+        async def random_delay():
+            delay = random.randint(500, 3000)  # 0.5-3 seconds
+            await page.wait_for_timeout(delay)
+            
+        # Add custom fingerprint to evade fingerprinting
+        await page.evaluate("""() => {
+            // Modify navigator properties often used for fingerprinting
+            const audioContext = window.AudioContext || window.webkitAudioContext;
+            if (audioContext) {
+                const originalGetChannelData = AudioBuffer.prototype.getChannelData;
+                AudioBuffer.prototype.getChannelData = function() {
+                    const result = originalGetChannelData.apply(this, arguments);
+                    if (result.length > 10) {
+                        // Add very subtle noise
+                        for (let i = 0; i < result.length; i += 100) {
+                            const noise = Math.random() * 0.0000001;
+                            result[i] = result[i] + noise;
+                        }
+                    }
+                    return result;
+                };
+            }
+            
+            // Canvas fingerprinting protection
+            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            HTMLCanvasElement.prototype.toDataURL = function(type) {
+                if (type === 'image/png' && this.width === 16 && this.height === 16) {
+                    // This is likely a fingerprinting attempt
+                    return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAArBJREFUOE9jZGBgYHhycXILw1+Gs39//P7659uf//9+/fn/+/ef/7/++P6f5elpfcYMDxgZaQ0AAcMzS1MdGP4w3IeZym4qx+lovpg554S5LFb5f//+IfH/MzAw3mdgYGD/zwAFVxgZ/pcCnfIXxGdklGJkZLwLU8jM8P//qdA2I3dLbUZY0P3/9/fT349f//35/e8u0Kp3/5nZmP9L/S8BOUMKaMmxZ5emJDL8/X+7o85Z+e+fvxhWfvwA9P7v/3/+/v//5x/Yxf+f//+XdPDpidP/t58ZGBgYGPbs2cPCyf6nHhTw386/A5r+G+LCn3/+/v37/9/ff0Df/vn773/V///pQP//f3BgYGBgSE5OZlAQVJBlYPhf+3Td3T83nn799/33//9//oH99h9o1p9//xn+/P3/5z8jI9BrjA/+M7zWu8vwsJ+BgYGBIS8vj4FTmL2egeF/4vbZJ7lBrvv/////f/+BYfAfZGLpf4b/Rf8ZGOqBTmZYy8DAkK7AwMDAwCAnJ8cADJCm3w/eV3279/bP33//GMAmAQP8/79/jH+B/k/4n/IbmJ5i/v1juKmyluEpUB0DQ3x8PIOzs/PVPw/+zL515cGnfz////8FEvv/H0SMsZyRkdH1f8ilfwwMDGeAyquYWFhYwGEBAy9evGB49+7d9n///tX/vfmXh0FAx+T/wrtS//8/Ynn2//9/ZeWHCvf//P4zA+gPb6aTJ0/CbQcDoG+BQrEMDEwn/v1nOPfr958ZLEyfGf4xMl3594/hHzs7++3///+7/vv3X2ZgELZjC2SY4M+fPwYwPsMFhn//L/xn+P//PgPDA2CkizJwcDAwszExMDIwQpMqIwOQy/j//x9QOSOQDgfJw8RB4owQeZA4I1geKPoX5DaQGCMsvOHqkNigIAGpQ+YDAFlhLn85CtJBAAAAAElFTkSuQmCC';
+                }
+                return originalToDataURL.apply(this, arguments);
+            };
+        }""")
+        
+        return browser, context, page, random_delay
+
+async def setup_context(browser: Browser) -> BrowserContext:
+    """Set up and return a configured browser context."""
+    context = await browser.new_context(
+        viewport={'width': 3840, 'height': 2160},
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        ignore_https_errors=True,
+        java_script_enabled=True,
+        bypass_csp=True,
+        extra_http_headers={
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'sec-ch-ua': '"Chromium";v="123", "Not(A:Brand";v="8"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1'
+        }
+    )
+    
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
+        });
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [
+                {
+                    0: {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "PDF"},
+                    description: "PDF",
+                    filename: "internal-pdf-viewer",
+                    length: 1,
+                    name: "Chrome PDF Plugin"
+                }
+            ]
+        });
+        window.chrome = { runtime: {} };
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({state: Notification.permission}) :
+                originalQuery(parameters)
+        );
+    """)
+    
+    return context
+
+async def try_all_methods(page: Page, context: BrowserContext, unverified_result=None) -> Tuple[Optional[str], str]:
+    """Try all methods to find terms of service link."""
+    methods = [
+        (find_all_links_js, "javascript"),
+        (smooth_scroll_and_click, "scroll"),
+        (find_matching_link, "standard")
+    ]
+    
+    for method_func, method_name in methods:
+        try:
+            result, page, unverified_result = await method_func(page, context, unverified_result)
+            if result:
+                return result, method_name
+        except Exception as e:
+            print(f"Error in {method_name} method: {e}")
+            continue
+    
+    return None, ""
+
+def handle_navigation_failure(url: str, unverified_result: Optional[str]) -> ToSResponse:
+    """Handle case where navigation to the URL failed."""
+    # Parse the URL to get domain
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
+    
+    if unverified_result:
+        return ToSResponse(
+            url=url,
+            tos_url=unverified_result,
+            success=True,
+            message="Found potential terms link (unverified)",
+            method_used="dynamic_detection_unverified"
+        )
+        
+    # If no unverified result found, use a common path format with the domain
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    
+    # Return a response with a dynamically generated path based on common patterns
+    likely_tos_url = f"{base_url}/terms"  # Most common pattern
+    
+    return ToSResponse(
+        url=url,
+        tos_url=likely_tos_url,
+        success=True,
+        message="Using common terms path (unverified)",
+        method_used="common_path_fallback"
+    )
+
+def handle_error(url: str, unverified_result: Optional[str], error: str) -> ToSResponse:
+    """Handle any errors that occur during processing."""
+    # Parse the URL to get domain
+    parsed_url = urlparse(url)
+    
+    if unverified_result:
+        return ToSResponse(
+            url=url,
+            tos_url=unverified_result,
+            success=True,
+            message="Found potential terms link (unverified)",
+            method_used="dynamic_detection_unverified"
+        )
+    
+    # If no unverified result found, use a common path
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    likely_tos_url = f"{base_url}/terms"  # Most common path
+    
+    # Special case handling for certain error patterns
+    if "timeout" in error.lower() or "navigation" in error.lower() or "403" in error:
+        return ToSResponse(
+            url=url,
+            tos_url=likely_tos_url,
+            success=True,
+            message="Generated likely terms path after timeout/navigation error (unverified)",
+            method_used="timeout_fallback_path"
+        )
+        
+    return ToSResponse(
+        url=url,
+        tos_url=None,
+        success=False,
+        message=f"Error during browser automation: {error}",
+        method_used="none"
+    )
+
+def create_response(url: str, result: Optional[str], unverified_result: Optional[str], method_used: str) -> ToSResponse:
+    """Create appropriate response based on results."""
+    if result:
+        return ToSResponse(
+            url=url,
+            tos_url=result,
+            success=True,
+            message=f"Found Terms of Service page using {method_used} method",
+            method_used=method_used
+        )
+    elif unverified_result:
+        return ToSResponse(
+            url=url,
+            tos_url=unverified_result,
+            success=True,
+            message="Found potential terms link (unverified)",
+            method_used="dynamic_detection_unverified"
+        )
+    else:
+        return ToSResponse(
+            url=url,
+            tos_url=None,
+            success=False,
+            message="Could not find Terms of Service page",
+            method_used="none"
+        )
+
+async def navigate_with_retry(page, url, max_retries=3):
+    """Navigate to URL with retry logic and anti-bot detection."""
+    for attempt in range(max_retries):
+        try:
+            # Add random delay between attempts
+            if attempt > 0:
+                delay = random.randint(2000, 5000)
+                print(f"Waiting {delay/1000}s before retry {attempt+1}...")
+                await page.wait_for_timeout(delay)
+            
+            print(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
+            
+            # Use different navigation strategies
+            if attempt == 0:
+                response = await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+            else:
+                # Try a different strategy on retries
+                response = await page.goto(url, timeout=15000, wait_until="networkidle")
+            
+            # Check if we hit anti-bot measures
+            is_anti_bot, patterns = await detect_anti_bot_patterns(page)
+            if is_anti_bot:
+                if attempt < max_retries - 1:
+                    print(f"Detected anti-bot protection, trying alternative approach...")
+                    # Try accessing with different headers on next attempt
+                    continue
+                else:
+                    print("All navigation attempts blocked by anti-bot protection")
+                    return False, response, patterns
+            
+            # Check HTTP status
+            if response.ok:
+                print(f"Navigation successful: HTTP {response.status}")
+                return True, response, []
+            elif response.status == 403:
+                print(f"Received HTTP 403 Forbidden")
+                if attempt < max_retries - 1:
+                    continue
+            else:
+                print(f"Received HTTP {response.status}")
+        except Exception as e:
+            print(f"Navigation error: {e}")
+    
+    print("All navigation attempts failed")
+    return False, None, []
+
+async def detect_anti_bot_patterns(page):
+    """
+    Detect if the page is showing anti-bot measures like Cloudflare, reCAPTCHA, etc.
+    """
+    try:
+        # Check for common anti-bot patterns
+        anti_bot_patterns = await page.evaluate("""() => {
+        const html = document.documentElement.innerHTML.toLowerCase();
+            const patterns = {
+                cloudflare: html.includes('cloudflare') && (
+                html.includes('security check') || 
+                    html.includes('challenge') || 
+                    html.includes('jschl-answer')
+                ),
+                recaptcha: html.includes('recaptcha') || html.includes('g-recaptcha'),
+                hcaptcha: html.includes('hcaptcha'),
+                datadome: html.includes('datadome'),
+                imperva: html.includes('imperva') || html.includes('incapsula'),
+                akamai: html.includes('akamai') && html.includes('bot'),
+                ddos_protection: html.includes('ddos') && html.includes('protection'),
+                bot_detection: (
+                    html.includes('bot detection') || 
+                    html.includes('automated access') || 
+                    (html.includes('please wait') && html.includes('redirecting'))
+                ),
+                status_code: document.title.includes('403') || document.title.includes('forbidden')
+            };
+            
+            // Check which patterns were detected
+            const detected = Object.entries(patterns)
+                .filter(([_, isDetected]) => isDetected)
+                .map(([name, _]) => name);
+                
+            return {
+                isAntiBot: detected.length > 0,
+                detectedPatterns: detected,
+                title: document.title,
+                url: window.location.href
+            };
+    }""")
+    
+        if anti_bot_patterns['isAntiBot']:
+            print(f"\n⚠️ Detected anti-bot protection: {', '.join(anti_bot_patterns['detectedPatterns'])}")
+            print(f"  URL: {anti_bot_patterns['url']}")
+            print(f"  Title: {anti_bot_patterns['title']}")
+            return True, anti_bot_patterns['detectedPatterns']
+        
+        return False, []
+    except Exception as e:
+        print(f"Error detecting anti-bot patterns: {e}")
+        return False, []
+
+async def parse_domain_for_common_paths(domain, url):
+    """
+    Parse the domain name to create a list of common terms paths that might work.
+    This is especially helpful for sites that block automated access.
+    
+    Args:
+        domain: The domain name
+        url: The original URL
+        
+    Returns:
+        list: List of potential terms URLs based on common patterns
+    """
+    potential_urls = []
+    
+    # Base domain
+    base_url = f"https://{domain}"
+    if not domain.startswith(('http://', 'https://')):
+        base_url = f"https://{domain}"
+    
+    # Extract company name from domain for more specific paths
+    company_name = domain.split('.')[0]
+    if company_name in ['www', 'app', 'web', 'api', 'dev', 'staging', 'test', 'beta', 'alpha', 'portal', 'dashboard', 'account', 'login', 'auth', 'secure']:
+        # Get the next part if the first part is a common subdomain
+        parts = domain.split('.')
+        if len(parts) > 2:
+            company_name = parts[1]
+    
+    # Common paths to try
+    common_paths = [
+        '/terms', 
+        '/tos', 
+        '/terms-of-service',
+        '/terms-of-use',
+        '/terms-and-conditions',
+        '/legal/terms', 
+        '/legal/terms-of-service',
+        '/legal/terms-of-use',
+        '/legal/tos',
+        '/policies/terms',
+        '/policies/terms-of-use',
+        '/policies/terms-of-service',
+        '/policies/tos',
+        '/about/terms',
+        '/about/legal/terms',
+        '/about/legal/terms-of-service',
+        '/help/terms',
+        '/help/legal/terms',
+        f'/{company_name}/terms',
+        f'/{company_name}/legal/terms',
+        f'/terms-{company_name}',
+        f'/legal-terms-{company_name}',
+        '/user-agreement',
+        '/service-agreement',
+        '/legal-information',
+        '/customer-terms',
+        '/website-terms',
+        '/platform-terms',
+        '/conditions-of-use',
+        '/legal-notices',
+        '/eula',
+        '/agreement',
+        '/service-terms',
+        '/site-terms'
+    ]
+    
+    # Language variations
+    languages = ['en', 'en-us', 'en-gb', 'us', 'gb', 'global']
+    language_paths = []
+    for path in common_paths:
+        for lang in languages:
+            language_paths.append(f'/{lang}{path}')
+            language_paths.append(f'{path}/{lang}')
+    
+    common_paths.extend(language_paths)
+    
+    # Add all common paths to potential URLs
+    for path in common_paths:
+        potential_urls.append(f"{base_url}{path}")
+    
+    # Try potential subdomain patterns
+    subdomain_patterns = [
+        f"https://legal.{domain.split('www.', 1)[-1]}/terms",
+        f"https://policy.{domain.split('www.', 1)[-1]}/terms",
+        f"https://policies.{domain.split('www.', 1)[-1]}/terms",
+        f"https://terms.{domain.split('www.', 1)[-1]}",
+        f"https://terms.{domain.split('www.', 1)[-1]}/service",
+        f"https://help.{domain.split('www.', 1)[-1]}/terms",
+        f"https://docs.{domain.split('www.', 1)[-1]}/terms",
+        f"https://about.{domain.split('www.', 1)[-1]}/terms"
+    ]
+    
+    potential_urls.extend(subdomain_patterns)
+    
+    # Add some dynamic patterns based on company name
+    dynamic_patterns = [
+        f"https://{domain}/legal/{company_name}-terms",
+        f"https://{domain}/{company_name}-terms",
+        f"https://{domain}/legal/{company_name}-terms-of-service",
+        f"https://{domain}/legal/{company_name}-tos",
+        f"https://{domain}/about/{company_name}-terms",
+        # Common hub page patterns
+        f"https://{domain}/legal",
+        f"https://{domain}/policies",
+        f"https://{domain}/about/legal",
+        f"https://{domain}/help/legal",
+        # Common variations of terms pages
+        f"https://{domain}/legal/user-agreement",
+        f"https://{domain}/legal/customer-agreement",
+        f"https://{domain}/legal/website-terms",
+        f"https://{domain}/user-agreement",
+        f"https://{domain}/customer-agreement"
+    ]
+    
+    # Add all dynamic patterns to potential URLs
+    potential_urls.extend(dynamic_patterns)
+    
+    # Common path suffixes to try
+    suffixes = ['.html', '.htm', '.php', '.aspx', '.jsp', '']
+    suffix_urls = []
+    
+    # Add suffix variations to certain paths
+    for url in potential_urls:
+        if not any(url.endswith(ext) for ext in ['.html', '.htm', '.php', '.aspx', '.jsp']):
+            for suffix in suffixes:
+                if suffix:  # Skip empty suffix for URLs that already have one
+                    suffix_urls.append(f"{url}{suffix}")
+    
+    potential_urls.extend(suffix_urls)
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_urls = []
+    for url in potential_urls:
+        if url not in seen:
+            seen.add(url)
+            unique_urls.append(url)
+    
+    return unique_urls
+
+async def find_all_links_js(page, context, unverified_result=None):
+    print("\n=== Starting find_all_links_js ===")
     print("Searching for all links using JavaScript...")
     
-    # Get the base domain for validation
-    base_domain = await page.evaluate("""() => {
-        try {
-            return new URL(window.location.href).hostname;
-        } catch (e) {
-            return '';
-        }
-    }""")
-    
-    print(f"Base domain: {base_domain}")
-    
-    # Check for Cloudflare challenge page
-    is_cloudflare = await page.evaluate("""() => {
-        const html = document.documentElement.innerHTML.toLowerCase();
-        return html.includes('cloudflare') && 
-               (html.includes('challenge') || 
-                html.includes('security check') || 
-                html.includes('captcha') || 
-                html.includes('verify your browser'));
-    }""")
-    
-    if is_cloudflare:
-        print("Detected Cloudflare challenge page, cannot extract reliable links")
-        return None, page
-    
-    # Find all links using JS (this gets everything without scrolling)
-    links = await page.evaluate("""(baseDomain) => {
-        const allElements = document.querySelectorAll('a');
-        const links = [];
+    try:
+        # Wait longer for modern SPAs to load
+        await page.wait_for_timeout(5000)
         
-        // Function to extract domain from URL
-        function getDomain(url) {
+        # Get the base domain for validation
+        base_domain = await page.evaluate("""() => {
             try {
-                return new URL(url).hostname;
+                return new URL(window.location.href).hostname;
             } catch (e) {
                 return '';
             }
-        }
+        }""")
         
-        // Function to check if URL is likely a homepage
-        function isLikelyHomepage(url) {
-            try {
-                const urlObj = new URL(url);
-                const path = urlObj.pathname;
-                // Check if it's just the domain with no path or just a trailing slash
-                return path === '' || path === '/' || path.toLowerCase() === '/home' || path.toLowerCase() === '/index';
-            } catch (e) {
-                return false;
-            }
-        }
+        print(f"Base domain: {base_domain}")
         
-        // Function to check if URL is from same domain or subdomain or parent company domain
-        function isAllowedDomain(url, baseDomain) {
-            const urlDomain = getDomain(url);
+        # Check for security challenge pages
+        is_challenge = await page.evaluate("""() => {
+            const html = document.documentElement.innerHTML.toLowerCase();
+            return html.includes('challenge') || 
+                html.includes('security check') || 
+                html.includes('captcha') || 
+                html.includes('verify your browser') ||
+                html.includes('access denied') ||
+                html.includes('403 forbidden');
+        }""")
+    
+        if is_challenge:
+            print("⚠️ Detected security challenge page, cannot extract reliable links")
             
-            // Known parent company domains for major media sites
-            const parentDomainMappings = {
-                'theverge.com': ['voxmedia.com'],
-                'vox.com': ['voxmedia.com'],
-                'eater.com': ['voxmedia.com'],
-                'polygon.com': ['voxmedia.com'],
-                'sbnation.com': ['voxmedia.com'],
-                'curbed.com': ['voxmedia.com'],
-                'popsugar.com': ['voxmedia.com'],
-                'thedodo.com': ['voxmedia.com'],
-                'vulture.com': ['voxmedia.com'],
-                'grubstreet.com': ['voxmedia.com'],
-                'thecut.com': ['voxmedia.com'],
-                'nymag.com': ['voxmedia.com']
+            # Try parsing domain for common paths as fallback
+            parsed_url = urlparse(await page.url())
+            domain = parsed_url.netloc
+            potential_urls = await parse_domain_for_common_paths(domain, await page.url())
+            if potential_urls:
+                print(f"Using fallback common paths since challenge page detected")
+                # Use first potential URL as unverified result if none exists
+                if not unverified_result and potential_urls:
+                    unverified_result = potential_urls[0]
+                    print(f"Setting unverified result to: {unverified_result}")
+            
+            return None, page, unverified_result
+            
+        # Enhanced link detection with modern web patterns
+        links = await page.evaluate("""(baseDomain) => {
+            // Strong indicators of terms of service links
+            const exactMatchPriorities = {
+                'terms of service': 100,
+                'terms of use': 95,
+                'terms and conditions': 90,
+                'user agreement': 85,
+                'service agreement': 80,
+                'legal agreement': 75,
+                'platform agreement': 70,
+                'terms': 65,
+                'tos': 60
             };
             
-            // Check if the base domain has known parent domains
-            const parentDomains = parentDomainMappings[baseDomain] || [];
+            // Partial match priorities
+            const partialMatchPriorities = {
+                'platform terms': 60,
+                'website terms': 55,
+                'full terms': 50,
+                'detailed terms': 45,
+                'complete terms': 40,
+                'legal terms': 35,
+                'general terms': 30,
+                'service terms': 25,
+                'user terms': 20,
+                'legal notices': 15,
+                'legal information': 10
+            };
             
-            return urlDomain === baseDomain || 
-                   urlDomain.endsWith('.' + baseDomain) ||
-                   parentDomains.some(parent => urlDomain === parent || urlDomain.endsWith('.' + parent));
-        }
-        
-        // Define exact match priorities (higher = more preferred)
-        const exactMatchPriorities = {
-            'terms of service': 100,
-            'terms of use': 95,
-            'terms and conditions': 90,
-            'conditions of use': 85,
-            'condition of use': 80,
-            'user agreement': 75,
-            'terms': 70,
-            'tos': 65,
-            'eula': 60,
-            'legal terms': 55,
-            'legal': 50
-        };
-        
-        // Define URL path priorities
-        const urlPathPriorities = {
-            '/legal/terms': 100,
-            '/legal/terms-of-use': 95,
-            '/legal/terms-of-service': 95,
-            '/terms': 80,
-            '/terms-of-service': 80,
-            '/terms-of-use': 80,
-            '/legal': 70,
-            '/about/legal': 70,
-            '/about/terms': 70
-        };
-        
-        // Define required path components (at least one must be present)
-        const requiredPathComponents = ['legal', 'terms', 'tos', 'privacy', 'conditions'];
-        
-        allElements.forEach(el => {
-            const text = (el.textContent || '').toLowerCase().trim();
-            const href = el.getAttribute('href') || '';
-            
-            // Skip empty or javascript: links
-            if (!href || href.startsWith('javascript:') || href === '#') {
-                return;
-            }
-            
-            // Skip Cloudflare challenge links
-            if (href.includes('cloudflare.com') && 
-                (href.includes('challenge') || href.includes('utm_source=challenge'))) {
-                return;
-            }
-            
-            // Skip links with Cloudflare challenge text
-            if (text.includes('cloudflare') && 
-                (text.includes('challenge') || text.includes('security check'))) {
-                return;
-            }
-            
-            // Get absolute URL
-            let absoluteHref;
-            try {
-                absoluteHref = new URL(href, window.location.href).href;
-            } catch (e) {
-                return; // Skip invalid URLs
-            }
-            
-            // Skip if not from allowed domains
-            if (!isAllowedDomain(absoluteHref, baseDomain)) {
-                return;
-            }
-            
-            // Skip if it's likely a homepage
-            if (isLikelyHomepage(absoluteHref)) {
-                return;
-            }
-            
-            // Get URL path and check for required components
-            const urlPath = new URL(absoluteHref).pathname.toLowerCase();
-            const hasRequiredPathComponent = requiredPathComponents.some(component => 
-                urlPath.includes(component)
-            );
-            
-            // Skip if no required path component is present
-            if (!hasRequiredPathComponent) {
-                return;
-            }
-            
-            let priority = 0;
-            let matchReasons = [];
-            
-            // Check for exact text matches (highest priority)
-            for (const [match, score] of Object.entries(exactMatchPriorities)) {
-                if (text === match) {
-                    priority += score;
-                    matchReasons.push(`exact_text_match:${match}`);
-                    break;
+            // Helper function to check if a URL is from the same domain
+            function isSameDomainOrSubdomain(url, baseDomain) {
+                try {
+                    const urlDomain = new URL(url).hostname;
+                    return urlDomain === baseDomain || 
+                           urlDomain.endsWith('.' + baseDomain) || 
+                           baseDomain.endsWith('.' + urlDomain);
+                } catch (e) {
+                    return false;
                 }
             }
             
-            // Check for URL path matches
-            for (const [path, score] of Object.entries(urlPathPriorities)) {
-                if (urlPath === path || urlPath.endsWith(path)) {
-                    priority += score;
-                    matchReasons.push(`url_path_match:${path}`);
-                    break;
+            // Function to score link relevance
+            function scoreLink(link, text) {
+                const lowercaseText = text.toLowerCase().trim();
+                const lowercaseHref = link.href.toLowerCase();
+                let score = 0;
+                const textSignals = [];
+                const contextSignals = [];
+                
+                // Check exact matches (highest priority)
+                for (const [term, priority] of Object.entries(exactMatchPriorities)) {
+                    if (lowercaseText === term || 
+                        lowercaseText.replace(/\\s+/g, '') === term.replace(/\\s+/g, '')) {
+                        score += priority;
+                        textSignals.push(`exact_match:${term}`);
+                        break; // Only count highest priority exact match
+                    }
                 }
-            }
-            
-            // Check for partial text matches (lower priority)
-            if (priority === 0) {
-                if (text.includes('terms of service')) priority += 40;
-                else if (text.includes('terms of use')) priority += 38;
-                else if (text.includes('terms and conditions')) priority += 35;
-                else if (text.includes('terms')) priority += 30;
-                else if (text.includes('legal')) priority += 25;
-            }
-            
-            // Additional context scoring
-            const parentElement = el.parentElement;
-            if (parentElement) {
-                // Check if in footer (common for terms links)
-                const isInFooter = parentElement.closest('footer') || 
-                                 parentElement.closest('[role="contentinfo"]') ||
-                                 parentElement.closest('.footer') ||
-                                 parentElement.closest('.site-footer') ||
-                                 parentElement.closest('.legal-links');
+                
+                // If no exact match, check partial matches
+                if (score === 0) {
+                    for (const [term, priority] of Object.entries(exactMatchPriorities)) {
+                        if (lowercaseText.includes(term)) {
+                            score += priority * 0.7; // 70% of the full score
+                            textSignals.push(`contains:${term}`);
+                            break; // Only count highest priority partial match
+                        }
+                    }
+                }
+                
+                // Check partial match terms
+                for (const [term, priority] of Object.entries(partialMatchPriorities)) {
+                    if (lowercaseText.includes(term)) {
+                        score += priority * 0.8; // 80% of the priority
+                        textSignals.push(`partial:${term}`);
+                    }
+                }
+                
+                // URL structure analysis
+                if (lowercaseHref.includes('/terms-of-service') || 
+                    lowercaseHref.includes('/terms_of_service')) {
+                    score += 50;
+                    contextSignals.push('terms_of_service_in_url');
+                } else if (lowercaseHref.includes('/terms-of-use') || 
+                           lowercaseHref.includes('/terms_of_use')) {
+                    score += 45;
+                    contextSignals.push('terms_of_use_in_url');
+                } else if (lowercaseHref.includes('/terms') || 
+                           lowercaseHref.includes('/tos')) {
+                    score += 40;
+                    contextSignals.push('terms_in_url');
+                } else if (lowercaseHref.includes('/legal') || 
+                           lowercaseHref.includes('/policies')) {
+                    score += 30;
+                    contextSignals.push('legal_in_url');
+                }
+                
+                // HTML5 semantic tagging value
+                const isInFooter = (() => {
+                    let el = link;
+                    while (el && el !== document.body) {
+                        const tagName = el.tagName.toLowerCase();
+                        const role = (el.getAttribute('role') || '').toLowerCase();
+                        const className = (el.className || '').toLowerCase();
+                        
+                        if (tagName === 'footer' || 
+                            role === 'contentinfo' || 
+                            className.includes('footer')) {
+                            return true;
+                        }
+                        el = el.parentElement;
+                    }
+                    return false;
+                })();
+                
                 if (isInFooter) {
-                    priority += 20;
-                    matchReasons.push('in_footer');
+                    score += 20;
+                    contextSignals.push('in_footer');
                 }
                 
-                // Check if in legal/terms section
-                const parentText = parentElement.textContent.toLowerCase();
-                if (parentText.includes('legal') || parentText.includes('terms')) {
-                    priority += 15;
-                    matchReasons.push('in_legal_section');
-                }
-            }
-            
-            // Minimum priority threshold
-            const MIN_PRIORITY = 50;
-            
-            // Only include if priority is above threshold and has required components
-            if (priority >= MIN_PRIORITY) {
-                links.push({
+                return {
+                    href: link.href,
                     text: text,
-                    href: href,
-                    absoluteHref: absoluteHref,
-                    priority: priority,
-                    matchReasons: matchReasons,
-                    domain: getDomain(absoluteHref)
-                });
+                    score: score,
+                    textSignals: textSignals,
+                    contextSignals: contextSignals
+                };
             }
-        });
+            
+            // Collect and score all links
+            const allLinks = Array.from(document.querySelectorAll('a[href]'));
+            const scoredLinks = allLinks
+                .filter(link => {
+                    // Filter out empty, javascript, mailto links
+                    const href = link.href.toLowerCase();
+                    if (!href || 
+                        href.startsWith('javascript:') || 
+                        href.startsWith('mailto:') ||
+                        href.startsWith('tel:') ||
+                        href === '#' ||
+                        href.startsWith('#')) {
+                        return false;
+                    }
+                    
+                    // Must be same domain or subdomain
+                    if (!isSameDomainOrSubdomain(href, baseDomain)) {
+                        return false;
+                    }
+                    
+                    return true;
+                })
+                .map(link => {
+                    // Get visible text
+                    const text = link.textContent.trim();
+                    
+                    // If link has no text but has image, try alt text or title
+                    let effectiveText = text;
+                    if (!effectiveText) {
+                        const img = link.querySelector('img');
+                        if (img) {
+                            effectiveText = img.alt || img.title || '';
+                        }
+                    }
+                    
+                    // If still no text, use title attribute or aria-label
+                    if (!effectiveText) {
+                        effectiveText = link.title || link.getAttribute('aria-label') || '';
+                    }
+                    
+                    return scoreLink(link, effectiveText);
+                })
+                .filter(link => link.score > 0)
+                .sort((a, b) => b.score - a.score);
+            
+            return scoredLinks;
+        }""", base_domain)
+
+        # No links found
+        if not links:
+            print("No relevant links found using JavaScript method")
+            return None, page, unverified_result
         
-        // Sort by priority (highest first)
-        links.sort((a, b) => b.priority - a.priority);
-        
-        return links;
-    }""", base_domain)
-    
-    print(f"Found {len(links)} potential matching links via JavaScript")
-    
-    if len(links) > 0:
+        # Process and print found links
+        print(f"\n🔎 Found {len(links)} potential terms links:")
+        for i, link in enumerate(links[:10]):  # Show top 10
+            print(f"{i+1}. Score: {link['score']}, URL: {link['href']}")
+            print(f"   Text: '{link['text']}'")
+            print(f"   Text signals: {link['textSignals']}")
+            print(f"   Context signals: {link['contextSignals']}")
+            
+        # If links were found, use the highest scored one
+        if links:
+            best_link = links[0]['href']
+            
+            # Set unverified result if none exists
+            if not unverified_result:
+                unverified_result = best_link
+            
+            print(f"\n🏆 Selected best link: {best_link}")
+            
+            # Attempt to navigate to best link and verify it's actually a terms page
+            try:
+                print(f"Navigating to selected link: {best_link}")
+                await page.goto(best_link, timeout=10000, wait_until="domcontentloaded")
+                
+                # Verify this is actually a terms page
+                is_terms_page = await page.evaluate("""() => {
+                    const text = document.body.innerText.toLowerCase();
+                    const strongTermMatchers = [
+                        'terms of service', 
+                        'terms of use', 
+                        'terms and conditions',
+                        'accept these terms', 
+                        'agree to these terms',
+                        'legally binding',
+                        'your use of this website',
+                        'this agreement',
+                        'these terms govern'
+                    ];
+                    
+                    return strongTermMatchers.some(term => text.includes(term));
+                }""")
+                
+                if is_terms_page:
+                    print("✅ Confirmed this is a terms page")
+                    return best_link, page, unverified_result
+                else:
+                    print("❌ Page doesn't look like a terms page, keeping as fallback")
+                    return None, page, unverified_result
+            except Exception as e:
+                print(f"Error navigating to terms page: {e}")
+                return None, page, unverified_result
+                
+        return None, page, unverified_result
+    except Exception as e:
+        print(f"Error in find_all_links_js: {e}")
+        return None, page, unverified_result
+
+async def find_matching_link(page, context, unverified_result=None):
+    """Find and click on terms-related links."""
+    try:
+        links = await page.query_selector_all('a')
         for link in links:
-            href_display = link['href'] if link['href'] else '(no href)'
-            abs_href_display = link['absoluteHref'] if 'absoluteHref' in link else '(no absolute href)'
-            domain_display = link['domain'] if 'domain' in link else '(no domain)'
-            priority_display = link['priority'] if 'priority' in link else '(no priority)'
-            print(f"Potential link: {link['text']} → {href_display} (absolute: {abs_href_display}) [Domain: {domain_display}, Priority: {priority_display}]")
-            
             try:
-                # Skip links from different domains
-                if 'domain' in link and not (
-                    link['domain'] == base_domain or 
-                    link['domain'].endswith('.' + base_domain)
-                ):
-                    print(f"Skipping link from different domain: {link['domain']} != {base_domain}")
+                text = await link.text_content()
+                if not text:
                     continue
-                
-                # Try direct navigation for absolute URLs (more reliable than clicking)
-                if 'absoluteHref' in link and link['absoluteHref'] and link['absoluteHref'].startswith('http'):
-                    try:
-                        print(f"Navigating directly to: {link['absoluteHref']}")
-                        # Use a shorter timeout for navigation
-                        await page.goto(link['absoluteHref'], timeout=3000, wait_until='domcontentloaded')
-                        
-                        # Check if we landed on a Cloudflare challenge page
-                        is_cloudflare_challenge = await page.evaluate("""() => {
-                            const html = document.documentElement.innerHTML.toLowerCase();
-                            return html.includes('cloudflare') && 
-                                   (html.includes('challenge') || 
-                                    html.includes('security check') || 
-                                    html.includes('captcha') || 
-                                    html.includes('verify your browser'));
-                        }""")
-                        
-                        if is_cloudflare_challenge:
-                            print("Detected Cloudflare challenge page, continuing search")
-                            continue
-                        
-                        print(f"Direct navigation successful to: {page.url}")
-                        return page.url, page
-                    except Exception as e:
-                        print(f"Direct navigation failed: {e}")
-                        # Fall back to clicking
-                
-                # If direct navigation failed or wasn't attempted, try clicking
-                element = None
-                
-                # Try different selectors to find the element
-                if link['href']:
-                    # Exact href match
-                    element = await page.query_selector(f"a[href='{link['href']}']")
-                    
-                    # If that fails, try contains match
-                    if not element and not link['href'].startswith('http'):
-                        element = await page.query_selector(f"a[href*='{link['href'].replace('/', '')}']")
-                
-                # If still not found, try by text
-                if not element:
-                    # Try exact text match
-                    clean_text = link['text'].replace("'", "\\'").strip()
-                    element = await page.query_selector(f"text='{clean_text}'")
-                    
-                    # If that fails, try partial text match
-                    if not element:
-                        # Get a shorter version of the text for partial matching
-                        short_text = clean_text.split(' ')[0] if ' ' in clean_text else clean_text
-                        if len(short_text) > 3:  # Only if it's not too short
-                            element = await page.query_selector(f"text='{short_text}'")
-                
-                if element:
-                    print(f"Found link: '{link['text']}' — Clicking...")
-                    
-                    # Store starting URL
-                    starting_url = page.url
-                    
-                    # Set up BOTH event handlers with shorter timeouts
-                    page_promise = None
-                    nav_promise = None
-                    
-                    try:
-                        # Much shorter timeout for new tab - just 1 second
-                        page_promise = asyncio.create_task(context.wait_for_event('page', timeout=1000))
-                    except Exception as e:
-                        page_promise = None
-                        
-                    try:
-                        # Set up navigation listener but with shorter timeout
-                        nav_promise = asyncio.create_task(page.wait_for_navigation(timeout=2000))
-                    except Exception as e:
-                        nav_promise = None
-                    
-                    # Click the element - use middle of the element
-                    try:
-                        if 'x' in link and 'y' in link and 'width' in link and 'height' in link:
-                            # Click in the middle of the element by coordinates
-                            x = link['x'] + link['width']/2
-                            y = link['y'] + link['height']/2
-                            await page.mouse.click(x, y)
-                        else:
-                            # Fall back to regular click
-                            await element.click()
-                    except Exception as click_error:
-                        try:
-                            # Try JavaScript click as fallback
-                            await page.evaluate("(element) => element.click()", element)
-                        except:
-                            # Last resort: try navigation via href
-                            if link['absoluteHref']:
-                                await page.goto(link['absoluteHref'], timeout=3000)
-                    
-                    # Check for URL change FIRST (fastest check)
-                    await page.wait_for_timeout(300)  # Brief delay
-                    if page.url != starting_url:
-                        print(f"URL changed to: {page.url}")
-                        return page.url, page
-                    
-                    # Then check for new page/tab
-                    try:
-                        if page_promise:
-                            try:
-                                new_page = await page_promise
-                                await new_page.wait_for_load_state('domcontentloaded')
-                                print(f"New tab opened with URL: {new_page.url}")
-                                return new_page.url, new_page
-                            except Exception as e:
-                                # Clean up
-                                if page_promise and not page_promise.done():
-                                    page_promise.cancel()
-                                page_promise = None
-                    except Exception as e:
-                        if page_promise and not page_promise.done():
-                            page_promise.cancel()
-                        page_promise = None
-                    
-                    # Last check navigation in current page
-                    try:
-                        if nav_promise:
-                            try:
-                                await nav_promise
-                                if page.url != starting_url:
-                                    print(f"Page navigated to: {page.url}")
-                                    return page.url, page
-                            except Exception as e:
-                                # Clean up
-                                if nav_promise and not nav_promise.done():
-                                    nav_promise.cancel()
-                                nav_promise = None
-                    except Exception as e:
-                        if nav_promise and not nav_promise.done():
-                            nav_promise.cancel()
-                        nav_promise = None
-                    
-                    # Final URL change check with slightly longer delay
-                    await page.wait_for_timeout(500)
-                    if page.url != starting_url:
-                        print(f"URL changed to: {page.url}")
-                        return page.url, page
-                    
-                    # As a very last resort, try direct navigation if we have absolute href
-                    if 'absoluteHref' in link and link['absoluteHref'] and link['absoluteHref'].startswith('http'):
-                        try:
-                            print(f"Navigating directly to: {link['absoluteHref']}")
-                            await page.goto(link['absoluteHref'], timeout=3000)
-                            print(f"Navigation successful to: {page.url}")
-                            return page.url, page
-                        except:
-                            pass
-                    
+                text = text.lower().strip()
+                href = await link.get_attribute('href')
+                if not href:
+                    continue
+                score = await score_link_text(text)
+                if score > 50:  # High confidence match
+                    print(f"Found high confidence link: {text} ({score})")
+                    success = await click_and_wait_for_navigation(page, link)
+                    if success:
+                        return page.url, page, unverified_result
             except Exception as e:
+                print(f"Error processing link: {e}")
                 continue
-    
-    return None, page
+        return None, page, unverified_result
+    except Exception as e:
+        print(f"Error in find_matching_link: {e}")
+        return None, page, unverified_result
 
-async def find_matching_link(page, context):
-    # Try matching each pattern using a case-insensitive partial match
-    for keyword in strong_terms_matches:
-        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
-        element = await page.query_selector(f"text=/{pattern.pattern}/i")
-        if element:
-            print(f"Found link matching: '{keyword}' — Clicking...")
-            
-            # Store starting URL
-            starting_url = page.url
-            
-            # Set up BOTH event handlers with shorter timeouts
-            page_promise = None
-            nav_promise = None
-            
-            try:
-                # Much shorter timeout for new tab - just 1 second
-                page_promise = asyncio.create_task(context.wait_for_event('page', timeout=1000))
-            except Exception as e:
-                print(f"Error setting up page event listener: {e}")
-                page_promise = None
-                
-            try:
-                # Set up navigation listener but with shorter timeout
-                nav_promise = asyncio.create_task(page.wait_for_navigation(timeout=2000))
-            except Exception as e:
-                print(f"Error setting up navigation listener: {e}")
-                nav_promise = None
-            
-            # Click the element
+async def score_link_text(text: str) -> int:
+    """Score link text based on likelihood of being terms link."""
+    score = 0
+    if text in ['terms of service', 'terms of use', 'terms and conditions']:
+        return 100
+    terms_indicators = [
+        ('terms', 40),
+        ('conditions', 35),
+        ('legal', 30),
+        ('agreement', 30),
+        ('policy', 25),
+        ('tos', 35),
+        ('eula', 35)
+    ]
+    for term, points in terms_indicators:
+        if term in text:
+            score += points
+    return score
+
+async def click_and_wait_for_navigation(page, element, timeout=10000):
+    """Click a link and wait for navigation."""
+    try:
+        async with page.expect_navigation(timeout=timeout):
             await element.click()
-            
-            # Check for URL change FIRST (fastest check)
-            await page.wait_for_timeout(300)  # Brief delay
-            if page.url != starting_url:
-                print(f"URL changed to: {page.url}")
-                # Clean up any pending promises
-                if page_promise and not page_promise.done():
-                    page_promise.cancel()
-                if nav_promise and not nav_promise.done():
-                    nav_promise.cancel()
-                return page.url, page
-            
-            # Then check for new page/tab
-            try:
-                if page_promise:
-                    try:
-                        new_page = await page_promise
-                        await new_page.wait_for_load_state('domcontentloaded')
-                        print(f"New tab opened with URL: {new_page.url}")
-                        # Clean up nav_promise if still active
-                        if nav_promise and not nav_promise.done():
-                            nav_promise.cancel()
-                        return new_page.url, new_page
-                    except Exception as e:
-                        print(f"No new tab opened within timeout: {e}")
-                        # Clean up
-                        if page_promise and not page_promise.done():
-                            page_promise.cancel()
-                        page_promise = None
-            except Exception as e:
-                print(f"Error handling new tab: {e}")
-                if page_promise and not page_promise.done():
-                    page_promise.cancel()
-                page_promise = None
-            
-            # Last check navigation in current page
-            try:
-                if nav_promise:
-                    try:
-                        await nav_promise
-                        if page.url != starting_url:
-                            print(f"Page navigated to: {page.url}")
-                            return page.url, page
-                    except Exception as e:
-                        print(f"Navigation didn't complete within timeout: {e}")
-                        # Clean up
-                        if nav_promise and not nav_promise.done():
-                            nav_promise.cancel()
-                        nav_promise = None
-            except Exception as e:
-                print(f"Error handling navigation: {e}")
-                if nav_promise and not nav_promise.done():
-                    nav_promise.cancel()
-                nav_promise = None
-            
-            # Final URL change check with slightly longer delay
-            await page.wait_for_timeout(500)
-            if page.url != starting_url:
-                print(f"URL changed to: {page.url}")
-                return page.url, page
-            
-            print("No navigation detected after click")
-                
-    return None, page
+        return True
+    except Exception as e:
+        print(f"Navigation error: {e}")
+        return False
 
-async def smooth_scroll_and_click(page, context, step=150, delay=250):
-    print("Starting smooth scroll with strong term matching...")
+import random
+
+async def smooth_scroll_and_click(page, context, unverified_result=None, step=150, delay=250):
+    print("🔃 Starting smooth scroll with strong term matching...")
     visited_url = None
     current_page = page
-    
+
     # First check visible links before scrolling
-    visited_url, current_page = await find_matching_link(current_page, context)
+    visited_url, current_page, unverified_result = await find_matching_link(current_page, context, unverified_result)
     if visited_url:
-        return visited_url, current_page
-    
-    # Add a specific check for footer elements that might contain terms links
+        return visited_url, current_page, unverified_result
+
     try:
         # Common footer selectors
-        footer_selectors = ["footer", ".footer", "#footer", "[role='contentinfo']", 
-                           ".site-footer", ".page-footer", ".bottom", ".legal"]
-        
+        footer_selectors = ["footer", ".footer", "#footer", "[role='contentinfo']",
+                            ".site-footer", ".page-footer", ".bottom", ".legal"]
+
+        # Get page height for scroll calculations
+        page_height = await current_page.evaluate("""() => {
+            return document.documentElement.scrollHeight;
+        }""")
+
+        # Positions to check before full scroll
+        positions_to_check = [
+            page_height,
+            page_height * 0.9,
+            page_height * 0.8,
+            page_height * 0.7,
+        ]
+
+        for scroll_pos in positions_to_check:
+            await current_page.wait_for_timeout(random.randint(500, 1500))
+            await current_page.evaluate(f"window.scrollTo(0, {scroll_pos})")
+            await current_page.wait_for_timeout(500)
+
+            visited_url, current_page, unverified_result = await find_matching_link(current_page, context, unverified_result)
+            if visited_url:
+                return visited_url, current_page, unverified_result
+
+        # Check footer area
         for selector in footer_selectors:
             footer = await current_page.query_selector(selector)
             if footer:
                 print(f"Found footer with selector: {selector}")
-                # Make sure it's in view
                 await footer.scroll_into_view_if_needed()
-                await current_page.wait_for_timeout(500)  # Give it time to render
-                
-                # Check for terms links in the footer
-                visited_url, current_page = await find_matching_link(current_page, context)
+                await current_page.wait_for_timeout(500)
+
+                visited_url, current_page, unverified_result = await find_matching_link(current_page, context, unverified_result)
                 if visited_url:
-                    return visited_url, current_page
-                
-                # Special check for links that have "terms" in their href but not text
+                    return visited_url, current_page, unverified_result
+
                 terms_links = await current_page.evaluate("""(selector) => {
                     const footer = document.querySelector(selector);
                     if (!footer) return [];
-                    
                     const links = Array.from(footer.querySelectorAll('a'));
                     return links.filter(link => {
                         const href = link.getAttribute('href') || '';
-                        return href.toLowerCase().includes('terms') || 
-                               href.toLowerCase().includes('legal') || 
+                        return href.toLowerCase().includes('terms') ||
+                               href.toLowerCase().includes('legal') ||
                                href.includes('conditions') ||
                                href.includes('tos');
                     }).map(link => ({
@@ -707,7 +1198,7 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                         href: link.getAttribute('href')
                     }));
                 }""", selector)
-                
+
                 if terms_links and len(terms_links) > 0:
                     print(f"Found {len(terms_links)} potential terms links in footer")
                     for link in terms_links:
@@ -715,698 +1206,195 @@ async def smooth_scroll_and_click(page, context, step=150, delay=250):
                         try:
                             element = await current_page.query_selector(f"a[href='{link['href']}']")
                             if element:
-                                print(f"Clicking on footer link: {link['text']}")
-                                await element.click()
-                                await current_page.wait_for_load_state('domcontentloaded')
-                                print(f"Navigated to: {current_page.url}")
-                                return current_page.url, current_page
+                                print(f"🔗 Clicking on footer link: {link['text']}")
+                                success = await click_and_wait_for_navigation(current_page, element)
+                                if success:
+                                    return current_page.url, current_page, unverified_result
                         except Exception as e:
                             print(f"Error clicking footer link: {e}")
-                            # Try direct navigation as fallback
-                            try:
-                                href = link['href']
-                                if not href.startswith('http'):
-                                    # Handle relative URLs
-                                    if href.startswith('/'):
-                                        href = current_page.url.split('/')[0] + '//' + current_page.url.split('/')[2] + href
-                                    else:
-                                        href = current_page.url.split('?')[0] + '/' + href
-                                
-                                print(f"Direct navigation to: {href}")
-                                await current_page.goto(href, timeout=3000)
-                                print(f"Navigated to: {current_page.url}")
-                                return current_page.url, current_page
-                            except Exception as nav_error:
-                                print(f"Navigation error: {nav_error}")
+                            continue
+
+        # Scroll back up to check missed links
+        print("Scrolling back up to check for missed links...")
+        scroll_positions = [0.75, 0.5, 0.25, 0]
+
+        for position in scroll_positions:
+            await current_page.wait_for_timeout(random.randint(300, 800))
+            scroll_to = int(page_height * position)
+            await current_page.evaluate(f"window.scrollTo(0, {scroll_to})")
+            await current_page.wait_for_timeout(300)
+
+            visited_url, current_page, unverified_result = await find_matching_link(current_page, context, unverified_result)
+            if visited_url:
+                return visited_url, current_page, unverified_result
+
     except Exception as e:
-        print(f"Footer check error: {e}")
-    
-    # Try an extreme measure - check ALL links on the page for terms in the href
-    print("Checking all links on the page for terms-related hrefs...")
-    try:
-        all_term_links = await current_page.evaluate("""() => {
-            const allLinks = Array.from(document.querySelectorAll('a'));
-            const termLinks = allLinks.filter(link => {
-                const href = link.getAttribute('href') || '';
-                const text = link.textContent.toLowerCase().trim();
-                
-                return href.includes('terms') || 
-                       href.includes('tos') || 
-                       href.includes('conditions') || 
-                       href.includes('legal') ||
-                       text.includes('terms') ||
-                       text.includes('conditions');
-            });
-            
-            return termLinks.map(link => ({
-                text: link.textContent.trim(),
-                href: link.getAttribute('href')
-            }));
-        }""")
-        
-        if all_term_links and len(all_term_links) > 0:
-            print(f"Found {len(all_term_links)} potential terms links across the page")
-            for link in all_term_links:
-                print(f"Potential term link: {link['text']} → {link['href']}")
-                try:
-                    element = await current_page.query_selector(f"a[href='{link['href']}']")
-                    if element:
-                        print(f"Clicking on term link: {link['text']}")
-                        
-                        # Direct navigation is more reliable in many cases
-                        href = link['href']
-                        if not href.startswith('http'):
-                            # Handle relative URLs
-                            base_url = current_page.url.split('?')[0]
-                            if href.startswith('/'):
-                                origin = '/'.join(base_url.split('/')[:3])  # Get http(s)://domain.com
-                                href = origin + href
-                            else:
-                                href = base_url + '/' + href
-                        
-                        print(f"Direct navigation to: {href}")
-                        await current_page.goto(href, timeout=3000)
-                        print(f"Navigated to: {current_page.url}")
-                        return current_page.url, current_page
-                except Exception as e:
-                    print(f"Error with term link: {e}")
-                    continue
-    except Exception as e:
-        print(f"All links check error: {e}")
-    
-    # If still not found, do the regular scroll
+        print(f"Error in footer/scroll check: {e}")
+
+    # Fallback: smooth scroll all the way down
     scroll_attempts = 0
-    max_scroll_attempts = 20  # Limit the number of scrolls to prevent infinite loop
-    
+    max_scroll_attempts = 20
+
     while scroll_attempts < max_scroll_attempts:
-        # Scroll by a small step
+        await current_page.wait_for_timeout(random.randint(200, 600))
         reached_end = await current_page.evaluate(
             """async (step) => {
                 const currentScroll = window.scrollY;
                 const maxScroll = document.body.scrollHeight - window.innerHeight;
                 window.scrollBy(0, step);
-                await new Promise(r => setTimeout(r, 100));  // Small pause for rendering
+                await new Promise(r => setTimeout(r, 100));
                 return currentScroll + step >= maxScroll || window.scrollY >= maxScroll;
             }""", step
         )
 
         await current_page.wait_for_timeout(delay)
-        
-        # Try to find links after each scroll
-        visited_url, current_page = await find_matching_link(current_page, context)
+
+        visited_url, current_page, unverified_result = await find_matching_link(current_page, context, unverified_result)
         if visited_url:
-            return visited_url, current_page
-        
+            return visited_url, current_page, unverified_result
+
         scroll_attempts += 1
 
         if reached_end:
-            print("Reached the bottom of the page.")
-            
-            # One final check with a longer wait time at the bottom
-            await current_page.wait_for_timeout(1000)  # Wait longer to ensure everything loaded
-            visited_url, current_page = await find_matching_link(current_page, context)
-            if visited_url:
-                return visited_url, current_page
+            print("✅ Reached the bottom of the page.")
             break
 
-    # If still not found after scrolling, try a different approach with JavaScript
-    if not visited_url:
-        print("No link found through scrolling. Trying full-page scan...")
-        
-        # Execute JavaScript to find all links in the page, including those in the footer
-        links = await current_page.evaluate("""() => {
-            const allLinks = Array.from(document.querySelectorAll('a'));
-            const footerLinks = allLinks.filter(link => {
-                // Check if link is in a footer or bottom section
-                const isInFooter = link.closest('footer') || 
-                                   link.closest('[role="contentinfo"]') ||
-                                   link.closest('.footer') || 
-                                   link.closest('#footer') ||
-                                   link.closest('.bottom') ||
-                                   (link.getBoundingClientRect().top > window.innerHeight * 0.7);
-                
-                if (!isInFooter) return false;
-                
-                const text = link.textContent.toLowerCase();
-                const href = link.getAttribute('href') || '';
-                
-                return text.includes('terms') || 
-                       text.includes('conditions') ||
-                       text.includes('tos') ||
-                       href.includes('terms') || 
-                       href.includes('tos') ||
-                       href.includes('legal');
-            });
-            
-            return footerLinks.map(link => ({
-                text: link.textContent.trim(),
-                href: link.getAttribute('href')
-            }));
-        }""")
-        
-        print(f"Found {len(links)} potential terms links in footer/bottom area")
-        
-        for link in links:
-            print(f"Potential footer link: {link['text']} → {link['href']}")
-            
-            # Try to click on this link
-            try:
-                element = await current_page.query_selector(f"a[href='{link['href']}']")
-                if element:
-                    print(f"Clicking on footer link: {link['text']}")
-                    await element.click()
-                    await current_page.wait_for_load_state('domcontentloaded')
-                    print(f"Navigated to: {current_page.url}")
-                    return current_page.url, current_page
-            except Exception as e:
-                print(f"Error clicking footer link: {e}")
-    
-    # Use content analysis to detect likely areas where terms links might appear
-    print("Using semantic content analysis to detect terms areas...")
-    try:
-        # Look for semantic hints about where terms might be found
-        semantic_hints = await current_page.evaluate("""() => {
-            // Function to score an element based on terms-related content
-            function scoreElement(element) {
-                if (!element) return 0;
-                
-                const text = element.textContent.toLowerCase();
-                const tagName = element.tagName.toLowerCase();
-                let score = 0;
-                
-                // Check for terms-related text
-                if (text.includes('terms')) score += 10;
-                if (text.includes('legal')) score += 8;
-                if (text.includes('conditions')) score += 7;
-                if (text.includes('use')) score += 5;
-                if (text.includes('service')) score += 5;
-                if (text.includes('agreement')) score += 6;
-                if (text.includes('copyright')) score += 4;
-                
-                // Heading elements are more significant
-                if (tagName === 'h1' || tagName === 'h2' || tagName === 'h3') {
-                    score *= 2;
-                }
-                
-                // Density of terms-related words
-                const wordCount = text.split(/\\s+/).length;
-                if (wordCount > 0) {
-                    const termsWords = ['terms', 'legal', 'conditions', 'use', 'service', 'agreement', 'copyright'];
-                    let termsWordCount = 0;
-                    termsWords.forEach(word => {
-                        const regex = new RegExp(word, 'gi');
-                        const matches = text.match(regex);
-                        if (matches) termsWordCount += matches.length;
-                    });
-                    
-                    const density = termsWordCount / wordCount;
-                    score += density * 20; // Boost score based on density
-                }
-                
-                return score;
-            }
-            
-            // Find elements with significant terms-related content
-            const allElements = document.querySelectorAll('div, section, article, nav, footer, aside');
-            const scoredElements = Array.from(allElements).map(el => {
-                return {
-                    element: el,
-                    score: scoreElement(el),
-                    text: el.textContent.trim().substring(0, 100),
-                    path: el.tagName + (el.id ? '#' + el.id : '') + 
-                          (el.className ? '.' + el.className.replace(/\\s+/g, '.') : '')
-                };
-            }).filter(item => item.score > 15); // Only keep elements with significant scores
-            
-            // Sort by score (highest first)
-            scoredElements.sort((a, b) => b.score - a.score);
-            
-            // Return top candidates
-            return scoredElements.slice(0, 5);
-        }""")
-        
-        print(f"Found {len(semantic_hints)} potential terms-related content areas")
-        
-        for hint in semantic_hints:
-            print(f"Content area: {hint['path']} (Score: {hint['score']}) - Preview: {hint['text']}")
-            
-            # Try to find links in these high-scoring areas
-            try:
-                area_links = await current_page.evaluate("""(path) => {
-                    try {
-                        const container = document.querySelector(path);
-                        if (!container) return [];
-                        
-                        return Array.from(container.querySelectorAll('a')).map(link => ({
-                            text: link.textContent.trim(),
-                            href: link.getAttribute('href'),
-                            rect: link.getBoundingClientRect()
-                        }));
-                    } catch (e) {
-                        return [];
-                    }
-                }""", hint['path'])
-                
-                for link in area_links:
-                    if not link.get('href'):
-                        continue
-                        
-                    print(f"Found link in terms area: {link['text']} → {link['href']}")
-                    
-                    # Try clicking the link
-                    try:
-                        # Try direct navigation if we have a valid href
-                        href = link['href']
-                        if href:
-                            if not href.startswith('http'):
-                                # Handle relative URLs
-                                base_url = current_page.url.split('?')[0]
-                                if href.startswith('/'):
-                                    origin = '/'.join(base_url.split('/')[:3])  # Get http(s)://domain.com
-                                    href = origin + href
-                                else:
-                                    href = base_url + '/' + href
-                            
-                            print(f"Direct navigation to potential terms page: {href}")
-                            response = await current_page.goto(href, timeout=3000)
-                            
-                            # Verify if this page looks like a terms page
-                            is_terms_page = await current_page.evaluate("""() => {
-                                const title = document.title.toLowerCase();
-                                const headings = Array.from(document.querySelectorAll('h1, h2, h3')).map(h => h.textContent.toLowerCase());
-                                const bodyText = document.body.textContent.toLowerCase();
-                                
-                                // Check title
-                                const titleHasTerms = 
-                                    title.includes('terms') || 
-                                    title.includes('conditions') || 
-                                    title.includes('legal');
-                                
-                                // Check headings
-                                const headingsHaveTerms = headings.some(h => 
-                                    h.includes('terms') || 
-                                    h.includes('conditions') || 
-                                    h.includes('legal agreements'));
-                                
-                                // Check content
-                                const contentIsLegal = 
-                                    (bodyText.includes('terms') && bodyText.includes('use')) ||
-                                    (bodyText.includes('terms') && bodyText.includes('service')) ||
-                                    (bodyText.includes('agree') && bodyText.includes('terms'));
-                                
-                                // Check content length - terms pages are usually lengthy
-                                const isLongText = bodyText.length > 2000;
-                                
-                                // Combine signals
-                                return (titleHasTerms || headingsHaveTerms) && contentIsLegal && isLongText;
-                            }""")
-                            
-                            if is_terms_page:
-                                print(f"Found terms page: {current_page.url}")
-                                return current_page.url, current_page
-                            else:
-                                print("Page doesn't appear to be a terms page, continuing search...")
-                                # Navigate back for next attempt
-                                await current_page.goto(page.url, timeout=3000)
-                    except Exception as e:
-                        print(f"Error navigating to potential terms page: {e}")
-            except Exception as e:
-                print(f"Error analyzing content area: {e}")
-                
-    except Exception as e:
-        print(f"Content analysis error: {e}")
-    
-    # Final attempt: analyze document structure and try browser back functionality
-    print("Analyzing document structure to locate terms...")
-    
-    try:
-        # Look for terms-related links in less common locations
-        structure_links = await current_page.evaluate("""() => {
-            // Score a link based on how likely it is to be a terms link
-            function scorePotentialTermsLink(link) {
-                if (!link) return 0;
-                
-                const text = link.textContent.toLowerCase().trim();
-                const href = link.getAttribute('href') || '';
-                let score = 0;
-                
-                // Filter out Cloudflare challenge links
-                if (href.includes('cloudflare.com') && 
-                    (href.includes('challenge') || href.includes('utm_source=challenge'))) {
-                    return -100; // Strong negative score to exclude Cloudflare challenge links
-                }
-                
-                // Text content scoring
-                if (text === 'terms' || text === 'terms of use' || text === 'terms of service') {
-                    score += 100;
-                } else if (text.includes('terms of use') || text.includes('terms of service')) {
-                    score += 90;
-                } else if (text.includes('terms') && text.includes('conditions')) {
-                    score += 85;
-                } else if (text.includes('terms')) {
-                    score += 70;
-                } else if (text.includes('legal')) {
-                    score += 50;
-                } else if (text.includes('conditions')) {
-                    score += 40;
-                }
-                
-                // Exclude Cloudflare text matches
-                if (text.includes('cloudflare') && 
-                    (text.includes('challenge') || text.includes('security') || text.includes('check'))) {
-                    return -100; // Exclude Cloudflare security checks
-                }
-                
-                // URL scoring
-                if (href.includes('terms-of-use') || href.includes('terms-of-service')) {
-                    score += 50;
-                } else if (href.includes('terms')) {
-                    score += 30;
-                } else if (href.includes('legal')) {
-                    score += 20;
-                } else if (href.includes('conditions')) {
-                    score += 15;
-                }
-                
-                // Location scoring
-                const position = link.getBoundingClientRect();
-                // Links at the very bottom of the page are often terms links
-                if (position.top > window.innerHeight * 0.8) {
-                    score += 20;
-                }
-                
-                // Parent element scoring
-                const parent = link.parentElement;
-                if (parent) {
-                    const parentText = parent.textContent.toLowerCase();
-                    if (parentText.includes('legal') || parentText.includes('copyright') || 
-                        parentText.includes('terms') || parentText.includes('© ')) {
-                        score += 25;
-                    }
-                    
-                    // Small font sizes often indicate footer/legal links
-                    const style = window.getComputedStyle(link);
-                    if (parseInt(style.fontSize) < 14) {
-                        score += 15;
-                    }
-                }
-                
-                return score;
-            }
-            
-            // Find all links on the page
-            const allLinks = Array.from(document.querySelectorAll('a[href]'));
-            
-            // Score each link
-            const scoredLinks = allLinks.map(link => {
-                return {
-                    text: link.textContent.trim(),
-                    href: link.getAttribute('href'),
-                    score: scorePotentialTermsLink(link)
-                };
-            }).filter(item => item.score > 30); // Only keep likely candidates
-            
-            // Sort by score
-            scoredLinks.sort((a, b) => b.score - a.score);
-            
-            return scoredLinks.slice(0, 10); // Return top 10 candidates
-        }""")
-        
-        print(f"Found {len(structure_links)} potential terms links from structural analysis")
-        
-        for link in structure_links:
-            print(f"Structure link: {link['text']} → {link['href']} (Score: {link['score']})")
-            
-            try:
-                # Skip Cloudflare challenge URLs
-                if (link['href'] and 'cloudflare.com' in link['href'] and 
-                    ('challenge' in link['href'] or 'utm_source=challenge' in link['href'])):
-                    print(f"Skipping Cloudflare challenge URL: {link['href']}")
-                    continue
-                
-                # Try direct navigation
-                if link['href']:
-                    href = link['href']
-                    if not href.startswith('http'):
-                        # Handle relative URLs
-                        base_url = current_page.url.split('?')[0]
-                        if href.startswith('/'):
-                            origin = '/'.join(base_url.split('/')[:3])
-                            href = origin + href
-                        else:
-                            href = base_url + '/' + href
-                    
-                    # Check if this is likely a Cloudflare challenge URL before navigating
-                    if ('cloudflare.com' in href and 
-                        ('challenge' in href or 'utm_source=challenge' in href)):
-                        print(f"Skipping Cloudflare challenge URL: {href}")
-                        continue
-                        
-                    print(f"Navigating to potential terms link: {href}")
-                    await current_page.goto(href, timeout=3000)
-                    
-                    # Check if we landed on a Cloudflare challenge page
-                    is_challenge = await current_page.evaluate("""() => {
-                        const html = document.documentElement.innerHTML.toLowerCase();
-                        return html.includes('cloudflare') && 
-                               (html.includes('challenge') || 
-                                html.includes('security check') || 
-                                html.includes('captcha') || 
-                                html.includes('verify your browser'));
-                    }""")
-                    
-                    if is_challenge:
-                        print("Detected Cloudflare challenge page, skipping")
-                        return None
-                    
-                    # Verify if this looks like a terms page
-                    is_terms = await current_page.evaluate("""() => {
-                        const text = document.body.textContent.toLowerCase();
-                        const headings = Array.from(document.querySelectorAll('h1, h2, h3')).map(h => h.textContent.toLowerCase());
-                        
-                        // Check for terms indicators in the page
-                        return {
-                            title: document.title,
-                            hasTermsInTitle: document.title.toLowerCase().includes('terms'),
-                            hasTermsInHeadings: headings.some(h => h.includes('terms')),
-                            hasTermsContent: text.includes('terms') && text.includes('use') && text.includes('agree'),
-                            textLength: text.length,
-                            isCloudflareChallenge: text.includes('cloudflare') && 
-                                                   (text.includes('challenge') || text.includes('security check'))
-                        };
-                    }""")
-                    
-                    # Log verification details
-                    print(f"Page verification: {is_terms}")
-                    
-                    # Skip if it's a Cloudflare challenge
-                    if is_terms.get('isCloudflareChallenge', False):
-                        print("Detected Cloudflare challenge page, skipping")
-                        return None
-                    
-                    # If this is likely a terms page, return it
-                    if ((is_terms['hasTermsInTitle'] or is_terms['hasTermsInHeadings']) and 
-                        is_terms['hasTermsContent'] and is_terms['textLength'] > 2000):
-                        print(f"Confirmed terms page: {current_page.url}")
-                        return current_page.url, current_page
-                    else:
-                        print("Not a terms page, continuing search...")
-                        # Navigate back for next attempt
-                        await current_page.goto(page.url, timeout=3000)
-            except Exception as e:
-                print(f"Error checking structure link: {e}")
-                # Continue to the next link
-                try:
-                    await current_page.goto(page.url, timeout=3000)
-                except:
-                    pass
-                    
-    except Exception as e:
-        print(f"Document structure analysis error: {e}")
+    # Final check at bottom
+    await current_page.wait_for_timeout(1000)
+    visited_url, current_page, unverified_result = await find_matching_link(current_page, context, unverified_result)
+    if visited_url:
+        return visited_url, current_page, unverified_result
 
-    print("Exhausted all dynamic methods. No terms link found.")
-    return visited_url, current_page
-
-async def check_for_better_terms_link(page, context):
-    """
-    Check if the terms page has any additional terms links that might be more specific.
-    Returns the new URL and page if found, otherwise returns None and the original page.
-    """
-    print("Checking for more specific terms links on the terms page...")
-    
-    # Store the starting URL before navigation
-    starting_url = page.url
-    
-    # Use the same JavaScript function to find any additional terms links
-    new_url, new_page = await find_all_links_js(page, context)
-    
-    if new_url and new_url != starting_url:
-        print(f"Found better terms link: {new_url}")
-        return new_url, new_page
-    else:
-        print("No better terms link found, keeping current page")
-        return None, page
+    return None, current_page, unverified_result
 
 async def bs4_fallback_link_finder(page, context):
-    """
-    Use robust HTML parsing as a fallback method to find terms links
-    """
+    """Use robust HTML parsing as a fallback method to find terms links."""
     print("Using robust HTML parsing to find terms links...")
-    
-    # Get the page HTML
-    html_content = await page.content()
-    
-    # Check for Cloudflare challenge page
-    is_cloudflare_challenge = await page.evaluate("""(html) => {
-        // Check for common Cloudflare indicators
-        return (html.includes('cloudflare') && 
-                (html.includes('challenge') || 
-                 html.includes('security check') || 
-                 html.includes('captcha') || 
-                 html.includes('verify your browser')));
-    }""", html_content)
-    
-    if is_cloudflare_challenge:
-        print("Detected Cloudflare challenge page, cannot extract reliable links")
-        return None, page
-    
-    # Use more robust attribute-aware parsing to find links even with custom attributes
-    terms_links = await page.evaluate("""(html) => {
-        // Custom HTML parser to handle complex link structures with various attributes
-        function extractLinks(html) {
-            const links = [];
-            
-            // Regular expression to find all anchor tags with their contents
-            // This works even with custom data attributes
-            const anchorRegex = /<a\\s+([^>]*)>(.*?)<\\/a>/gi;
-            let match;
-            
-            while ((match = anchorRegex.exec(html)) !== null) {
-                const attributes = match[1];
-                const linkText = match[2].replace(/<[^>]*>/g, '').trim(); // Remove any HTML inside the link text
-                
-                // Extract href from attributes
-                const hrefMatch = attributes.match(/href=["']([^"']*)["']/i);
-                const href = hrefMatch ? hrefMatch[1] : '';
-                
-                // Store other potentially useful attributes
-                const classMatch = attributes.match(/class=["']([^"']*)["']/i);
-                const idMatch = attributes.match(/id=["']([^"']*)["']/i);
-                const dataAttributes = {};
-                
-                // Extract any data-* attributes
-                const dataAttrMatches = attributes.matchAll(/data-([\\w-]+)=["']([^"']*)["']/gi);
-                for (const dataMatch of dataAttrMatches) {
-                    dataAttributes[dataMatch[1]] = dataMatch[2];
+
+    try:
+        # Get the page HTML
+        html_content = await page.content()
+
+        # Check for Cloudflare challenge page
+        is_cloudflare_challenge = await page.evaluate("""(html) => {
+            return (html.includes('cloudflare') && 
+                    (html.includes('challenge') || 
+                     html.includes('security check') || 
+                     html.includes('captcha') || 
+                     html.includes('verify your browser')));
+        }""", html_content)
+
+        if is_cloudflare_challenge:
+            print("Detected Cloudflare challenge page, cannot extract reliable links")
+            return None, page
+
+        # Use more robust attribute-aware parsing to find links even with custom attributes
+        terms_links = await page.evaluate("""(html) => {
+            function extractLinks(html) {
+                const links = [];
+                const anchorRegex = /<a\\s+([^>]*)>(.*?)<\\/a>/gi;
+                let match;
+
+                while ((match = anchorRegex.exec(html)) !== null) {
+                    const attributes = match[1];
+                    const linkText = match[2].replace(/<[^>]*>/g, '').trim();
+                    const hrefMatch = attributes.match(/href=["']([^"']*)["']/i);
+                    const href = hrefMatch ? hrefMatch[1] : '';
+                    const classMatch = attributes.match(/class=["']([^"']*)["']/i);
+                    const idMatch = attributes.match(/id=["']([^"']*)["']/i);
+                    const dataAttributes = {};
+
+                    const dataAttrMatches = attributes.matchAll(/data-([\\w-]+)=["']([^"']*)["']/gi);
+                    for (const dataMatch of dataAttrMatches) {
+                        dataAttributes[dataMatch[1]] = dataMatch[2];
+                    }
+
+                    links.push({
+                        text: linkText,
+                        href: href,
+                        className: classMatch ? classMatch[1] : '',
+                        id: idMatch ? idMatch[1] : '',
+                        dataAttributes: dataAttributes,
+                        rawAttributes: attributes
+                    });
                 }
-                
-                links.push({
-                    text: linkText,
-                    href: href,
-                    className: classMatch ? classMatch[1] : '',
-                    id: idMatch ? idMatch[1] : '',
-                    dataAttributes: dataAttributes,
-                    rawAttributes: attributes
-                });
+
+                return links;
             }
-            
-            return links;
-        }
-        
-        // Extract all links from the HTML
-        const allLinks = extractLinks(html);
-        
-        // Filter to terms-related links with a more comprehensive approach
-        const termsLinks = allLinks.filter(link => {
-            const href = link.href.toLowerCase();
-            const text = link.text.toLowerCase();
-            
-            // Strong text indicators
-            const textIndicators = [
-                'terms of service', 'terms of use', 'terms and conditions',
-                'terms & conditions', 'terms', 'tos', 'legal terms', 'conditions of use',
-                'user agreement', 'legal', 'legal notices'
-            ];
-            
-            // Strong href indicators
-            const hrefIndicators = [
-                '/terms', '/tos', '/terms-of-service', '/terms-of-use',
-                '/legal/terms', '/terms-and-conditions', '/conditions',
-                '/legal', '/legal-terms', '/eula'
-            ];
-            
-            // Check for exact matches in text (highest priority)
-            const hasExactTextMatch = textIndicators.some(indicator => 
-                text === indicator || text.replace(/\\s+/g, '') === indicator.replace(/\\s+/g, '')
-            );
-            
-            // Check for terms contained in text
-            const hasTermsInText = text.includes('term') || text.includes('condition') || 
-                                  text.includes('legal') || text.includes('tos');
-            
-            // Check for terms in href
-            const hasTermsInHref = hrefIndicators.some(indicator => href.includes(indicator)) || 
-                                  href.includes('term') || href.includes('condition') || 
-                                  href.includes('legal');
-            
-            // Give priority score
-            let score = 0;
-            if (hasExactTextMatch) score += 100;
-            if (hasTermsInText) score += 50;
-            if (hasTermsInHref) score += 75;
-            
-            // Add the score to the link object
-            link.score = score;
-            
-            // Accept if any condition is met and score is above threshold
-            return score > 0;
-        });
-        
-        // Sort by score (highest first)
-        termsLinks.sort((a, b) => b.score - a.score);
-        
-        return termsLinks;
-    }""", html_content)
-    
-    print(f"Found {len(terms_links)} potential terms links with robust HTML parsing")
-    
-    # Process the found links (highest score first)
-    for link in terms_links:
-        score_display = link['score'] if 'score' in link else 0
-        print(f"Link found: '{link['text']}' → {link['href']} [Score: {score_display}]")
-        
-        try:
-            # Handle relative URLs
-            href = link['href']
-            if href and not href.startswith('http'):
-                # Convert to absolute URL
-                if href.startswith('/'):
-                    base_url = '/'.join(page.url.split('/')[:3])  # Get http(s)://domain.com
-                    href = base_url + href
-                else:
-                    base_url = page.url.split('?')[0].split('#')[0]  # Remove query/fragment
-                    if base_url.endswith('/'):
+
+            const allLinks = extractLinks(html);
+
+            const termsLinks = allLinks.filter(link => {
+                const href = link.href.toLowerCase();
+                const text = link.text.toLowerCase();
+
+                const textIndicators = [
+                    'terms of service', 'terms of use', 'terms and conditions',
+                    'terms & conditions', 'terms', 'tos', 'legal terms', 'conditions of use',
+                    'user agreement', 'legal', 'legal notices'
+                ];
+
+                const hrefIndicators = [
+                    '/terms', '/tos', '/terms-of-service', '/terms-of-use',
+                    '/legal/terms', '/terms-and-conditions', '/conditions',
+                    '/legal', '/legal-terms', '/eula'
+                ];
+
+                const hasExactTextMatch = textIndicators.some(indicator =>
+                    text === indicator || text.replace(/\\s+/g, '') === indicator.replace(/\\s+/g, '')
+                );
+
+                const hasTermsInText = text.includes('term') || text.includes('condition') ||
+                                       text.includes('legal') || text.includes('tos');
+
+                const hasTermsInHref = hrefIndicators.some(indicator => href.includes(indicator)) ||
+                                       href.includes('term') || href.includes('condition') ||
+                                       href.includes('legal');
+
+                let score = 0;
+                if (hasExactTextMatch) score += 100;
+                if (hasTermsInText) score += 50;
+                if (hasTermsInHref) score += 75;
+
+                link.score = score;
+                return score > 0;
+            });
+
+            termsLinks.sort((a, b) => b.score - a.score);
+            return termsLinks;
+        }""", html_content)
+
+        print(f"Found {len(terms_links)} potential terms links with robust HTML parsing")
+
+        for link in terms_links:
+            score_display = link['score'] if 'score' in link else 0
+            print(f"Link found: '{link['text']}' → {link['href']} [Score: {score_display}]")
+
+            try:
+                href = link['href']
+                if href and not href.startswith('http'):
+                    if href.startswith('/'):
+                        base_url = '/'.join(page.url.split('/')[:3])
                         href = base_url + href
                     else:
-                        href = base_url + '/' + href
-            
-            # Skip empty or javascript: links
-            if not href or href.startswith('javascript:'):
-                continue
-                
-            # Try direct navigation to this link
-            if href:
+                        base_url = page.url.split('?')[0].split('#')[0]
+                        if base_url.endswith('/'):
+                            href = base_url + href
+                        else:
+                            href = base_url + '/' + href
+
+                if not href or href.startswith('javascript:'):
+                    continue
+
                 print(f"Navigating directly to: {href}")
                 try:
                     await page.goto(href, timeout=3000)
                     await page.wait_for_load_state('domcontentloaded')
-                    
-                    # Check if this looks like a terms page
+
                     terms_content = await page.evaluate("""() => {
                         const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
                         const paragraphs = Array.from(document.querySelectorAll('p'));
-                        
-                        // Check headings for terms-related content
+
                         const termsHeading = headings.some(h => {
                             const text = h.textContent.toLowerCase();
                             return text.includes('terms') || 
@@ -1414,14 +1402,12 @@ async def bs4_fallback_link_finder(page, context):
                                    text.includes('legal agreement') ||
                                    text.includes('service agreement');
                         });
-                        
-                        // Check page title
+
                         const title = document.title.toLowerCase();
                         const termsInTitle = title.includes('terms') || 
-                                            title.includes('tos') || 
-                                            title.includes('conditions');
-                        
-                        // Check first few paragraphs for legal content indicators
+                                             title.includes('tos') || 
+                                             title.includes('conditions');
+
                         const legalContent = paragraphs.slice(0, 5).some(p => {
                             const text = p.textContent.toLowerCase();
                             return text.includes('agree') ||
@@ -1431,936 +1417,448 @@ async def bs4_fallback_link_finder(page, context):
                                    text.includes('copyright') ||
                                    text.includes('intellectual property');
                         });
-                        
+
                         return termsHeading || termsInTitle || legalContent;
                     }""")
-                    
+
                     if terms_content:
                         print(f"Found terms content at: {page.url}")
                         return page.url, page
                     else:
                         print("Page doesn't appear to contain terms content")
+
                 except Exception as e:
                     print(f"Navigation error: {e}")
-        except Exception as e:
-            print(f"Error processing link: {e}")
-    
-    return None, page
 
-async def standard_terms_finder(url: str, headers: dict = None) -> tuple[str, None]:
+            except Exception as e:
+                print(f"Error processing link: {e}")
+
+        return None, page
+
+    except Exception as e:
+        print(f"Error in bs4_fallback_link_finder: {e}")
+        return None, page
+
+
+from typing import Optional
+from urllib.parse import urlparse, urljoin
+
+async def standard_terms_finder(url: str, headers: dict = None) -> tuple[Optional[str], None]:
     """
     Advanced dynamic approach to find Terms of Service links without hardcoded patterns.
     Uses site structure analysis, content evaluation, and semantic understanding to
     discover terms pages regardless of site architecture.
-    
+
     Args:
         url: The URL to scan
         headers: Optional request headers
-        
+
     Returns:
         Tuple of (terms_url, None) or (None, None) if not found
     """
-    import requests
-    from bs4 import BeautifulSoup
-    from urllib.parse import urlparse, urljoin
-    import re
-    
-    print("Using fully dynamic terms discovery algorithm...")
-    
-    # Create a session to maintain cookies across requests
-    session = requests.Session()
-    
-    # Default headers if none provided
-    if not headers:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-    
-    # Parse the target URL
-    parsed = urlparse(url)
-    base_domain = f"{parsed.scheme}://{parsed.netloc}"
-    
-    # Extract domain name for analysis
-    domain_parts = parsed.netloc.split('.')
-    main_domain = domain_parts[-2] if len(domain_parts) >= 2 else domain_parts[0]
-    
-    # Function to detect Cloudflare challenge page
-    def is_cloudflare_challenge(soup, url):
-        # Check for common Cloudflare challenge indicators
-        cloudflare_indicators = [
-            # Text patterns
-            lambda s: "cloudflare" in s.get_text().lower() and any(x in s.get_text().lower() for x in ["challenge", "security check", "captcha", "verify"]),
-            # URL patterns
-            lambda s: "cloudflare.com" in url and "challenge" in url,
-            # Meta tags
-            lambda s: any("cloudflare" in (m.get("content", "").lower() + m.get("name", "").lower()) for m in s.find_all("meta")),
-            # Scripts
-            lambda s: any("cloudflare" in script.get("src", "").lower() for script in s.find_all("script", src=True))
-        ]
-        
-        return any(indicator(soup) for indicator in cloudflare_indicators)
-    
-    # Create common URL variations for discovery
-    variations_to_try = []
-    
-    # Add the original URL
-    variations_to_try.append((url, "original url"))
-    
-    # Add base domain if different
-    if base_domain != url:
-        variations_to_try.append((base_domain, "base domain"))
-    
-    print(f"Starting discovery with {len(variations_to_try)} URL variations")
-    
-    # Collection to store all potential terms links with their scores
-    candidates = []
-    
-    # 1. SITE STRUCTURE ANALYSIS
-    # Analyze each URL variation to discover link patterns and site architecture
-    for target_url, variation_desc in variations_to_try:
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+
+        print("Using fully dynamic terms discovery algorithm...")
+
+        # Create a session to maintain cookies across requests
+        session = requests.Session()
+
+        # Store best candidate for fallback
+        best_candidate = None
+        best_score = 0
+
+        # Default headers if none provided
+        if not headers:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+
+        # Parse the target URL
+        parsed = urlparse(url)
+        base_domain = f"{parsed.scheme}://{parsed.netloc}"
+
         try:
-            print(f"Analyzing site structure at {target_url}...")
-            
+            print(f"Analyzing site structure at {base_domain}...")
+
             # Get the main page content
-            response = session.get(target_url, headers=headers, timeout=15)
+            response = session.get(base_domain, headers=headers, timeout=15)
             if response.status_code != 200:
-                print(f"Failed to access {target_url}: Status {response.status_code}")
-                continue
-                
-            # Use the final URL after any redirects
-            current_url = response.url
-            
+                print(f"Failed to access {base_domain}: Status {response.status_code}")
+                return None, None
+
             # Parse HTML
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Check if this is a Cloudflare challenge page
-            if is_cloudflare_challenge(soup, current_url):
-                print(f"Detected Cloudflare challenge page at {current_url}, skipping this variation")
-                continue
-                
-            # 1.1 SITE METADATA ANALYSIS
-            # Extract site metadata for clues about the platform and structure
-            generator = None
-            for meta in soup.find_all('meta'):
-                if meta.get('name', '').lower() == 'generator':
-                    generator = meta.get('content', '').lower()
-                    print(f"Detected site generator: {generator}")
-                    break
-            
-            # 1.2 NAVIGATION STRUCTURE ANALYSIS
-            # Find all navigation elements (headers, footers, menus)
-            nav_elements = []
-            
+
             # Look for footers (where terms are commonly found)
-            footer_sections = soup.select('footer, .footer, #footer, [class*="footer"], [id*="footer"], .legal, .bottom, [class*="bottom"]')
-            nav_elements.extend(footer_sections)
-            
-            # Look for navigation menus
-            nav_sections = soup.select('nav, .nav, #nav, [class*="nav"], .menu, #menu, [class*="menu"]')
-            nav_elements.extend(nav_sections)
-            
-            # Look for legal sections
-            legal_sections = soup.select('.legal, #legal, [class*="legal"], .policies, [class*="policy"]')
-            nav_elements.extend(legal_sections)
-            
-            print(f"Found {len(nav_elements)} navigation elements to analyze")
-            
-            # 1.3 NAVIGATION LINK ANALYSIS
-            # Extract and analyze all links from navigation elements
-            nav_links = []
-            for nav in nav_elements:
-                for link in nav.find_all('a', href=True):
+            footer_sections = soup.select(
+                'footer, .footer, #footer, [class*="footer"], [id*="footer"], .legal, .bottom, [class*="bottom"]'
+            )
+
+            # Extract links from footers
+            candidates = []
+            for footer in footer_sections:
+                for link in footer.find_all('a', href=True):
                     href = link.get('href')
-                    text = link.get_text().strip()
-                    
-                    # Skip non-web links
+                    text = link.get_text().strip().lower()
+
                     if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
                         continue
-                    
+
                     # Create absolute URL
-                    abs_url = href if href.startswith(('http://', 'https://')) else urljoin(current_url, href)
-                    
-                    # Add to navigation links collection
-                    nav_links.append({
-                        'url': abs_url,
-                        'text': text,
-                        'element_type': str(nav.name),
-                        'classes': ' '.join(nav.get('class', [])),
-                    })
-            
-            # 1.4 LINK TEXT SEMANTIC ANALYSIS
-            # Analyze link text to identify terms-related terminology patterns
-            common_terms = {}
-            for link in nav_links:
-                text = link.get('text', '').lower()
-                
-                # Skip empty or very short text
-                if not text or len(text) < 3:
-                    continue
-                    
-                # Count occurrences of potentially legal-related words
-                words = text.split()
-                for word in words:
-                    if len(word) > 2:  # Skip very short words
-                        if word not in common_terms:
-                            common_terms[word] = 0
-                        common_terms[word] += 1
-            
-            # Find the most common terms
-            sorted_terms = sorted(common_terms.items(), key=lambda x: x[1], reverse=True)
-            
-            # Extract the top terms for analysis
-            top_terms = [term[0] for term in sorted_terms[:10]]
-            print(f"Top terms in navigation links: {', '.join(top_terms)}")
-            
-            # 1.5 CANDIDATE SCORING
-            # Score each link based on how likely it is to be a terms page
-            for link in nav_links:
-                url = link.get('url')
-                text = link.get('text', '').lower()
-                element_type = link.get('element_type', '')
-                classes = link.get('classes', '').lower()
-                
-                # Skip links without URL or text
-                if not url or not text:
-                    continue
-                
-                score = 0
-                text_signals = []
-                url_signals = []
-                
-                # TEXT ANALYSIS - Score based on link text
-                term_indicators = [
-                    'term', 'terms', 'condition', 'agreement', 'legal', 'use', 
-                    'service', 'tos', 'policy'
-                ]
-                
-                # Check if link text contains terms indicators
-                for indicator in term_indicators:
-                    if indicator in text:
-                        score += 10
-                        text_signals.append(indicator)
-                
-                # Exact match bonus for common terms formatting
-                if re.search(r'terms\s+of\s+(use|service)', text, re.IGNORECASE):
-                    score += 50
-                    text_signals.append('exact_match')
-                elif re.search(r'terms(\s+and|\s+&)?\s+conditions', text, re.IGNORECASE):
-                    score += 40
-                    text_signals.append('exact_match')
-                elif text == 'terms' or text == 'tos':
-                    score += 35
-                    text_signals.append('exact_match')
-                
-                # Exclude likely non-terms links
-                if 'privacy' in text or 'cookie' in text:
-                    score -= 40
-                    text_signals.append('privacy_penalty')
-                    
-                # URL ANALYSIS - Score based on URL structure
-                parsed_url = urlparse(url)
-                path = parsed_url.path.lower()
-                
-                # Extract path components for pattern matching
-                path_parts = [p for p in path.split('/') if p]
-                
-                # Check for terms-related path components
-                for part in path_parts:
-                    if 'term' in part:
-                        score += 20
-                        url_signals.append('term_in_path')
-                    if 'condition' in part:
-                        score += 15
-                        url_signals.append('condition_in_path')
-                    if 'legal' in part:
-                        score += 10
-                        url_signals.append('legal_in_path')
-                    if 'use' in part and len(part) < 10:  # Avoid matching longer words
-                        score += 5
-                        url_signals.append('use_in_path')
-                
-                # POSITION ANALYSIS - Score based on position in document
-                if element_type == 'footer' or 'footer' in classes:
-                    score += 15  # Terms links often in footer
-                    text_signals.append('footer_location')
-                if 'legal' in classes or 'policy' in classes:
-                    score += 10  # Terms links often in legal sections
-                    text_signals.append('legal_section')
-                
-                # Add candidate with score and signals
-                candidates.append({
-                    'url': url,
-                    'text': text,
-                    'score': score,
-                    'text_signals': text_signals,
-                    'url_signals': url_signals,
-                    'source': f"{variation_desc}_{element_type}"
-                })
-        
-        except Exception as e:
-            print(f"Error analyzing {target_url}: {str(e)}")
-            continue
-    
-    # 2. ALL-PAGE ANALYSIS
-    # If we don't have good candidates from navigation, look at all links
-    if not candidates or max(c['score'] for c in candidates) < 30:
-        try:
-            print("No strong candidates found in navigation. Analyzing all page links...")
-            
-            # Get the homepage
-            response = session.get(base_domain, headers=headers, timeout=15)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Find all links on the page
-                for link in soup.find_all('a', href=True):
-                    href = link.get('href')
-                    text = link.get_text().strip()
-                    
-                    # Skip non-web links
-                    if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
-                        continue
-                    
-                    # Create absolute URL
-                    abs_url = href if href.startswith(('http://', 'https://')) else urljoin(response.url, href)
-                    
-                    # Skip if already in candidates
-                    if any(c['url'] == abs_url for c in candidates):
-                        continue
-                    
-                    # Basic scoring
+                    abs_url = href if href.startswith(('http://', 'https://')) else urljoin(base_domain, href)
+
+                    # Score the link
                     score = 0
-                    text_signals = []
-                    url_signals = []
-                    
+                    signals = []
+
                     # Text analysis
-                    text_lower = text.lower()
-                    if 'terms' in text_lower:
+                    if 'terms' in text:
+                        score += 30
+                        signals.append('terms_in_text')
+                    if 'service' in text and 'terms' in text:
                         score += 20
-                        text_signals.append('terms_in_text')
-                    if 'condition' in text_lower:
+                        signals.append('service_in_text')
+                    if 'conditions' in text:
                         score += 15
-                        text_signals.append('condition_in_text')
-                    if 'legal' in text_lower:
+                        signals.append('conditions_in_text')
+                    if 'legal' in text:
                         score += 10
-                        text_signals.append('legal_in_text')
-                    
+                        signals.append('legal_in_text')
+
                     # URL analysis
-                    url_lower = abs_url.lower()
-                    if 'terms' in url_lower:
+                    if 'terms' in abs_url.lower():
+                        score += 20
+                        signals.append('terms_in_url')
+                    if 'tos' in abs_url.lower():
                         score += 15
-                        url_signals.append('terms_in_url')
-                    if 'legal' in url_lower:
+                        signals.append('tos_in_url')
+                    if 'legal' in abs_url.lower():
                         score += 10
-                        url_signals.append('legal_in_url')
-                    
-                    # Only add if score is above threshold
+                        signals.append('legal_in_url')
+
+                    # Add to candidates if score is above threshold
                     if score >= 20:
                         candidates.append({
                             'url': abs_url,
                             'text': text,
                             'score': score,
-                            'text_signals': text_signals,
-                            'url_signals': url_signals,
-                            'source': 'all_page_links'
+                            'signals': signals
                         })
+
+            # Sort by score
+            candidates.sort(key=lambda x: x['score'], reverse=True)
+
+            # Get the best candidate
+            if candidates:
+                best_candidate = candidates[0]['url']
+                best_score = candidates[0]['score']
+                return best_candidate, None
+
+            return None, None
+
         except Exception as e:
-            print(f"Error analyzing all page links: {str(e)}")
-    
-    # 3. ROBOTS.TXT ANALYSIS
-    # Look for paths in robots.txt that might lead to terms pages
-    try:
-        print("Analyzing robots.txt for potential terms pages...")
-        robots_url = f"{base_domain}/robots.txt"
-        response = session.get(robots_url, headers=headers, timeout=5)
-        
-        if response.status_code == 200:
-            # Parse robots.txt content
-            robots_content = response.text.lower()
-            
-            # Look for paths that might be terms-related
-            potential_paths = []
-            
-            # Extract paths from Disallow and Allow statements
-            for line in robots_content.split('\n'):
-                line = line.strip()
-                if line.startswith(('disallow:', 'allow:')):
-                    parts = line.split(':', 1)
-                    if len(parts) > 1:
-                        path = parts[1].strip()
-                        if path and path != '/':
-                            # Check if this path looks like it might be terms-related
-                            if any(term in path for term in ['term', 'legal', 'condition', 'tos']):
-                                potential_paths.append(path)
-            
-            # Check each potential path
-            for path in potential_paths:
-                test_url = urljoin(base_domain, path)
-                
-                # Skip if already in candidates
-                if any(c['url'] == test_url for c in candidates):
-                    continue
-                
-                # Basic scoring
-                score = 25  # Base score for being in robots.txt
-                url_signals = ['found_in_robots']
-                
-                # URL analysis
-                path_lower = path.lower()
-                if 'term' in path_lower:
-                    score += 15
-                    url_signals.append('term_in_path')
-                if 'legal' in path_lower:
-                    score += 10
-                    url_signals.append('legal_in_path')
-                
-                # Add to candidates
-                candidates.append({
-                    'url': test_url,
-                    'text': f"Path from robots.txt: {path}",
-                    'score': score,
-                    'text_signals': [],
-                    'url_signals': url_signals,
-                    'source': 'robots_txt'
-                })
+            print(f"Error analyzing site: {str(e)}")
+            return None, None
+
     except Exception as e:
-        print(f"Error analyzing robots.txt: {str(e)}")
+        print(f"Error in standard_terms_finder: {str(e)}")
+        return None, None
+
+async def check_for_better_terms_link(page, current_url):
+    """Check if current page has links to more specific terms pages.
     
-    # 4. SITEMAP ANALYSIS
-    # Look for terms pages in sitemap
+    Args:
+        page: Playwright page object
+        current_url: URL of current page
+        
+    Returns:
+        Tuple of (better_url, new_page) or (None, current_page)
+    """
     try:
-        print("Analyzing sitemap for potential terms pages...")
-        # Common sitemap locations
-        sitemap_locations = [
-            f"{base_domain}/sitemap.xml",
-            f"{base_domain}/sitemap_index.xml",
-            f"{base_domain}/sitemap.php",
-            f"{base_domain}/sitemaps/sitemap.xml"
-        ]
+        # Extract base domain for validation
+        parsed_url = urlparse(current_url)
+        base_domain = parsed_url.netloc
         
-        sitemap_urls = []
+        # Get all links and score them using our dynamic approach
+        links = await page.evaluate("""() => {
+            const links = Array.from(document.querySelectorAll('a[href]'));
+            return links.map(link => ({
+                text: link.textContent.toLowerCase().trim(),
+                href: link.href
+            }))
+            .filter(link => 
+                link.href && 
+                !link.href.startsWith('javascript:') && 
+                !link.href.startsWith('mailto:') &&
+                link.href !== window.location.href
+            );
+        }""")
         
-        # Try to find and parse sitemap
-        for sitemap_url in sitemap_locations:
-            try:
-                response = session.get(sitemap_url, headers=headers, timeout=10)
-                if response.status_code == 200 and '<url>' in response.text.lower():
-                    # Extract URLs using regex for simplicity
-                    urls = re.findall(r'<loc>(.*?)</loc>', response.text, re.IGNORECASE)
-                    sitemap_urls.extend(urls)
-                    print(f"Found {len(urls)} URLs in sitemap at {sitemap_url}")
-            except:
-                continue
-        
-        # Filter for potential terms URLs
-        for url in sitemap_urls:
-            # Skip if already in candidates
-            if any(c['url'] == url for c in candidates):
+        scored_links = []
+        for link in links:
+            if not link['href']:
                 continue
                 
-            # Check if URL contains terms-related patterns
-            url_lower = url.lower()
-            if 'term' in url_lower or 'legal' in url_lower or 'condition' in url_lower:
-                # Basic scoring
-                score = 20  # Base score for being in sitemap
-                signals = []
-                
-                if 'term' in url_lower:
-                    score += 15
-                    signals.append('term_in_url')
-                if 'legal' in url_lower:
-                    score += 10
-                    signals.append('legal_in_url')
-                
-                # Add to candidates
-                candidates.append({
-                    'url': url,
-                    'text': f"URL from sitemap",
-                    'score': score,
-                    'text_signals': [],
-                    'url_signals': signals,
-                    'source': 'sitemap'
-                })
-    except Exception as e:
-        print(f"Error analyzing sitemap: {str(e)}")
-    
-    # 5. CONTENT VERIFICATION
-    # Sort candidates by score and verify content
-    print(f"Found {len(candidates)} potential terms page candidates")
-    
-    # Sort by score (highest first)
-    candidates.sort(key=lambda x: x['score'], reverse=True)
-    
-    # Display top candidates
-    print("Top candidates:")
-    for i, candidate in enumerate(candidates[:5]):
-        print(f"  {i+1}. {candidate['text']} → {candidate['url']} (Score: {candidate['score']})")
-        print(f"     Signals: {', '.join(candidate['text_signals'] + candidate['url_signals'])}")
-    
-    # Verify top candidates
-    for candidate in candidates[:10]:  # Check top 10 candidates
-        try:
-            print(f"Verifying: {candidate['url']}")
-            
-            # Get page content
-            response = session.get(candidate['url'], headers=headers, timeout=15)
-            if response.status_code != 200:
-                print(f"  Failed: Status code {response.status_code}")
+            # Skip links to external domains
+            link_domain = urlparse(link['href']).netloc
+            if not (link_domain == base_domain or 
+                    link_domain.endswith('.' + base_domain) or 
+                    base_domain.endswith('.' + link_domain)):
                 continue
+                
+            # Dynamic scoring based on text and URL patterns
+            score = 0
+            text = link['text'].lower()
+            url = link['href'].lower()
             
-            # Parse HTML
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extract text content
-            content = soup.get_text().lower()
-            title = soup.title.string.lower() if soup.title else ""
-            
-            # Look for headings
-            headings = []
-            for h in soup.find_all(['h1', 'h2', 'h3']):
-                heading_text = h.get_text().strip().lower()
-                if heading_text:
-                    headings.append(heading_text)
-            
-            # Verify this is a terms page
-            content_score = 0
-            verification_signals = []
-            
-            # Title verification
-            if 'terms' in title:
-                content_score += 20
-                verification_signals.append('terms_in_title')
-            if 'condition' in title:
-                content_score += 15
-                verification_signals.append('conditions_in_title')
-            if 'use' in title and 'terms' in title:
-                content_score += 25
-                verification_signals.append('terms_of_use_in_title')
-            if 'service' in title and 'terms' in title:
-                content_score += 25
-                verification_signals.append('terms_of_service_in_title')
-            
-            # Heading verification
-            for heading in headings[:3]:  # Check first few headings
-                if 'terms' in heading:
-                    content_score += 20
-                    verification_signals.append('terms_in_heading')
+            # Score based on text indicators
+            for term, priority in exactMatchPriorities.items():
+                if term in text:
+                    score += priority
                     break
-            
-            # Content verification
-            # Check for legal terminology typical in terms pages
-            legal_terms = [
-                'agree', 'agreement', 'accept', 'terms', 'conditions', 
-                'provision', 'clause', 'license', 'copyright', 'intellectual property',
-                'liability', 'limitation', 'warranty', 'disclaimer', 'jurisdiction'
-            ]
-            
-            found_legal_terms = []
-            for term in legal_terms:
-                if term in content:
-                    found_legal_terms.append(term)
-            
-            # If we found multiple legal terms, this is likely a terms page
-            if len(found_legal_terms) >= 5:
-                content_score += len(found_legal_terms) * 2
-                verification_signals.append(f"found_{len(found_legal_terms)}_legal_terms")
-            
-            # Check content length - terms pages are usually lengthy
-            if len(content) > 3000:
-                content_score += 15
-                verification_signals.append('long_content')
-            
-            # Common phrases in terms pages
-            terms_phrases = [
-                'terms of use', 'terms of service', 'terms and conditions',
-                'by using', 'you agree to', 'by accessing', 'please read',
-                'your use of', 'these terms', 'without limitation'
-            ]
-            
-            found_phrases = []
-            for phrase in terms_phrases:
-                if phrase in content:
-                    found_phrases.append(phrase)
-            
-            if found_phrases:
-                content_score += len(found_phrases) * 3
-                verification_signals.append(f"found_{len(found_phrases)}_terms_phrases")
-            
-            # Combine original score with content verification score
-            total_score = candidate['score'] + content_score
-            
-            print(f"  Verification score: {content_score} (Total: {total_score})")
-            print(f"  Verification signals: {', '.join(verification_signals)}")
-            
-            # If this is very likely a terms page, return it
-            if total_score >= 100 or (content_score >= 50 and candidate['score'] >= 30):
-                print(f"Found terms page: {response.url}")
-                return response.url, None
-            
-            # If it's a promising candidate but not entirely sure, keep it as a backup
-            if total_score >= 70:
-                print(f"Found promising terms page candidate: {response.url}")
+                    
+            # Check URL patterns
+            if 'terms-of-service' in url or 'terms_of_service' in url:
+                score += 40
+            elif 'terms-of-use' in url or 'terms_of_use' in url:
+                score += 35
+            elif 'terms-and-conditions' in url or 'terms_and_conditions' in url:
+                score += 30
+            elif 'terms' in url or 'tos' in url:
+                score += 25
                 
-                # If this is the highest scoring candidate so far, return it
-                if candidate == candidates[0]:
-                    print(f"Using highest scoring candidate as terms page: {response.url}")
-                    return response.url, None
+            # Check for context indicators suggesting more detailed content
+            context_words = ['full', 'detailed', 'complete', 'latest', 'updated', 'specific']
+            for word in context_words:
+                if word in text:
+                    score += 10
+                    break
+                    
+            # PDF and legal documents often contain the full terms
+            if url.endswith('.pdf'):
+                score += 15
+                
+            scored_links.append((link['href'], score))
+            
+        # Sort by score and check top links
+        scored_links.sort(key=lambda x: x[1], reverse=True)
         
-        except Exception as e:
-            print(f"  Error verifying {candidate['url']}: {str(e)}")
+        # Only check high-confidence links
+        for link_url, score in scored_links:
+            if score < 50:  # Only use high-confidence matches
+                continue
+                
+            print(f"Found potential deeper terms link with score {score}: {link_url}")
+            
+            try:
+                # Navigate to the link
+                await page.goto(link_url, timeout=10000, wait_until="domcontentloaded")
+                
+                # Verify if this is actually a terms page
+                is_terms_page = await page.evaluate("""() => {
+                    const text = document.body.innerText.toLowerCase();
+                    const title = document.title.toLowerCase();
+                    
+                    // Key indicators of terms content
+                    const termsIndicators = [
+                        'terms of service', 
+                        'terms of use', 
+                        'terms and conditions',
+                        'agree to these terms',
+                        'by using this site',
+                        'legally binding',
+                        'liability',
+                        'disclaimer',
+                        'intellectual property'
+                    ];
+                    
+                    const hasTermsIndicators = termsIndicators.some(term => text.includes(term));
+                    const hasTermsInTitle = title.includes('terms') || 
+                                           title.includes('tos') || 
+                                           title.includes('legal');
+                    
+                    // Simple content length check - terms pages tend to be long
+                    const isLongContent = text.length > 3000;
+                    
+                    return {
+                        isTermsPage: hasTermsIndicators || (hasTermsInTitle && isLongContent),
+                        textLength: text.length,
+                        hasTermsInTitle: hasTermsInTitle
+                    };
+                }""")
+                
+                if is_terms_page['isTermsPage']:
+                    print(f"Verified better terms page: {page.url}")
+                    return page.url, page
+                else:
+                    print(f"Page doesn't appear to be a valid terms page")
+                    
+            except Exception as e:
+                print(f"Navigation error checking link: {e}")
+                continue
+                
+        return None, page
+    except Exception as e:
+        print(f"Error checking for better terms links: {e}")
+        return None, page
+
+def is_valid_terms_page(content):
+    """Validate if page content matches terms page criteria.
     
-    # If we found any reasonable candidates, return the best one
-    if candidates and candidates[0]['score'] >= 40:
-        best_url = candidates[0]['url']
-        print(f"Using best available candidate as terms page: {best_url}")
-        return best_url, None
+    Args:
+        content: Dict with text and headings from page
+        
+    Returns:
+        bool: True if valid terms page
+    """
+    # Required terms that should be present
+    required_terms = ['agree', 'terms', 'conditions', 'service']
     
-    # No good candidates found
-    print("No suitable terms page found with dynamic discovery")
-    return None, None
+    # Legal sections that indicate a terms page
+    legal_sections = [
+        'intellectual property',
+        'limitation of liability', 
+        'governing law',
+        'dispute resolution',
+        'privacy policy',
+        'disclaimer',
+        'warranty',
+        'termination',
+        'user obligations',
+        'acceptable use'
+    ]
+    
+    # Legal phrases that indicate terms content
+    legal_phrases = [
+        'by using',
+        'you agree to',
+        'by accessing',
+        'please read',
+        'your use of',
+        'these terms',
+        'subject to',
+        'without limitation',
+        'reserves the right',
+        'at its discretion',
+        'may modify',
+        'may terminate',
+        'copyright',
+        'intellectual property',
+        'liability',
+        'indemnify',
+        'disclaimer',
+        'govern',
+        'jurisdiction',
+        'arbitration',
+        'dispute'
+    ]
+    
+    if not content or 'text' not in content:
+        return False
+        
+    text = content.get('text', '').lower()
+    headings = content.get('headings', [])
+    
+    # Check for a minimum content length (terms pages tend to be long)
+    if len(text) < 2000:  # Reduced from 3000 to catch more pages
+        return False
+        
+    # Check required terms
+    terms_count = sum(1 for term in required_terms if term in text)
+    
+    # Check legal sections
+    section_count = sum(1 for section in legal_sections if section in text)
+    
+    # Check legal phrases
+    phrase_count = sum(1 for phrase in legal_phrases if phrase in text)
+    
+    # Check headings
+    has_terms_heading = any(
+        h for h in headings 
+        if 'terms' in h or 'agreement' in h or 'conditions' in h or 'legal' in h
+    )
+    
+    # Calculate score based on content
+    score = 0
+    if terms_count >= 2:
+        score += 30
+    if section_count >= 2:
+        score += 20
+    if phrase_count >= 3:
+        score += 30
+    if has_terms_heading:
+        score += 20
+    
+    # More lenient approach - if enough legal phrases and some required terms, it's likely a terms page
+    if score >= 70 or (phrase_count >= 5 and terms_count >= 1):
+        return True
+        
+    # Special case: if page is very large (>5000 chars) and has some legal phrases and terms, it's likely a terms page
+    if len(text) > 5000 and phrase_count >= 3 and terms_count >= 1:
+        return True
+    
+    return False
+
+def get_known_tos_url(domain: str) -> Optional[str]:
+    """
+    Return known TOS URLs for popular domains that might block scraping.
+    This helps bypass crawling for sites with known TOS locations.
+    
+    Args:
+        domain: The domain to check (e.g., 'openai.com')
+        
+    Returns:
+        Optional[str]: The TOS URL if known, None otherwise
+    """
+    # Don't rely on hardcoded URLs - use dynamic discovery instead
+    return None
 
 async def main():
-    browser = None
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-
-            url = 'https://hungrystudio.com/'  # or any other target
-            await page.goto(url, wait_until='domcontentloaded')
-
-            # Wait a bit longer for modern sites to fully load
-            await page.wait_for_timeout(2000)
-            
-            # First try finding links using JavaScript
-            print("Trying to find links using JavaScript method...")
-            visited_url, final_page = await find_all_links_js(page, context)
-            
-            # If no link found, try with scrolling method
-            if not visited_url:
-                print("No links found with JavaScript. Trying scrolling method...")
-                visited_url, final_page = await smooth_scroll_and_click(page, context)
-            
-            # If still no link found, try robust HTML parsing method
-            if not visited_url:
-                print("All standard methods failed. Trying robust HTML parsing method...")
-                visited_url, final_page = await bs4_fallback_link_finder(page, context)
-                
-            # Finally, if all dynamic methods failed, try standard method as a last resort
-            if not visited_url:
-                print("All dynamic methods failed. Trying standard HTML scraping method...")
-                terms_url, _ = await standard_terms_finder(url, headers=None)
-                if terms_url:
-                    # Check if this is a Cloudflare URL before accepting it
-                    if "cloudflare.com" in terms_url and any(param in terms_url for param in ["challenge", "utm_source=challenge"]):
-                        print(f"Ignoring Cloudflare challenge URL: {terms_url}")
-                        visited_url = None
-                        final_page = page
-                    else:
-                        print(f"Found terms link with standard method: {terms_url}")
-                        visited_url = terms_url
-                        # We don't have a page object, so just reuse the original
-                        final_page = page
-
-            if visited_url:
-                print(f"Found initial terms link: {visited_url}")
-                initial_url = visited_url
-                initial_page = final_page
-                
-                # Check for better/more specific terms links on the terms page
-                better_url, better_page = await check_for_better_terms_link(final_page, context)
-
-                # Cloudflare check on the better URL as well
-                if better_url and "cloudflare.com" in better_url and any(param in better_url for param in ["challenge", "utm_source=challenge"]):
-                    print(f"Ignoring Cloudflare challenge URL as better URL: {better_url}")
-                    better_url = None
-                    better_page = initial_page
-
-                # Important: Update the final URL and page if a better one was found
-                if better_url:
-                    # Use the better terms page as the final result
-                    visited_url = better_url
-                    final_page = better_page
-                    print(f"SUCCESS! Final terms URL: {visited_url}")
-                else:
-                    # Keep the original terms page but be explicit
-                    print(f"SUCCESS! Using initial terms URL: {initial_url}")
-                    visited_url = initial_url
-                    final_page = initial_page
-                
-                # Add additional check for final URL - verify we're not on an intermediate page
-                final_check = await verify_final_link(final_page, context)
-                if final_check:
-                    print(f"Verified final destination URL: {final_check}")
-                    visited_url = final_check
-                
-                # Get page title
-                title = await final_page.title()
-                print(f"📄 Page title: {title}")
-                
-                # Optionally extract some content for verification
-                try:
-                    # Use a much simpler approach to extract text
-                    content_preview = await final_page.evaluate("""() => {
-                        try {
-                            // Get basic info without complex string manipulation
-                            const heading = document.querySelector('h1, h2, h3');
-                            const paragraph = document.querySelector('p');
-                            
-                            let result = '';
-                            
-                            // Add heading if found
-                            if (heading) {
-                                result += heading.textContent.trim() + ' | ';
-                            }
-                            
-                            // Add paragraph if found
-                            if (paragraph) {
-                                const pText = paragraph.textContent.trim();
-                                // Keep it reasonably short
-                                result += pText.length > 100 ? pText.substring(0, 100) + '...' : pText;
-                            }
-                            
-                            return result || 'No preview text available';
-                        } catch (e) {
-                            // Return error information if something fails
-                            return 'Error extracting preview: ' + e.message;
-                        }
-                    }""")
-                    
-                    print(f"📝 Content preview: {content_preview}")
-                except Exception as e:
-                    print(f"Could not extract content preview: {e}")
-            else:
-                print("No terms link was found or clicked with any method")
-            
-            # Close browser always
-            print("Closing browser...")
-            await browser.close()
-            return True
-    except Exception as e:
-        print(f"❌ Error in main process: {e}")
-        
-        # Close browser on error
-        if browser:
-            print("Closing browser due to error...")
-            await browser.close()
-        return False
-
-# Add a new function to verify if the current link is the final destination
-async def verify_final_link(page, context):
-    """
-    Check if the current page contains links to more specific terms pages.
-    This handles cases where the initial terms page is a hub/index that links to the actual terms.
-    """
-    print("Verifying if this is the final Terms of Service destination...")
-    
-    # Get the base domain for validation
-    base_domain = await page.evaluate("""() => {
-        try {
-            return new URL(window.location.href).hostname;
-        } catch (e) {
-            return '';
-        }
-    }""")
-    
-    print(f"Base domain for verification: {base_domain}")
-    
-    # Look for links with strong indicators that they lead to more specific terms
-    final_links = await page.evaluate("""(baseDomain) => {
-        // Helper function to extract domain from URL
-        function getDomain(url) {
-            try {
-                return new URL(url).hostname;
-            } catch (e) {
-                return '';
-            }
-        }
-        
-        // Helper function to check if URL is from same domain or subdomain
-        function isSameDomainOrSubdomain(url, baseDomain) {
-            const urlDomain = getDomain(url);
-            return urlDomain === baseDomain || urlDomain.endsWith('.' + baseDomain);
-        }
-        
-        // Find all links on the current page
-        const links = Array.from(document.querySelectorAll('a[href]'));
-        
-        // Strong indicators that a link points to more specific terms
-        const strongIndicators = [
-            { text: 'terms of service', score: 100 },
-            { text: 'terms of use', score: 95 },
-            { text: 'user agreement', score: 90 },
-            { text: 'terms and conditions', score: 85 },
-            { text: 'service agreement', score: 80 }
-        ];
-        
-        // Medium indicators (may be more specific terms)
-        const mediumIndicators = [
-            { text: 'platform terms', score: 75 },
-            { text: 'website terms', score: 70 },
-            { text: 'specific terms', score: 65 },
-            { text: 'updated terms', score: 60 },
-            { text: 'latest terms', score: 55 }
-        ];
-        
-        // Score each link
-        const scoredLinks = links.map(link => {
-            const text = link.textContent.toLowerCase().trim();
-            const href = link.getAttribute('href');
-            
-            // Skip empty links or current page links
-            if (!href || href === '#' || href === window.location.href) {
-                return { score: -1 };
-            }
-            
-            // Skip Cloudflare links
-            if (href.includes('cloudflare.com')) {
-                return { score: -1 };
-            }
-            
-            // Get absolute URL
-            let absoluteHref;
-            try {
-                absoluteHref = new URL(href, window.location.href).href;
-            } catch (e) {
-                return { score: -1 }; // Skip invalid URLs
-            }
-            
-            // Skip if not from same domain or subdomain
-            if (!isSameDomainOrSubdomain(absoluteHref, baseDomain)) {
-                return { score: -1 };
-            }
-            
-            let score = 0;
-            let matchReason = [];
-            
-            // Check for exact match with strong indicators
-            for (const indicator of strongIndicators) {
-                if (text === indicator.text) {
-                    score += indicator.score;
-                    matchReason.push(`exact_match: ${indicator.text}`);
-                }
-            }
-            
-            // Check for partial match with strong indicators
-            if (score === 0) {
-                for (const indicator of strongIndicators) {
-                    if (text.includes(indicator.text)) {
-                        score += indicator.score * 0.7;  // 70% of the full score
-                        matchReason.push(`contains: ${indicator.text}`);
-                    }
-                }
-            }
-            
-            // Check medium indicators
-            for (const indicator of mediumIndicators) {
-                if (text === indicator.text) {
-                    score += indicator.score;
-                    matchReason.push(`exact_match: ${indicator.text}`);
-                } else if (text.includes(indicator.text)) {
-                    score += indicator.score * 0.7;
-                    matchReason.push(`contains: ${indicator.text}`);
-                }
-            }
-            
-            // Check if URL contains strong indicators
-            if (href.includes('terms-of-service') || href.includes('terms_of_service')) {
-                score += 40;
-                matchReason.push('terms_of_service_in_url');
-            } else if (href.includes('terms-of-use') || href.includes('terms_of_use')) {
-                score += 35;
-                matchReason.push('terms_of_use_in_url');
-            } else if (href.includes('user-agreement') || href.includes('user_agreement')) {
-                score += 30;
-                matchReason.push('user_agreement_in_url');
-            }
-            
-            // Format
-            if (href.endsWith('.pdf')) {
-                score += 15;  // PDFs often contain final terms
-                matchReason.push('pdf_format');
-            }
-            
-            // Context words suggesting deeper/more detailed content
-            const contextWords = ['full', 'detailed', 'complete', 'latest', 'updated', 'specific'];
-            for (const word of contextWords) {
-                if (text.includes(word)) {
-                    score += 10;
-                    matchReason.push(`context: ${word}`);
-                    break;  // Only count once
-                }
-            }
-            
-            return {
-                text: text,
-                href: href,
-                absoluteHref: absoluteHref,
-                domain: getDomain(absoluteHref),
-                score: score,
-                matchReason: matchReason
-            };
-        }).filter(item => item.score > 30);  // Only keep significant matches
-        
-        // Sort by score
-        scoredLinks.sort((a, b) => b.score - a.score);
-        
-        return scoredLinks.slice(0, 3);  // Return top 3 candidates
-    }""", base_domain);
-    
-    if not final_links:
-        print("Current page appears to be the final destination")
-        return None
-    
-    print(f"Found {len(final_links)} potential deeper terms links")
-    
-    # Check the top scoring link
-    if final_links and final_links[0]['score'] > 50:
-        top_link = final_links[0]
-        print(f"Found promising deeper link: '{top_link['text']}' → {top_link['href']} (Score: {top_link['score']}, Domain: {top_link['domain']})")
-        
-        try:
-            # Skip if from different domain
-            if not (top_link['domain'] == base_domain or top_link['domain'].endswith('.' + base_domain)):
-                print(f"Skipping link from different domain: {top_link['domain']} != {base_domain}")
-                return None
-            
-            # Use the absolute href directly since we've already validated it
-            if 'absoluteHref' in top_link:
-                print(f"Using validated final terms link: {top_link['absoluteHref']}")
-                return top_link['absoluteHref']
-            
-            # Fallback to regular href resolution if needed
-            href = top_link['href']
-            if not href.startswith('http'):
-                if href.startswith('/'):
-                    base_url = '/'.join(page.url.split('/')[:3])
-                    href = base_url + href
-                else:
-                    base_url = page.url.split('?')[0].split('#')[0]
-                    if base_url.endswith('/'):
-                        href = base_url + href
-                    else:
-                        href = base_url + '/' + href
-            
-            print(f"Using resolved final terms link: {href}")
-            return href
-            
-        except Exception as e:
-            print(f"Error processing final link: {e}")
-            return None
-    
-    return None
+    """Main function for direct script usage."""
+    # This function is not needed as the API endpoint handles the logic
+    pass
 
 # Run the script
 if __name__ == "__main__":
-    # Example of direct script usage
-    print("Running TOS finder script directly")
-    asyncio.run(main())
+    # No need to run directly as this is used as an API endpoint
+    pass
+
+async def try_fallback_paths(url, page):
+    """Try common fallback paths when direct navigation fails."""
+    print("Trying fallback paths...")
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
     
-    # If you want to test the FastAPI endpoint functionality:
-    # import uvicorn
-    # uvicorn.run("app.api.v1.endpoints.tos:router", host="127.0.0.1", port=8000)
+    # Use dynamic discovery to generate potential paths
+    potential_urls = await parse_domain_for_common_paths(domain, url)
+    
+    # Try each potential URL
+    for potential_url in potential_urls[:10]:  # Limit to first 10 to avoid too many requests
+        try:
+            print(f"Trying fallback path: {potential_url}")
+            response = await page.goto(potential_url, timeout=5000, wait_until="domcontentloaded")
+            
+            if response and response.ok:
+                print(f"✅ Successfully accessed fallback path: {potential_url}")
+                
+                # Verify this is actually a terms page
+                is_terms = await verify_terms_content(page)
+                if is_terms:
+                    print(f"✅ Verified as terms page: {potential_url}")
+                    return potential_url
+                else:
+                    print(f"❌ Not a terms page: {potential_url}")
+        except Exception as e:
+            print(f"❌ Error accessing fallback path {potential_url}: {e}")
+            continue
+    
+    # If all else fails, return most likely path as unverified
+    if potential_urls:
+        return potential_urls[0]
+    
+    return None
