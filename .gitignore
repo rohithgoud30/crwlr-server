@@ -55,6 +55,7 @@ ENV/
 # Project specific
 logs/
 .pytest_cache/
+scroll_to_bottom.py
 
 # Docker
 Dockerfile
