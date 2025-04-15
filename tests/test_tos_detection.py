@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 sys.path.append(".")
 
-from app.api.v1.endpoints.tos import TosRequest, TosResponse
+from app.models.tos import ToSRequest, ToSResponse
 from app.api.v1.endpoints.tos import router as tos_router
 from app.api.v1.endpoints.utils import normalize_url
 
