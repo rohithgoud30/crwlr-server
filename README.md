@@ -107,6 +107,7 @@ The API is protected with API key authentication to ensure secure access. This r
 
    ```
    API_KEY=your_unique_api_key_here
+   GEMINI_API_KEY=your_gemini_api_key_here
    ```
 
 2. Including the API key in all requests as an HTTP header:
@@ -116,20 +117,19 @@ The API is protected with API key authentication to ensure secure access. This r
    ```
 
 3. For deployment to Cloud Run:
-   - The deployment script (`deploy.sh`) uses environment variables to set the API key
-   - You must first set these environment variables before running the script:
-     ```bash
-     export API_KEY=your_unique_api_key_here
-     export GEMINI_API_KEY=your_gemini_api_key_here
-     ./deploy.sh
-     ```
+   - The deployment script (`deploy.sh`) automatically reads API keys from your `.env` file
+   - Make sure your `.env` file contains both `API_KEY` and `GEMINI_API_KEY` values
+   - Simply run `./deploy.sh` to deploy with the correct API keys
+   - The script never reveals or exposes your API keys in logs
    - For Cloud Build deployments, the API keys are stored as Secret Manager secrets
    - The cloudbuild.yaml file is configured to access these secrets securely
 
 To manually set or update the API key on an existing Cloud Run service:
 
 ```bash
-export API_KEY=your_api_key_here
+# Get API key from .env file
+API_KEY=$(grep -o 'API_KEY=.*' .env | cut -d '=' -f2)
+# Update Cloud Run service
 gcloud run services update crwlr-server --platform managed --region us-east4 --set-env-vars API_KEY=$API_KEY
 ```
 

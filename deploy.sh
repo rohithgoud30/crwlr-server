@@ -3,16 +3,24 @@
 # Exit on any error
 set -e
 
-# Check for required environment variables
-if [ -z "$API_KEY" ]; then
-  echo "Error: API_KEY environment variable is not set."
-  echo "Please set it using: export API_KEY=your-api-key"
+# Load environment variables from .env file
+if [ -f .env ]; then
+  echo "Loading API keys from .env file..."
+  # Use grep to extract the API keys from .env file
+  API_KEY=$(grep -o 'API_KEY=.*' .env | cut -d '=' -f2)
+  GEMINI_API_KEY=$(grep -o 'GEMINI_API_KEY=.*' .env | cut -d '=' -f2)
+else
+  echo "Error: .env file not found."
+  echo "Please create a .env file with API_KEY and GEMINI_API_KEY."
   exit 1
 fi
 
-if [ -z "$GEMINI_API_KEY" ]; then
-  echo "Error: GEMINI_API_KEY environment variable is not set."
-  echo "Please set it using: export GEMINI_API_KEY=your-gemini-api-key"
+# Check if the variables were loaded properly
+if [ -z "$API_KEY" ] || [ -z "$GEMINI_API_KEY" ]; then
+  echo "Error: API_KEY and/or GEMINI_API_KEY not found in .env file."
+  echo "Please make sure your .env file contains:"
+  echo "API_KEY=your_api_key_here"
+  echo "GEMINI_API_KEY=your_gemini_api_key_here"
   exit 1
 fi
 
