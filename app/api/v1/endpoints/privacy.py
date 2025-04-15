@@ -121,13 +121,14 @@ async def find_privacy(request: PrivacyRequest) -> PrivacyResponse:
                     print(f"Error trying common path {common_url}: {e}")
                     continue
                 
-            return handle_navigation_failure(url, unverified_result)
+                return handle_navigation_failure(url, unverified_result)
             
         # Optimized method ordering: Try fastest methods first
         methods = [
             (find_all_links_js, "javascript"),
             (smooth_scroll_and_click, "scroll"),
-            (find_matching_link, "standard")
+            (find_matching_link, "standard"),
+            (analyze_landing_page, "content_analysis")
         ]
         
         for method_func, method_name in methods:
@@ -522,7 +523,7 @@ def handle_error(url: str, unverified_result: Optional[str], error: str) -> Priv
     if unverified_result:
         return PrivacyResponse(
             url=url,
-            privacy_url=unverified_result,
+            pp_url=unverified_result,
             success=True,
             message="Found potential privacy link (unverified)",
             method_used="dynamic_detection_unverified"
@@ -536,7 +537,7 @@ def handle_error(url: str, unverified_result: Optional[str], error: str) -> Priv
     if "timeout" in error.lower() or "navigation" in error.lower() or "403" in error:
         return PrivacyResponse(
             url=url,
-            privacy_url=likely_privacy_url,
+            pp_url=likely_privacy_url,
             success=True,
             message="Generated likely privacy path after timeout/navigation error (unverified)",
             method_used="timeout_fallback_path"
@@ -544,7 +545,7 @@ def handle_error(url: str, unverified_result: Optional[str], error: str) -> Priv
         
     return PrivacyResponse(
         url=url,
-        privacy_url=None,
+        pp_url=None,
         success=False,
         message=f"Error during browser automation: {error}",
         method_used="none"
