@@ -22,5 +22,5 @@ COPY . .
 # Set environment variables
 ENV PORT=8080
 
-# Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${PORT}"] 
+# Run the application using run.py which handles environment variables
+CMD ["python", "run.py"] 
