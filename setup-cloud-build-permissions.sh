@@ -30,8 +30,12 @@ echo "Creating Cloud Build triggers for different environments..."
 
 # Read the GitHub repository URL - this assumes you have a GitHub remote set up
 GITHUB_REPO_URL=$(git config --get remote.origin.url)
-GITHUB_REPO_URL=${GITHUB_REPO_URL#*github.com/}
-GITHUB_REPO_URL=${GITHUB_REPO_URL%.git}
+GITHUB_REPO_NAME=${GITHUB_REPO_URL#*github.com/}
+GITHUB_REPO_NAME=${GITHUB_REPO_NAME%.git}
+GITHUB_OWNER=$(echo $GITHUB_REPO_NAME | cut -d'/' -f1)
+GITHUB_REPO=$(echo $GITHUB_REPO_NAME | cut -d'/' -f2)
+
+echo "GitHub repository: $GITHUB_OWNER/$GITHUB_REPO"
 
 # Store Gemini API key as a secret (you'll need to have this available)
 echo "Please enter your Gemini API key:"
@@ -58,24 +62,26 @@ create_trigger() {
   echo "Creating trigger for $branch branch deploying to $service_name..."
   
   if [ "$is_manual" = true ]; then
-    # Create manual trigger (not event-based)
+    # Create manual trigger with approval required
     gcloud builds triggers create github \
       --name="$trigger_name" \
-      --repo="$GITHUB_REPO_URL" \
-      --branch="$branch" \
-      --build-config="cloudbuild.yaml" \
-      --substitutions="_SERVICE_NAME=$service_name,_GEMINI_API_KEY=projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest" \
       --region="us-east4" \
-      --require-approval
+      --repo-owner="$GITHUB_OWNER" \
+      --repo-name="$GITHUB_REPO" \
+      --branch-pattern="^$branch$" \
+      --build-config="cloudbuild.yaml" \
+      --require-approval \
+      --substitutions="_SERVICE_NAME=$service_name,_GEMINI_API_KEY=projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest"
   else
-    # Create automatic trigger (event-based)
+    # Create automatic trigger that runs on push
     gcloud builds triggers create github \
       --name="$trigger_name" \
-      --repo="$GITHUB_REPO_URL" \
-      --branch="$branch" \
+      --region="us-east4" \
+      --repo-owner="$GITHUB_OWNER" \
+      --repo-name="$GITHUB_REPO" \
+      --branch-pattern="^$branch$" \
       --build-config="cloudbuild.yaml" \
-      --substitutions="_SERVICE_NAME=$service_name,_GEMINI_API_KEY=projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest" \
-      --region="us-east4"
+      --substitutions="_SERVICE_NAME=$service_name,_GEMINI_API_KEY=projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest"
   fi
 }
 
@@ -92,7 +98,7 @@ echo "2. github-trigger-test - Manual trigger to deploy to crwlr-server-test fro
 echo "3. github-trigger-dev - Manual trigger to deploy to crwlr-server-dev from the dev branch"
 echo ""
 echo "To manually deploy from test or dev branches, use:"
-echo "gcloud builds triggers run github-trigger-test --branch=test --region=us-east4"
-echo "gcloud builds triggers run github-trigger-dev --branch=dev --region=us-east4"
+echo "gcloud builds triggers run github-trigger-test --region=us-east4"
+echo "gcloud builds triggers run github-trigger-dev --region=us-east4"
 echo ""
 echo "The Gemini API key has been stored as a secret and linked to the triggers." 
