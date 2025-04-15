@@ -5,6 +5,18 @@ set -e
 
 BRANCH=$(git branch --show-current)
 
+# Security check for service account keys in the codebase
+if git ls-files | grep -E "\.json$" | grep -i "cogent\-sunspot|service\-account|credentials" > /dev/null; then
+    echo "⚠️ WARNING: Potential service account key files detected in the repository!"
+    echo "Please remove these files immediately and store credentials ONLY as GitHub secrets."
+    echo "Check .gitignore to ensure key files are properly excluded."
+    read -p "Do you want to continue anyway? (y/n): " SEC_CONFIRM
+    if [ "$SEC_CONFIRM" != "y" ]; then
+        echo "Aborting deployment."
+        exit 1
+    fi
+fi
+
 if [ "$BRANCH" != "main" ]; then
     echo "⚠️ You are not on the main branch (current: $BRANCH)"
     read -p "Do you want to continue anyway? (y/n): " CONFIRM

@@ -81,4 +81,8 @@ scroll_to_bottom.py
 # Google Cloud service account keys
 *-key.json
 sa-key.json
-*-sa-key.json 
+*-sa-key.json
+*.service-account.json
+*credentials*.json
+*-sa-*.json
+cogent-sunspot-*.json 

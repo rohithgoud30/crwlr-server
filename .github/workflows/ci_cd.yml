@@ -36,6 +36,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      # Authenticate to Google Cloud
+      # Make sure to add the GCP_SA_KEY secret in GitHub repository settings
+      # This should be the JSON content of a GCP service account key with appropriate permissions
       - id: 'auth'
         uses: 'google-github-actions/auth@v1'
         with:
