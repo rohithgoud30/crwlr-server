@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     
     # API Keys
     GEMINI_API_KEY: str = ""
+    API_KEY: str = ""
     
     # BACKEND_CORS_ORIGINS is a comma-separated list of origins
     BACKEND_CORS_ORIGINS: Union[List[str], str] = []

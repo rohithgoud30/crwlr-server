@@ -32,7 +32,10 @@ version_suffix = f" ({branch_name})" if branch_name else ""
 
 app = FastAPI(
     title=f"{settings.PROJECT_NAME}{version_suffix}",
-    description=f"API Documentation for CRWLR Server. Current branch: **{branch_name}**",
+    description=f"API Documentation for CRWLR Server. Current branch: **{branch_name}**\n\n"
+                f"### Authentication\n"
+                f"This API is protected with API Key authentication.\n"
+                f"Include the `X-API-Key` header with your API key in all requests.",
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     version="1.0.0",
 )
