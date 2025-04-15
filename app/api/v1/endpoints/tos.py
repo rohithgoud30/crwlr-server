@@ -77,6 +77,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
     result = None
     method_used = ""
     browser = None
+    playwright = None
     unverified_result = None  # Initialize unverified_result here
     
     # Common terms paths to try if everything else fails
@@ -91,7 +92,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
     
     try:
         browser, context, page, random_delay = await setup_browser()
-        page.set_default_timeout(30000)
+        playwright = page.playwright
         
         success, response, patterns = await navigate_with_retry(page, url)
         if not success:
@@ -136,38 +137,54 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         return handle_error(url, unverified_result, str(e))
     finally:
         if browser:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception as e:
+                print(f"Error closing browser: {e}")
+        if playwright:
+            try:
+                await playwright.stop()
+            except Exception as e:
+                print(f"Error stopping playwright: {e}")
 
 async def setup_browser():
     """
     Setup browser with stealth configurations to avoid detection.
+    Enhanced for Cloud Run environment.
     """
-    async with async_playwright() as p:
+    playwright = await async_playwright().start()
+    try:
         # Use random user agent
         user_agent = random.choice(User_Agents)
         
-        # Launch browser with optimized settings
-        browser = await p.chromium.launch(
+        # Launch browser with optimized settings for Cloud Run
+        browser = await playwright.chromium.launch(
             headless=True,
             args=[
                 '--disable-web-security',
                 '--no-sandbox',
                 '--start-maximized',
                 '--window-size=1920,1080', 
-                '--force-device-scale-factor=1',
                 '--disable-notifications',
                 '--disable-infobars',
                 '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',  # Hide automation
-                '--disable-features=IsolateOrigins,site-per-process', # Disable site isolation
+                '--disable-blink-features=AutomationControlled',
+                '--disable-features=IsolateOrigins,site-per-process',
                 '--ignore-certificate-errors',
-                '--enable-features=NetworkService',
                 '--disable-accelerated-2d-canvas',
                 '--disable-gpu',
                 '--lang=en-US,en;q=0.9',
                 '--disable-extensions',
-                '--mute-audio'
-            ]
+                '--mute-audio',
+                # Cloud Run specific args
+                '--single-process',
+                '--no-zygote',
+                '--disable-setuid-sandbox',
+                '--headless=new',
+                '--hide-scrollbars'
+            ],
+            chromium_sandbox=False,
+            slow_mo=100  # Add a small delay between actions
         )
         
         # Create context with stealth settings
@@ -191,7 +208,9 @@ async def setup_browser():
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"Windows"',
                 'cache-control': 'max-age=0'
-            }
+            },
+            # Increased timeouts
+            default_timeout=60000
         )
         
         # Add stealth scripts to hide automation
@@ -201,200 +220,38 @@ async def setup_browser():
                 get: () => undefined
             });
             
-            // Override plugins array
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => {
-                    return [
-                        {
-                            0: {
-                                type: 'application/x-google-chrome-pdf',
-                                suffixes: 'pdf',
-                                description: 'Portable Document Format',
-                                enabledPlugin: Plugin
-                            },
-                            description: 'Chrome PDF Plugin',
-                            filename: 'internal-pdf-viewer',
-                            length: 1,
-                            name: 'Chrome PDF Plugin'
-                        },
-                        {
-                            0: {
-                                type: 'application/pdf',
-                                suffixes: 'pdf',
-                                description: '',
-                                enabledPlugin: Plugin
-                            },
-                            description: 'Chrome PDF Viewer',
-                            filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-                            length: 1,
-                            name: 'Chrome PDF Viewer'
-                        }
-                    ];
-                }
-            });
+            // Additional stealth modifications
+            if (window.navigator.plugins) {
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+            }
             
-            // Override languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en']
-            });
-            
-            // Override permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = function (parameters) {
-                if (parameters.name === 'notifications') {
-                    return Promise.resolve({state: Notification.permission});
-                }
-                return originalQuery(parameters);
-            };
-            
-            // Hide iframe focus
-            const originalFunc = HTMLElement.prototype.focus;
-            HTMLElement.prototype.focus = function() {
-                const tagName = this.tagName.toLowerCase();
-                if (tagName === 'iframe') {
-                    // Do nothing for iframes to avoid focus-detection techniques
-                } else {
-                    originalFunc.apply(this, arguments);
-                }
-            };
-            
-            // Override Chrome object to appear more realistic
-            window.chrome = {
-                app: {
-                    isInstalled: false,
-                    InstallState: {
-                        DISABLED: 'disabled',
-                        INSTALLED: 'installed',
-                        NOT_INSTALLED: 'not_installed'
-                    },
-                    RunningState: {
-                        CANNOT_RUN: 'cannot_run',
-                        READY_TO_RUN: 'ready_to_run',
-                        RUNNING: 'running'
-                    }
-                },
-                runtime: {
-                    OnInstalledReason: {
-                        CHROME_UPDATE: 'chrome_update',
-                        INSTALL: 'install',
-                        SHARED_MODULE_UPDATE: 'shared_module_update',
-                        UPDATE: 'update'
-                    },
-                    OnRestartRequiredReason: {
-                        APP_UPDATE: 'app_update',
-                        OS_UPDATE: 'os_update',
-                        PERIODIC: 'periodic'
-                    },
-                    PlatformArch: {
-                        ARM: 'arm',
-                        ARM64: 'arm64',
-                        MIPS: 'mips',
-                        MIPS64: 'mips64',
-                        X86_32: 'x86-32',
-                        X86_64: 'x86-64'
-                    },
-                    PlatformNaclArch: {
-                        ARM: 'arm',
-                        MIPS: 'mips',
-                        MIPS64: 'mips64',
-                        X86_32: 'x86-32',
-                        X86_64: 'x86-64'
-                    },
-                    PlatformOs: {
-                        ANDROID: 'android',
-                        CROS: 'cros',
-                        LINUX: 'linux',
-                        MAC: 'mac',
-                        OPENBSD: 'openbsd',
-                        WIN: 'win'
-                    },
-                    RequestUpdateCheckStatus: {
-                        NO_UPDATE: 'no_update',
-                        THROTTLED: 'throttled',
-                        UPDATE_AVAILABLE: 'update_available'
-                    }
-                }
-            };
+            if (window.navigator.languages) {
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en', 'es']
+                });
+            }
         """)
         
         # Create a page
         page = await context.new_page()
         
-        # Add random mouse movements and delays to mimic human behavior
-        await page.add_init_script("""
-            // Add random mouse movement events
-            function simulateMouseMovement() {
-                const events = ['mousemove', 'mouseover', 'mouseout'];
-                const event = events[Math.floor(Math.random() * events.length)];
-                const x = Math.floor(Math.random() * window.innerWidth);
-                const y = Math.floor(Math.random() * window.innerHeight);
-                
-                const mouseEvent = new MouseEvent(event, {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: x,
-                    clientY: y
-                });
-                
-                document.elementFromPoint(x, y)?.dispatchEvent(mouseEvent);
-            }
-            
-            // Simulate random scrolling
-            function simulateScroll() {
-                if (Math.random() > 0.7) {
-                    window.scrollBy({
-                        top: Math.random() * 100 - 50,
-                        behavior: 'smooth'
-                    });
-                }
-            }
-            
-            // Set up periodic simulation
-            if (typeof window._simulationInterval === 'undefined') {
-                window._simulationInterval = setInterval(() => {
-                    if (Math.random() > 0.7) simulateMouseMovement();
-                    if (Math.random() > 0.8) simulateScroll();
-                }, 2000 + Math.random() * 3000);
-            }
-        """)
-        
         # Random delay function to mimic human behavior
-        async def random_delay():
-            delay = random.randint(500, 3000)  # 0.5-3 seconds
+        async def random_delay(min_ms=500, max_ms=3000):
+            delay = random.randint(min_ms, max_ms)  # 0.5-3 seconds
             await page.wait_for_timeout(delay)
-            
-        # Add custom fingerprint to evade fingerprinting
-        await page.evaluate("""() => {
-            // Modify navigator properties often used for fingerprinting
-            const audioContext = window.AudioContext || window.webkitAudioContext;
-            if (audioContext) {
-                const originalGetChannelData = AudioBuffer.prototype.getChannelData;
-                AudioBuffer.prototype.getChannelData = function() {
-                    const result = originalGetChannelData.apply(this, arguments);
-                    if (result.length > 10) {
-                        // Add very subtle noise
-                        for (let i = 0; i < result.length; i += 100) {
-                            const noise = Math.random() * 0.0000001;
-                            result[i] = result[i] + noise;
-                        }
-                    }
-                    return result;
-                };
-            }
-            
-            // Canvas fingerprinting protection
-            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-            HTMLCanvasElement.prototype.toDataURL = function(type) {
-                if (type === 'image/png' && this.width === 16 && this.height === 16) {
-                    // This is likely a fingerprinting attempt
-                    return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAArBJREFUOE9jZGBgYHhycXILw1+Gs39//P7659uf//9+/fn/+/ef/7/++P6f5elpfcYMDxgZaQ0AAcMzS1MdGP4w3IeZym4qx+lovpg554S5LFb5f//+IfH/MzAw3mdgYGD/zwAFVxgZ/pcCnfIXxGdklGJkZLwLU8jM8P//qdA2I3dLbUZY0P3/9/fT349f//35/e8u0Kp3/5nZmP9L/S8BOUMKaMmxZ5emJDL8/X+7o85Z+e+fvxhWfvwA9P7v/3/+/v//5x/Yxf+f//+XdPDpidP/t58ZGBgYGPbs2cPCyf6nHhTw386/A5r+G+LCn3/+/v37/9/ff0Df/vn773/V///pQP//f3BgYGBgSE5OZlAQVJBlYPhf+3Td3T83nn799/33//9//oH99h9o1p9//xn+/P3/5z8jI9BrjA/+M7zWu8vwsJ+BgYGBIS8vj4FTmL2egeF/4vbZJ7lBrvv/////f/+BYfAfZGLpf4b/Rf8ZGOqBTmZYy8DAkK7AwMDAwCAnJ8cADJCm3w/eV3279/bP33//GMAmAQP8/79/jH+B/k/4n/IbmJ5i/v1juKmyluEpUB0DQ3x8PIOzs/PVPw/+zL515cGnfz////8FEvv/H0SMsZyRkdH1f8ilfwwMDGeAyquYWFhYwGEBAy9evGB49+7d9n///tX/vfmXh0FAx+T/wrtS//8/Ynn2//9/ZeWHCvf//P4zA+gPb6aTJ0/CbQcDoG+BQrEMDEwn/v1nOPfr958ZLEyfGf4xMl3594/hHzs7++3///+7/vv3X2ZgELZjC2SY4M+fPwYwPsMFhn//L/xn+P//PgPDA2CkizJwcDAwszExMDIwQpMqIwOQy/j//x9QOSOQDgfJw8RB4owQeZA4I1geKPoX5DaQGCMsvOHqkNigIAGpQ+YDAFlhLn85CtJBAAAAAElFTkSuQmCC';
-                }
-                return originalToDataURL.apply(this, arguments);
-            };
-        }""")
+        
+        # Extended page timeout for Cloud Run
+        page.set_default_timeout(60000)
         
         return browser, context, page, random_delay
+        
+    except Exception as e:
+        if 'playwright' in locals():
+            await playwright.stop()
+        print(f"Error setting up browser: {e}")
+        raise
 
 async def setup_context(browser: Browser) -> BrowserContext:
     """Set up and return a configured browser context."""
