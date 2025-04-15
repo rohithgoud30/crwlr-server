@@ -644,33 +644,29 @@ async def analyze_landing_page(page, context, unverified_result=None):
         return None, page, unverified_result
 
 def handle_navigation_failure(url: str, unverified_result: Optional[str]) -> PrivacyResponse:
-    """Handle case where navigation to the URL failed."""
-    # Parse the URL to get domain
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc
-    
+    """Handle the case where navigation to the URL failed."""
     if unverified_result:
+        # Return the unverified link but mark it as such
         return PrivacyResponse(
             url=url,
-            privacy_url=unverified_result,
+            pp_url=unverified_result,
             success=True,
-            message="Found potential privacy link (unverified)",
-            method_used="dynamic_detection_unverified"
+            message="Found a potential privacy policy URL but couldn't verify it due to navigation issues",
+            method_used="unverified_guess"
         )
+    else:
+        # Construct a common pattern as a fallback
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        likely_privacy_url = f"{base_url}/privacy"  # Most common pattern
         
-    # If no unverified result found, use a common path format with the domain
-    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-    
-    # Return a response with a dynamically generated path based on common patterns
-    likely_privacy_url = f"{base_url}/privacy"  # Most common pattern
-    
-    return PrivacyResponse(
-        url=url,
-        privacy_url=likely_privacy_url,
-        success=True,
-        message="Using common privacy path (unverified)",
-        method_used="common_path_fallback"
-    )
+        return PrivacyResponse(
+            url=url,
+            pp_url=likely_privacy_url,
+            success=True,
+            message="Based on common patterns, this might be the privacy policy URL",
+            method_used="common_pattern_guess"
+        )
 
 def handle_error(url: str, unverified_result: Optional[str], error: str) -> PrivacyResponse:
     """Handle any errors that occur during processing."""
@@ -2262,45 +2258,32 @@ def is_valid_privacy_page(content):
     return False
 
 async def main():
-    """Main function for direct script usage."""
-    import argparse
+    """Test function for development purposes."""
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python privacy.py URL")
+        return
     
-    parser = argparse.ArgumentParser(description='Find Privacy Policy page for a given URL.')
-    parser.add_argument('url', help='URL to scan for Privacy Policy')
-    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
-    parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds for navigation')
-    parser.add_argument('--output', choices=['json', 'text'], default='text', help='Output format')
-    parser.add_argument('--verify', action='store_true', help='Verify found privacy page content')
+    url = sys.argv[1]
+    print(f"Testing privacy policy finder with URL: {url}")
     
-    args = parser.parse_args()
-    
-    if args.verbose:
-        print(f"Searching for Privacy Policy for: {args.url}")
+    request = PrivacyRequest(url=url)
     
     try:
-        request = PrivacyRequest(url=args.url)
         response = await find_privacy(request)
+        print("=" * 50)
+        print("Results:")
+        print(f"URL: {response.url}")
+        print(f"Success: {response.success}")
+        print(f"Method used: {response.method_used}")
+        print(f"Message: {response.message}")
+        print(f"Privacy Policy URL: {response.pp_url if response.pp_url else 'Not found'}")
+        print("=" * 50)
         
-        if args.output == 'json':
-            import json
-            print(json.dumps({
-                'url': response.url,
-                'privacy_url': response.privacy_url,
-                'success': response.success,
-                'method': response.method_used,
-                'message': response.message
-            }, indent=2))
-        else:
-            print("\n=== Results ===")
-            print(f"URL: {response.url}")
-            print(f"Privacy Policy URL: {response.privacy_url if response.privacy_url else 'Not found'}")
-            print(f"Success: {response.success}")
-            print(f"Method: {response.method_used}")
-            print(f"Message: {response.message}")
+        return response.pp_url
         
-        return response.privacy_url
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"An error occurred: {e}")
         return None
 
 # Advanced privacy policy content analysis functions

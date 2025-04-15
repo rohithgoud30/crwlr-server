@@ -6,7 +6,7 @@ class PrivacyRequest(BaseModel):
 
 class PrivacyResponse(BaseModel):
     url: str
-    privacy_url: Optional[str] = None
+    pp_url: Optional[str] = None
     success: bool
     message: str
     method_used: str 
