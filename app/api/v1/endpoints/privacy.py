@@ -9,8 +9,8 @@ from urllib.parse import urlparse, urljoin
 from fastapi import APIRouter, HTTPException, Depends, status
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PlaywrightTimeoutError
 
-# Define User_Agents directly in this file
-User_Agents = [
+# Define User_Agents list for rotation
+USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
@@ -88,153 +88,125 @@ async def find_privacy(request: PrivacyRequest) -> PrivacyResponse:
     result = None
     method_used = ""
     browser = None
-    context = None
-    page = None
+    playwright = None
     unverified_result = None  # Initialize unverified_result here
     
-    # Common privacy paths to try if everything else fails
+    # Reduced set of common paths to try
     common_paths = [
         '/privacy', '/privacy-policy', '/privacy-notice', 
-        '/legal/privacy', '/policies/privacy',
-        '/data-policy', '/data-protection', '/cookies'
+        '/legal/privacy'
     ]
     
     parsed_url = urlparse(url)
     domain = parsed_url.netloc
     
     try:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--disable-gpu',
-                    '--disable-infobars',
-                    '--window-size=1920,1080',
-                    '--disable-extensions',
-                ]
-            )
-            
-            # Use random user agent
-            user_agent = random.choice(User_Agents)
-            
-            # Create context with stealth settings
-            context = await browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                user_agent=user_agent,
-                locale='en-US',
-                timezone_id='America/New_York',
-                extra_http_headers={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'sec-ch-ua': '"Chromium";v="123", "Not(A:Brand";v="8"',
-                    'sec-ch-ua-mobile': '?0',
-                    'sec-ch-ua-platform': '"Windows"',
-                    'cache-control': 'max-age=0'
-                }
-            )
-            
-            # Add stealth scripts to hide automation
-            await context.add_init_script("""
-                // Overwrite the automation-related properties
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-            """)
-            
-            # Create a page
-            page = await context.new_page()
-            page.set_default_timeout(30000)
-            
-            # Random delay function to mimic human behavior
-            async def random_delay():
-                delay = random.randint(500, 3000)  # 0.5-3 seconds
-                await page.wait_for_timeout(delay)
-            
-            success, response, patterns = await navigate_with_retry(page, url)
-            if not success:
-                # Try common paths before giving up
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                for path in common_paths:
-                    common_url = base_url + path
-                    print(f"Trying common path: {common_url}")
-                    try:
-                        success, response, patterns = await navigate_with_retry(page, common_url)
-                        if success and response.ok:
-                            unverified_result = common_url
-                            break
-                    except Exception as e:
-                        print(f"Error trying common path {common_url}: {e}")
-                        continue
+        # Get playwright instance first and pass it to setup_browser
+        playwright = await async_playwright().start()
+        browser, context, page, random_delay = await setup_browser(playwright)
+        
+        success, response, patterns = await navigate_with_retry(page, url, max_retries=2)  # Reduced retries
+        if not success:
+            # Try common paths before giving up (fewer paths, faster checks)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            for path in common_paths:
+                common_url = base_url + path
+                print(f"Trying common path: {common_url}")
+                try:
+                    success, response, patterns = await navigate_with_retry(page, common_url, max_retries=1)  # Only 1 retry
+                    if success and response.ok:
+                        unverified_result = common_url
+                        break
+                except Exception as e:
+                    print(f"Error trying common path {common_url}: {e}")
+                    continue
                 
-                return handle_navigation_failure(url, unverified_result)
+            return handle_navigation_failure(url, unverified_result)
             
-            result, method_used = await try_all_methods(page, context, unverified_result)
-            
-            # If no result found with regular methods, try common paths
-            if not result:
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                for path in common_paths:
-                    common_url = base_url + path
-                    print(f"Trying common path: {common_url}")
-                    try:
-                        success, response, patterns = await navigate_with_retry(page, common_url)
-                        if success and response.ok:
-                            # For common paths we don't need extensive verification
-                            unverified_result = common_url
-                            break
-                    except Exception as e:
-                        print(f"Error trying common path {common_url}: {e}")
-                        continue
+        # Optimized method ordering: Try fastest methods first
+        methods = [
+            (find_all_links_js, "javascript"),
+            (smooth_scroll_and_click, "scroll"),
+            (find_matching_link, "standard")
+        ]
+        
+        for method_func, method_name in methods:
+            try:
+                result, page, unverified_result = await method_func(page, context, unverified_result)
+                if result:
+                    method_used = method_name
+                    break  # Exit early once we found a result
+            except Exception as e:
+                print(f"Error in {method_name} method: {e}")
+                continue
+        
+        # If no result found, try a very limited set of common paths
+        if not result and not unverified_result:
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            for path in common_paths[:2]:  # Only try first 2 paths for speed
+                common_url = base_url + path
+                print(f"Trying common path: {common_url}")
+                try:
+                    success, response, patterns = await navigate_with_retry(page, common_url, max_retries=1)
+                    if success and response.ok:
+                        unverified_result = common_url
+                        break
+                except Exception as e:
+                    print(f"Error trying common path {common_url}: {e}")
+                    continue
             
             return create_response(url, result, unverified_result, method_used)
             
     except Exception as e:
         print(f"Error during browser automation: {e}")
         return handle_error(url, unverified_result, str(e))
+    finally:
+        if browser:
+            try:
+                await browser.close()
+            except Exception as e:
+                print(f"Error closing browser: {e}")
+        if playwright:
+            try:
+                await playwright.stop()
+            except Exception as e:
+                print(f"Error stopping playwright: {e}")
 
-async def setup_browser():
+async def setup_browser(playwright=None):
     """
-    Setup browser with stealth configurations to avoid detection.
+    Setup browser with optimized configurations and maximum viewport size.
     """
-    async with async_playwright() as p:
+    if not playwright:
+        playwright = await async_playwright().start()
+    try:
         # Use random user agent
-        user_agent = random.choice(User_Agents)
+        user_agent = random.choice(USER_AGENTS)
         
-        # Launch browser with optimized settings
-        browser = await p.chromium.launch(
+        # Launch browser with optimized settings and maximum window size
+        browser = await playwright.chromium.launch(
             headless=True,
             args=[
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
                 '--disable-gpu',
                 '--disable-infobars',
-                '--window-size=1920,1080',
+                '--window-size=3840,2160',  # 4K resolution for maximum size
                 '--disable-extensions',
-            ]
+                '--disable-audio',  # Disable audio for faster loading
+            ],
+            chromium_sandbox=False,
+            slow_mo=50  # Reduced delay
         )
         
-        # Create context with stealth settings
+        # Create context with maximum viewport size
         context = await browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
+            viewport={'width': 3840, 'height': 2160},  # 4K resolution viewport
             user_agent=user_agent,
             locale='en-US',
             timezone_id='America/New_York',
             extra_http_headers={
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
                 'DNT': '1',
@@ -244,214 +216,106 @@ async def setup_browser():
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
-                'sec-ch-ua': '"Chromium";v="123", "Not(A:Brand";v="8"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                'cache-control': 'max-age=0'
             }
         )
         
-        # Add stealth scripts to hide automation
+        # Add minimal stealth script
         await context.add_init_script("""
-            // Overwrite the automation-related properties
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            
-            // Override plugins array
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => {
-                    return [
-                        {
-                            0: {
-                                type: 'application/x-google-chrome-pdf',
-                                suffixes: 'pdf',
-                                description: 'Portable Document Format',
-                                enabledPlugin: Plugin
-                            },
-                            description: 'Chrome PDF Plugin',
-                            filename: 'internal-pdf-viewer',
-                            length: 1,
-                            name: 'Chrome PDF Plugin'
-                        },
-                        {
-                            0: {
-                                type: 'application/pdf',
-                                suffixes: 'pdf',
-                                description: '',
-                                enabledPlugin: Plugin
-                            },
-                            description: 'Chrome PDF Viewer',
-                            filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-                            length: 1,
-                            name: 'Chrome PDF Viewer'
-                        }
-                    ];
-                }
-            });
-            
-            // Override languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en']
-            });
-            
-            // Override permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = function (parameters) {
-                if (parameters.name === 'notifications') {
-                    return Promise.resolve({state: Notification.permission});
-                }
-                return originalQuery(parameters);
-            };
-            
-            // Hide iframe focus
-            const originalFunc = HTMLElement.prototype.focus;
-            HTMLElement.prototype.focus = function() {
-                const tagName = this.tagName.toLowerCase();
-                if (tagName === 'iframe') {
-                    // Do nothing for iframes to avoid focus-detection techniques
-                } else {
-                    originalFunc.apply(this, arguments);
-                }
-            };
-            
-            // Override Chrome object to appear more realistic
-            window.chrome = {
-                app: {
-                    isInstalled: false,
-                    InstallState: {
-                        DISABLED: 'disabled',
-                        INSTALLED: 'installed',
-                        NOT_INSTALLED: 'not_installed'
-                    },
-                    RunningState: {
-                        CANNOT_RUN: 'cannot_run',
-                        READY_TO_RUN: 'ready_to_run',
-                        RUNNING: 'running'
-                    }
-                },
-                runtime: {
-                    OnInstalledReason: {
-                        CHROME_UPDATE: 'chrome_update',
-                        INSTALL: 'install',
-                        SHARED_MODULE_UPDATE: 'shared_module_update',
-                        UPDATE: 'update'
-                    },
-                    OnRestartRequiredReason: {
-                        APP_UPDATE: 'app_update',
-                        OS_UPDATE: 'os_update',
-                        PERIODIC: 'periodic'
-                    },
-                    PlatformArch: {
-                        ARM: 'arm',
-                        ARM64: 'arm64',
-                        MIPS: 'mips',
-                        MIPS64: 'mips64',
-                        X86_32: 'x86-32',
-                        X86_64: 'x86-64'
-                    },
-                    PlatformNaclArch: {
-                        ARM: 'arm',
-                        MIPS: 'mips',
-                        MIPS64: 'mips64',
-                        X86_32: 'x86-32',
-                        X86_64: 'x86-64'
-                    },
-                    PlatformOs: {
-                        ANDROID: 'android',
-                        CROS: 'cros',
-                        LINUX: 'linux',
-                        MAC: 'mac',
-                        OPENBSD: 'openbsd',
-                        WIN: 'win'
-                    },
-                    RequestUpdateCheckStatus: {
-                        NO_UPDATE: 'no_update',
-                        THROTTLED: 'throttled',
-                        UPDATE_AVAILABLE: 'update_available'
-                    }
-                }
-            };
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         """)
         
         # Create a page
         page = await context.new_page()
         
-        # Add random mouse movements and delays to mimic human behavior
-        await page.add_init_script("""
-            // Add random mouse movement events
-            function simulateMouseMovement() {
-                const events = ['mousemove', 'mouseover', 'mouseout'];
-                const event = events[Math.floor(Math.random() * events.length)];
-                const x = Math.floor(Math.random() * window.innerWidth);
-                const y = Math.floor(Math.random() * window.innerHeight);
-                
-                const mouseEvent = new MouseEvent(event, {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: x,
-                    clientY: y
-                });
-                
-                document.elementFromPoint(x, y)?.dispatchEvent(mouseEvent);
-            }
-            
-            // Simulate random scrolling
-            function simulateScroll() {
-                if (Math.random() > 0.7) {
-                    window.scrollBy({
-                        top: Math.random() * 100 - 50,
-                        behavior: 'smooth'
-                    });
-                }
-            }
-            
-            // Set up periodic simulation
-            if (typeof window._simulationInterval === 'undefined') {
-                window._simulationInterval = setInterval(() => {
-                    if (Math.random() > 0.7) simulateMouseMovement();
-                    if (Math.random() > 0.8) simulateScroll();
-                }, 2000 + Math.random() * 3000);
-            }
-        """)
-        
-        # Random delay function to mimic human behavior
-        async def random_delay():
-            delay = random.randint(500, 3000)  # 0.5-3 seconds
+        # Random delay function with shorter times
+        async def random_delay(min_ms=200, max_ms=1000):
+            delay = random.randint(min_ms, max_ms)
             await page.wait_for_timeout(delay)
+        
+        # Set reasonable timeouts
+        page.set_default_timeout(30000)  # Reduced from 60s to 30s
+        
+        return browser, context, page, random_delay
+        
+    except Exception as e:
+        if 'playwright' in locals():
+            await playwright.stop()
+        print(f"Error setting up browser: {e}")
+        raise
+
+async def navigate_with_retry(page, url, max_retries=2):
+    """Navigate to URL with optimized retry logic."""
+    for attempt in range(max_retries):
+        try:
+            # Add shorter random delay between attempts
+            if attempt > 0:
+                delay = random.randint(1000, 2000)  # Reduced delay
+                print(f"Waiting {delay/1000}s before retry {attempt+1}...")
+                await page.wait_for_timeout(delay)
             
-        # Add custom fingerprint to evade fingerprinting
-        await page.evaluate("""() => {
-            // Modify navigator properties often used for fingerprinting
-            const audioContext = window.AudioContext || window.webkitAudioContext;
-            if (audioContext) {
-                const originalGetChannelData = AudioBuffer.prototype.getChannelData;
-                AudioBuffer.prototype.getChannelData = function() {
-                    const result = originalGetChannelData.apply(this, arguments);
-                    if (result.length > 10) {
-                        // Add very subtle noise
-                        for (let i = 0; i < result.length; i += 100) {
-                            const noise = Math.random() * 0.0000001;
-                            result[i] = result[i] + noise;
-                        }
-                    }
-                    return result;
-                };
-            }
+            print(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
             
-            // Canvas fingerprinting protection
-            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-            HTMLCanvasElement.prototype.toDataURL = function(type) {
-                if (type === 'image/png' && this.width === 16 && this.height === 16) {
-                    // This is likely a fingerprinting attempt
-                    return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAArBJREFUOE9jZGBgYHhycXILw1+Gs39//P7659uf/7/++P7/+/ef/7/++P6f5elpfcYMDxgZaQ0AAcMzS1MdGP4w3IeZym4qx+lovpg554S5LFb5f//+IfH/MzAw3mdgYGD/zwAFVxgZ/pcCnfIXxGdklGJkZLwLU8jM8P//qdA2I3dLbUZY0P3/9/fT349f//35/e8u0Kp3/5nZmP9L/S8BOUMKaMmxZ5emJDL8/X+7o85Z+e+fvxhWfvwA9P7v/3/+/v//5x/Yxf+f//+XdPDpidP/t58ZGBgYGPbs2cPCyf6nHhTw386/A5r+G+LCn3/+/v37/9/ff0Df/vn773/V///pQP//f3BgYGBgSE5OZlAQVJBlYPhf+3Td3T83nn799/33//9//oH99h9o1p9//xn+/P3/5z8jI9BrjA/+M7zWu8vwsJ+BgYGBIS8vj4FTmL2egeF/4vbZJ7lBrvv/////f/+BYfAfZGLpf4b/Rf8ZGOqBTmZYy8DAkK7AwMDAwCAnJ8cADJCm3w/eV3279/bP33//GMAmAQP8/79/jH+B/k/4n/IbmJ5i/v1juKmyluEpUB0DQ3x8PIOzs/PVPw/+zL515cGnfz////8FEvv/H0SMsZyRkdH1f8ilfwwMDGeAyquYWFhYwGEBAy9evGB49+7d9n///tX/vfmXh0FAx+T/wrtS//8/Ynn2//9/ZeWHCvf//P4zA+gPb6aTJ0/CbQcDoG+BQrEMDEwn/v1nOPfr958ZLEyfGf4xMl3594/hHzs7++3///+7/vv3X2ZgELZjC2SY4M+fPwYwPsMFhn//L/xn+P//PgPDA2CkizJwcDAwszExMDIwQpMqIwOQy/j//x9QOSOQDgfJw8RB4owQeZA4I1geKPoX5DaQGCMsvOHqkNigIAGpQ+YDAFlhLn85CtJBAAAAAElFTkSuQmCC';
-                }
-                return originalToDataURL.apply(this, arguments);
+            # Optimized navigation strategy
+            response = await page.goto(url, timeout=10000, wait_until="domcontentloaded")
+            
+            # Quick check for anti-bot measures
+            is_anti_bot, patterns = await detect_anti_bot_patterns(page)
+            if is_anti_bot:
+                if attempt < max_retries - 1:
+                    print(f"Detected anti-bot protection, trying alternative approach...")
+                    continue
+                else:
+                    print("All navigation attempts blocked by anti-bot protection")
+                    return False, response, patterns
+            
+            # Check HTTP status
+            if response.ok:
+                print(f"Navigation successful: HTTP {response.status}")
+                return True, response, []
+            else:
+                print(f"Received HTTP {response.status}")
+        except Exception as e:
+            print(f"Navigation error: {e}")
+    
+    print("All navigation attempts failed")
+    return False, None, []
+
+async def detect_anti_bot_patterns(page):
+    """
+    Optimized anti-bot detection that runs faster.
+    """
+    try:
+        # Simplified check for common anti-bot patterns
+        anti_bot_patterns = await page.evaluate("""() => {
+            const html = document.documentElement.innerHTML.toLowerCase();
+            
+            // Check for common anti-bot keywords
+            const isCloudflare = html.includes('cloudflare') && 
+                                (html.includes('security check') || 
+                                 html.includes('challenge'));
+            const isRecaptcha = html.includes('recaptcha');
+            const isHcaptcha = html.includes('hcaptcha');
+            const isBotDetection = html.includes('bot detection') || 
+                                  (html.includes('please wait') && 
+                                   html.includes('redirecting'));
+            
+            return {
+                isAntiBot: isCloudflare || isRecaptcha || isHcaptcha || isBotDetection,
+                url: window.location.href,
+                title: document.title
             };
         }""")
         
-        return browser, context, page, random_delay
+        if anti_bot_patterns['isAntiBot']:
+            print(f"\n⚠️ Detected anti-bot protection: recaptcha")
+            print(f"  URL: {anti_bot_patterns['url']}")
+            print(f"  Title: {anti_bot_patterns['title']}")
+            return True, ['bot_protection']
+        
+        return False, []
+    except Exception as e:
+        print(f"Error detecting anti-bot patterns: {e}")
+        return False, []
 
 async def try_all_methods(page: Page, context: BrowserContext, unverified_result=None) -> Tuple[Optional[str], str]:
     """Try all methods to find privacy policy link."""
@@ -639,16 +503,16 @@ def handle_navigation_failure(url: str, unverified_result: Optional[str]) -> Pri
     else:
         # Construct a common pattern as a fallback
         parsed_url = urlparse(url)
-        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-        likely_privacy_url = f"{base_url}/privacy"  # Most common pattern
-        
-        return PrivacyResponse(
-            url=url,
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    likely_privacy_url = f"{base_url}/privacy"  # Most common pattern
+    
+    return PrivacyResponse(
+        url=url,
             pp_url=likely_privacy_url,
-            success=True,
+        success=True,
             message="Based on common patterns, this might be the privacy policy URL",
             method_used="common_pattern_guess"
-        )
+    )
 
 def handle_error(url: str, unverified_result: Optional[str], error: str) -> PrivacyResponse:
     """Handle any errors that occur during processing."""
@@ -691,7 +555,7 @@ def create_response(url: str, result: Optional[str], unverified_result: Optional
     if result:
         return PrivacyResponse(
             url=url,
-            privacy_url=result,
+            pp_url=result,
             success=True,
             message=f"Found Privacy Policy page using {method_used} method",
             method_used=method_used
@@ -699,7 +563,7 @@ def create_response(url: str, result: Optional[str], unverified_result: Optional
     elif unverified_result:
         return PrivacyResponse(
             url=url,
-            privacy_url=unverified_result,
+            pp_url=unverified_result,
             success=True,
             message="Found potential privacy link (unverified)",
             method_used="dynamic_detection_unverified"
@@ -707,109 +571,11 @@ def create_response(url: str, result: Optional[str], unverified_result: Optional
     else:
         return PrivacyResponse(
             url=url,
-            privacy_url=None,
+            pp_url=None,
             success=False,
             message="Could not find Privacy Policy page",
             method_used="none"
         )
-
-async def navigate_with_retry(page, url, max_retries=3):
-    """Navigate to URL with retry logic and anti-bot detection."""
-    for attempt in range(max_retries):
-        try:
-            # Add random delay between attempts
-            if attempt > 0:
-                delay = random.randint(2000, 5000)
-                print(f"Waiting {delay/1000}s before retry {attempt+1}...")
-                await page.wait_for_timeout(delay)
-            
-            print(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
-            
-            # Use different navigation strategies
-            if attempt == 0:
-                response = await page.goto(url, timeout=15000, wait_until="domcontentloaded")
-            else:
-                # Try a different strategy on retries
-                response = await page.goto(url, timeout=15000, wait_until="networkidle")
-            
-            # Check if we hit anti-bot measures
-            is_anti_bot, patterns = await detect_anti_bot_patterns(page)
-            if is_anti_bot:
-                if attempt < max_retries - 1:
-                    print(f"Detected anti-bot protection, trying alternative approach...")
-                    # Try accessing with different headers on next attempt
-                    continue
-                else:
-                    print("All navigation attempts blocked by anti-bot protection")
-                    return False, response, patterns
-            
-            # Check HTTP status
-            if response.ok:
-                print(f"Navigation successful: HTTP {response.status}")
-                return True, response, []
-            elif response.status == 403:
-                print(f"Received HTTP 403 Forbidden")
-                if attempt < max_retries - 1:
-                    continue
-            else:
-                print(f"Received HTTP {response.status}")
-        except Exception as e:
-            print(f"Navigation error: {e}")
-    
-    print("All navigation attempts failed")
-    return False, None, []
-
-async def detect_anti_bot_patterns(page):
-    """
-    Detect if the page is showing anti-bot measures like Cloudflare, reCAPTCHA, etc.
-    """
-    try:
-        # Check for common anti-bot patterns
-        anti_bot_patterns = await page.evaluate("""() => {
-        const html = document.documentElement.innerHTML.toLowerCase();
-            const patterns = {
-                cloudflare: html.includes('cloudflare') && (
-                html.includes('security check') || 
-                    html.includes('challenge') || 
-                    html.includes('jschl-answer')
-                ),
-                recaptcha: html.includes('recaptcha') || html.includes('g-recaptcha'),
-                hcaptcha: html.includes('hcaptcha'),
-                datadome: html.includes('datadome'),
-                imperva: html.includes('imperva') || html.includes('incapsula'),
-                akamai: html.includes('akamai') && html.includes('bot'),
-                ddos_protection: html.includes('ddos') && html.includes('protection'),
-                bot_detection: (
-                    html.includes('bot detection') || 
-                    html.includes('automated access') || 
-                    (html.includes('please wait') && html.includes('redirecting'))
-                ),
-                status_code: document.title.includes('403') || document.title.includes('forbidden')
-            };
-            
-            // Check which patterns were detected
-            const detected = Object.entries(patterns)
-                .filter(([_, isDetected]) => isDetected)
-                .map(([name, _]) => name);
-                
-            return {
-                isAntiBot: detected.length > 0,
-                detectedPatterns: detected,
-                title: document.title,
-                url: window.location.href
-            };
-    }""")
-    
-        if anti_bot_patterns['isAntiBot']:
-            print(f"\n⚠️ Detected anti-bot protection: {', '.join(anti_bot_patterns['detectedPatterns'])}")
-            print(f"  URL: {anti_bot_patterns['url']}")
-            print(f"  Title: {anti_bot_patterns['title']}")
-            return True, anti_bot_patterns['detectedPatterns']
-        
-        return False, []
-    except Exception as e:
-        print(f"Error detecting anti-bot patterns: {e}")
-        return False, []
 
 async def find_all_links_js(page, context, unverified_result=None):
     print("\n=== Starting find_all_links_js ===")
