@@ -37,7 +37,7 @@ steps:
       - '--service-account'
       - '${_SERVICE_ACCOUNT}'
       - '--set-env-vars'
-      - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY}'
+      - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY},API_KEY=${_API_KEY}'
 
   # Add tags for latest version
   - name: 'gcr.io/cloud-builders/docker'
@@ -61,6 +61,7 @@ timeout: 3600s
 substitutions:
   _COMMIT_SHA: ${_COMMIT_SHA}
   _GEMINI_API_KEY: ${_GEMINI_API_KEY}
+  _API_KEY: ${_API_KEY}
   _SERVICE_ACCOUNT: ${_SERVICE_ACCOUNT}
   _SERVICE_NAME: crwlr-server # Default value, will be overridden when specified
 

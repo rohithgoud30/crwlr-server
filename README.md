@@ -99,6 +99,29 @@ python run.py
 
 The API will be available at http://localhost:8000, and the interactive documentation at http://localhost:8000/docs.
 
+## API Authentication
+
+The API is protected with API key authentication to ensure secure access. This requires:
+
+1. Setting up an API key in your `.env` file:
+
+   ```
+   API_KEY=your_unique_api_key_here
+   ```
+
+2. Including the API key in all requests as an HTTP header:
+
+   ```
+   X-API-Key: your_unique_api_key_here
+   ```
+
+3. For deployment environments (Cloud Run, etc.), set the API key as an environment variable:
+   - In Google Cloud Build, add the API key as a substitution variable `_API_KEY`
+   - This keeps sensitive credentials out of your codebase
+   - The cloudbuild.yaml file is configured to pass this to the deployed service
+
+Without a valid API key, all API endpoints will return a 401 Unauthorized error.
+
 ## Project Structure
 
 ```
