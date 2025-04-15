@@ -85,4 +85,16 @@ sa-key.json
 *.service-account.json
 *credentials*.json
 *-sa-*.json
-cogent-sunspot-*.json 
+*-sa*.json
+crwlr-server-*.json
+*serviceAccount*.json
+gcp-*.json
+google-*.json
+
+# Additional sensitive files
+.env.local
+.env.production
+*.pem
+*.key
+
+
