@@ -65,7 +65,7 @@ create_trigger() {
       --branch="$branch" \
       --build-config="cloudbuild.yaml" \
       --substitutions="_SERVICE_NAME=$service_name,_GEMINI_API_KEY=projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest" \
-      --region="us-central1" \
+      --region="us-east4" \
       --require-approval
   else
     # Create automatic trigger (event-based)
@@ -75,7 +75,7 @@ create_trigger() {
       --branch="$branch" \
       --build-config="cloudbuild.yaml" \
       --substitutions="_SERVICE_NAME=$service_name,_GEMINI_API_KEY=projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest" \
-      --region="us-central1"
+      --region="us-east4"
   fi
 }
 
@@ -92,7 +92,7 @@ echo "2. github-trigger-test - Manual trigger to deploy to crwlr-server-test fro
 echo "3. github-trigger-dev - Manual trigger to deploy to crwlr-server-dev from the dev branch"
 echo ""
 echo "To manually deploy from test or dev branches, use:"
-echo "gcloud builds triggers run github-trigger-test --branch=test --region=us-central1"
-echo "gcloud builds triggers run github-trigger-dev --branch=dev --region=us-central1"
+echo "gcloud builds triggers run github-trigger-test --branch=test --region=us-east4"
+echo "gcloud builds triggers run github-trigger-dev --branch=dev --region=us-east4"
 echo ""
 echo "The Gemini API key has been stored as a secret and linked to the triggers." 

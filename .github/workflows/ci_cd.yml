@@ -55,6 +55,6 @@ jobs:
           echo "Deploying from $BRANCH_NAME branch to service: $CLOUD_RUN_SERVICE"
 
           gcloud builds triggers run github-trigger-main \
-            --region=us-central1 \
+            --region=us-east4 \
             --branch=main \
             --substitutions=_COMMIT_SHA=${{ github.sha }},_SERVICE_NAME=$CLOUD_RUN_SERVICE
