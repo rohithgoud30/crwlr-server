@@ -15,9 +15,9 @@ IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}:${GIT_SHA}"
 echo "🔧 Building and deploying ${SERVICE_NAME}..."
 echo "Using Git SHA: ${GIT_SHA}"
 
-# Build the Docker image
+# Build the Docker image for amd64/linux platform
 echo "🏗️ Building Docker image: ${IMAGE_NAME}"
-docker build -t "${IMAGE_NAME}" .
+docker build --platform linux/amd64 -t "${IMAGE_NAME}" .
 
 # Push the image to Google Container Registry
 echo "⬆️ Pushing Docker image to GCR"
