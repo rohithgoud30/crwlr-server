@@ -28,44 +28,48 @@ jobs:
           pip install pytest
           pytest
 
-  # Skip the deploy job since we're using local deployment
-  # Comment the deploy job to ensure the CI passes
-  # We'll use a local deployment script instead
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Only deploy main branch automatically
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
 
-  # deploy:
-  #   needs: build
-  #   runs-on: ubuntu-latest
-  #   if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Only deploy main branch automatically
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v3
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
-  #     - id: 'auth'
-  #       uses: 'google-github-actions/auth@v1'
-  #       with:
-  #         credentials_json: '${{ secrets.GCP_SA_KEY }}'
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v1'
 
-  #     - name: 'Set up Cloud SDK'
-  #       uses: 'google-github-actions/setup-gcloud@v1'
+      - name: 'Configure Docker for GCR'
+        run: gcloud auth configure-docker --quiet
 
-  #     - name: 'Build and push Docker image'
-  #       run: |
-  #         gcloud auth configure-docker
-  #         docker build -t gcr.io/crwlr-server/crwlr-server:${{ github.sha }} .
-  #         docker push gcr.io/crwlr-server/crwlr-server:${{ github.sha }}
+      - name: 'Set up Docker Buildx'
+        uses: docker/setup-buildx-action@v2
 
-  #     - name: 'Deploy to Cloud Run'
-  #       run: |
-  #         gcloud run deploy crwlr-server \
-  #           --image gcr.io/crwlr-server/crwlr-server:${{ github.sha }} \
-  #           --region us-east4 \
-  #           --platform managed \
-  #           --memory 2Gi \
-  #           --cpu 1 \
-  #           --timeout 3600s \
-  #           --concurrency 80 \
-  #           --min-instances 0 \
-  #           --max-instances 100 \
-  #           --allow-unauthenticated \
-  #           --service-account 662250507742-compute@developer.gserviceaccount.com \
-  #           --set-env-vars "PROJECT_ID=crwlr-server"
+      - name: 'Build and push Docker image'
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: gcr.io/crwlr-server/crwlr-server:${{ github.sha }},gcr.io/crwlr-server/crwlr-server:latest
+
+      - name: 'Deploy to Cloud Run'
+        run: |
+          gcloud run deploy crwlr-server \
+            --image gcr.io/crwlr-server/crwlr-server:${{ github.sha }} \
+            --region us-east4 \
+            --platform managed \
+            --memory 2Gi \
+            --cpu 1 \
+            --timeout 3600s \
+            --concurrency 80 \
+            --min-instances 0 \
+            --max-instances 100 \
+            --allow-unauthenticated \
+            --service-account 662250507742-compute@developer.gserviceaccount.com \
+            --set-env-vars "PROJECT_ID=crwlr-server"

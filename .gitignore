@@ -76,4 +76,9 @@ clean.py
 
 # Ignore specific files with linting issues
 app/api/v1/endpoints/tos.py
-scroll_to_bottom.py 
+scroll_to_bottom.py
+
+# Google Cloud service account keys
+*-key.json
+sa-key.json
+*-sa-key.json 
