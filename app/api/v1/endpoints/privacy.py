@@ -522,12 +522,45 @@ def handle_navigation_failure(url: str, unverified_result: Optional[str]) -> Pri
             method_used="common_pattern_guess"
     )
 
+def is_likely_registration_or_login_page(url: str) -> bool:
+    """
+    Check if a URL is likely a registration, login or authentication page.
+    
+    Args:
+        url: URL to check
+        
+    Returns:
+        bool: True if URL is likely a registration/login page
+    """
+    url_lower = url.lower()
+    
+    # Patterns that indicate registration or login pages
+    suspicious_patterns = [
+        '/register', '/signup', '/login', '/signin', '/registration',
+        '/create-account', '/join', '/auth/', '/openid', '/ap/register',
+        'registration', 'signup', 'create_account', 'createaccount',
+        'authentication', 'returnto', 'redirect', 'callback'
+    ]
+    
+    # Check if URL contains any suspicious patterns
+    return any(pattern in url_lower for pattern in suspicious_patterns)
+
 def handle_error(url: str, unverified_result: Optional[str], error: str) -> PrivacyResponse:
     """Handle any errors that occur during processing."""
     # Parse the URL to get domain
     parsed_url = urlparse(url)
     
     if unverified_result:
+        # Additional validation to filter out registration/login pages and other false positives
+        if is_likely_registration_or_login_page(unverified_result):
+            return PrivacyResponse(
+                url=url,
+                pp_url=None,
+                success=False,
+                message=f"Potential privacy link was rejected as it appears to be a registration/login page",
+                method_used="validation_failed"
+            )
+            
         return PrivacyResponse(
             url=url,
             pp_url=unverified_result,
@@ -569,6 +602,16 @@ def create_response(url: str, result: Optional[str], unverified_result: Optional
             method_used=method_used
         )
     elif unverified_result:
+        # Apply validation to filter out registration/login pages
+        if is_likely_registration_or_login_page(unverified_result):
+            return PrivacyResponse(
+                url=url,
+                pp_url=None,
+                success=False,
+                message="Potential privacy link was rejected as it appears to be a registration/login page",
+                method_used="validation_failed"
+            )
+            
         return PrivacyResponse(
             url=url,
             pp_url=unverified_result,
@@ -1041,7 +1084,7 @@ async def smooth_scroll_and_click(page, context, unverified_result=None, step=15
                             score += 50
                         elif '/privacy' in href:
                             score += 40
-                        elif '/data-protection' in href or '/data_protection' in href:
+                        elif '/data-protection' in href or '/data-policy' in href:
                             score += 40
                         elif '/gdpr' in href or '/ccpa' in href:
                             score += 45
@@ -1506,6 +1549,11 @@ async def check_for_better_privacy_link(page, current_url):
             if not (link_domain == base_domain or 
                     link_domain.endswith('.' + base_domain) or 
                     base_domain.endswith('.' + link_domain)):
+                continue
+            
+            # Skip registration/login pages
+            if is_likely_registration_or_login_page(link['href']):
+                print(f"Skipping likely registration/login page: {link['href']}")
                 continue
                 
             # Score the link

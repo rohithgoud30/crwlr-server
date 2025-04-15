@@ -785,6 +785,29 @@ async def bs4_fallback_link_finder(page, context):
         print(f"Error in bs4_fallback_link_finder: {e}")
         return None, page
 
+def is_likely_registration_or_login_page(url: str) -> bool:
+    """
+    Check if a URL is likely a registration, login or authentication page.
+    
+    Args:
+        url: URL to check
+        
+    Returns:
+        bool: True if URL is likely a registration/login page
+    """
+    url_lower = url.lower()
+    
+    # Patterns that indicate registration or login pages
+    suspicious_patterns = [
+        '/register', '/signup', '/login', '/signin', '/registration',
+        '/create-account', '/join', '/auth/', '/openid', '/ap/register',
+        'registration', 'signup', 'create_account', 'createaccount',
+        'authentication', 'returnto', 'redirect', 'callback'
+    ]
+    
+    # Check if URL contains any suspicious patterns
+    return any(pattern in url_lower for pattern in suspicious_patterns)
+
 async def standard_terms_finder(url: str, headers: dict = None) -> tuple[Optional[str], None]:
     """
     Advanced dynamic approach to find Terms of Service links without hardcoded patterns.
@@ -848,6 +871,11 @@ async def standard_terms_finder(url: str, headers: dict = None) -> tuple[Optiona
 
                 # Create absolute URL
                 abs_url = href if href.startswith(('http://', 'https://')) else urljoin(base_domain, href)
+                
+                # Skip registration/login pages
+                if is_likely_registration_or_login_page(abs_url):
+                    print(f"Skipping likely registration/login page: {abs_url}")
+                    continue
 
                 # Score the link
                 score = 0
@@ -942,6 +970,11 @@ async def check_for_better_terms_link(page, current_url):
             if not (link_domain == base_domain or 
                     link_domain.endswith('.' + base_domain) or 
                     base_domain.endswith('.' + link_domain)):
+                continue
+            
+            # Skip registration/login pages
+            if is_likely_registration_or_login_page(link['href']):
+                print(f"Skipping likely registration/login page: {link['href']}")
                 continue
                 
             # Dynamic scoring based on text and URL patterns
@@ -1308,6 +1341,28 @@ def handle_error(url: str, unverified_result: Optional[str], error: str) -> ToSR
     parsed_url = urlparse(url)
     
     if unverified_result:
+        # Additional validation to filter out registration/login pages and other false positives
+        unverified_lower = unverified_result.lower()
+        
+        # Check for common patterns that indicate NOT a terms page
+        suspicious_patterns = [
+            '/register', '/signup', '/login', '/signin', '/registration',
+            '/create-account', '/join', '/auth/', '/openid', '/ap/register',
+            'registration', 'signup', 'create_account', 'createaccount',
+            'authentication', 'returnto', 'redirect', 'callback'
+        ]
+        
+        # Check if the URL contains suspicious patterns
+        if any(pattern in unverified_lower for pattern in suspicious_patterns):
+            return ToSResponse(
+                url=url,
+                tos_url=None,
+                success=False,
+                message=f"Potential terms link was rejected as it appears to be a registration/login page",
+                method_used="validation_failed"
+            )
+        
+        # Continue with original logic for validated URLs
         return ToSResponse(
             url=url,
             tos_url=unverified_result,
@@ -1336,6 +1391,27 @@ def create_response(url: str, result: Optional[str], unverified_result: Optional
             method_used=method_used
         )
     elif unverified_result:
+        # Apply the same validation as in handle_error
+        unverified_lower = unverified_result.lower()
+        
+        # Check for common patterns that indicate NOT a terms page
+        suspicious_patterns = [
+            '/register', '/signup', '/login', '/signin', '/registration',
+            '/create-account', '/join', '/auth/', '/openid', '/ap/register',
+            'registration', 'signup', 'create_account', 'createaccount',
+            'authentication', 'returnto', 'redirect', 'callback'
+        ]
+        
+        # Check if the URL contains suspicious patterns
+        if any(pattern in unverified_lower for pattern in suspicious_patterns):
+            return ToSResponse(
+                url=url,
+                tos_url=None,
+                success=False,
+                message="Potential terms link was rejected as it appears to be a registration/login page",
+                method_used="validation_failed"
+            )
+            
         return ToSResponse(
             url=url,
             tos_url=unverified_result,
