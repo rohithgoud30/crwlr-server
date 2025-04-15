@@ -28,7 +28,7 @@ jobs:
           pip install pytest
           pytest
 
-  trigger-cloud-build:
+  deploy:
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Only deploy main branch automatically
@@ -44,17 +44,24 @@ jobs:
       - name: 'Set up Cloud SDK'
         uses: 'google-github-actions/setup-gcloud@v1'
 
-      - name: 'Use gcloud CLI'
-        run: 'gcloud info'
-
-      - name: 'Trigger Cloud Build'
+      - name: 'Build and push Docker image'
         run: |
-          BRANCH_NAME="main"  # Hardcode to main since we only want main branch to auto-deploy
-          CLOUD_RUN_SERVICE="crwlr-server"
+          gcloud auth configure-docker
+          docker build -t gcr.io/crwlr-server/crwlr-server:${{ github.sha }} .
+          docker push gcr.io/crwlr-server/crwlr-server:${{ github.sha }}
 
-          echo "Deploying from $BRANCH_NAME branch to service: $CLOUD_RUN_SERVICE"
-
-          gcloud builds triggers run github-trigger-main \
-            --region=us-east4 \
-            --branch=main \
-            --substitutions=_COMMIT_SHA=${{ github.sha }},_SERVICE_NAME=$CLOUD_RUN_SERVICE
+      - name: 'Deploy to Cloud Run'
+        run: |
+          gcloud run deploy crwlr-server \
+            --image gcr.io/crwlr-server/crwlr-server:${{ github.sha }} \
+            --region us-east4 \
+            --platform managed \
+            --memory 2Gi \
+            --cpu 1 \
+            --timeout 3600s \
+            --concurrency 80 \
+            --min-instances 0 \
+            --max-instances 100 \
+            --allow-unauthenticated \
+            --service-account 662250507742-compute@developer.gserviceaccount.com \
+            --set-env-vars "PROJECT_ID=crwlr-server"
