@@ -296,3 +296,96 @@ The API focuses exclusively on finding links in the actual HTML content and does
 ## License
 
 [MIT](LICENSE)
+
+## CI/CD Pipeline with Google Cloud Build
+
+This repository is configured for continuous integration and deployment using Google Cloud Build, which automatically builds and deploys your application to Cloud Run whenever changes are pushed to the main branch.
+
+### Prerequisites
+
+- Google Cloud Platform project with billing enabled
+- Cloud Build, Cloud Run, and Container Registry APIs enabled
+- Appropriate permissions to set up IAM roles
+
+### Setup Instructions
+
+1. **Set up IAM permissions**
+
+   Run the provided script to set up necessary IAM permissions:
+
+   ```bash
+   chmod +x setup-cloud-build-permissions.sh
+   ./setup-cloud-build-permissions.sh
+   ```
+
+   This script grants the Cloud Build service account the necessary permissions to:
+
+   - Deploy to Cloud Run
+   - Access the Compute service account
+   - Upload images to Container Registry
+
+2. **Set up a Cloud Build Trigger**
+
+   1. Go to the [Cloud Build Triggers](https://console.cloud.google.com/cloud-build/triggers) page
+   2. Click "Create Trigger"
+   3. Connect your repository (GitHub, Bitbucket, etc.)
+   4. Configure the trigger:
+      - Name: `crwlr-server-deploy`
+      - Event: "Push to a branch"
+      - Source: Select your repository and branch (e.g., main)
+      - Configuration: Select "Cloud Build configuration file (yaml or json)"
+      - Location: `cloudbuild.yaml`
+   5. Add substitution variables:
+      - `_GEMINI_API_KEY`: Your Gemini API key (treat as a secret)
+      - `_SERVICE_ACCOUNT`: (Optional) Custom service account email
+   6. Click "Create"
+
+3. **Set up Secrets (Optional but Recommended)**
+
+   For better security, store your API key in Secret Manager:
+
+   ```bash
+   # Create a secret
+   echo -n "your-gemini-api-key" | gcloud secrets create gemini-api-key --data-file=-
+
+   # Grant Cloud Build access to the secret
+   PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format='value(projectNumber)')
+   gcloud secrets add-iam-policy-binding gemini-api-key \
+     --member="serviceAccount:$PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
+     --role="roles/secretmanager.secretAccessor"
+   ```
+
+   Then update your trigger to reference this secret.
+
+### How It Works
+
+The CI/CD pipeline performs the following steps:
+
+1. Builds a Docker container using the project's Dockerfile
+2. Pushes the container to Google Container Registry
+3. Deploys the container to Cloud Run
+4. Tags the container with `latest` for future reference
+
+These steps are defined in the `cloudbuild.yaml` file in the root of the repository.
+
+### Manual Deployment
+
+If you need to deploy manually, you can trigger a build using:
+
+```bash
+gcloud builds submit --config=cloudbuild.yaml
+```
+
+### Troubleshooting
+
+- Check Cloud Build logs for any build or deployment errors
+- Ensure all required IAM permissions are set
+- Verify the `cloudbuild.yaml` file is properly formatted
+- Check that your Docker container builds and runs locally
+
+Don't forget to commit your changes with:
+
+```bash
+git add .github/workflows/ cloudbuild.yaml setup-cloud-build-permissions.sh
+git commit -m "Chore(deps): set up Cloud Build CI/CD pipeline"
+```

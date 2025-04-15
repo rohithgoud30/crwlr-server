@@ -1,0 +1,68 @@
+# Cloud Build configuration file for CI/CD deployment to Cloud Run
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/crwlr-server:$COMMIT_SHA', '.']
+
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/crwlr-server:$COMMIT_SHA']
+
+  # Deploy container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'crwlr-server'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/crwlr-server:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--memory'
+      - '2Gi'
+      - '--cpu'
+      - '1'
+      - '--timeout'
+      - '3600s'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'GEMINI_API_KEY=${_GEMINI_API_KEY}'
+      - '--service-account'
+      - '${_SERVICE_ACCOUNT}'
+      - '--concurrency'
+      - '80'
+      - '--min-instances'
+      - '0'
+      - '--max-instances'
+      - '10'
+
+  # Add tags for latest version
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'tag',
+        'gcr.io/$PROJECT_ID/crwlr-server:$COMMIT_SHA',
+        'gcr.io/$PROJECT_ID/crwlr-server:latest',
+      ]
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/crwlr-server:latest']
+
+# Store images in Google Container Registry
+images:
+  - 'gcr.io/$PROJECT_ID/crwlr-server:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/crwlr-server:latest'
+
+# Set timeout for the build
+timeout: 3600s
+
+substitutions:
+  _COMMIT_SHA: latest
+  _GEMINI_API_KEY: '' # This will be set via Cloud Build trigger UI
+  _SERVICE_ACCOUNT: '' # This will be set via Cloud Build trigger UI or default to the compute service account
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
