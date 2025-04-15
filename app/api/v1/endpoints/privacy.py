@@ -121,7 +121,7 @@ async def find_privacy(request: PrivacyRequest) -> PrivacyResponse:
                     print(f"Error trying common path {common_url}: {e}")
                     continue
                 
-                return handle_navigation_failure(url, unverified_result)
+            return handle_navigation_failure(url, unverified_result)
             
         # Optimized method ordering: Try fastest methods first
         methods = [
@@ -156,7 +156,7 @@ async def find_privacy(request: PrivacyRequest) -> PrivacyResponse:
                     print(f"Error trying common path {common_url}: {e}")
                     continue
             
-            return create_response(url, result, unverified_result, method_used)
+        return create_response(url, result, unverified_result, method_used)
             
     except Exception as e:
         print(f"Error during browser automation: {e}")
