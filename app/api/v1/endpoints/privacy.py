@@ -106,23 +106,23 @@ async def find_privacy(request: PrivacyRequest) -> PrivacyResponse:
         browser, context, page, random_delay = await setup_browser(playwright)
         
         success, response, patterns = await navigate_with_retry(page, url, max_retries=2)  # Reduced retries
-            if not success:
+        if not success:
             # Try common paths before giving up (fewer paths, faster checks)
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                for path in common_paths:
-                    common_url = base_url + path
-                    print(f"Trying common path: {common_url}")
-                    try:
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            for path in common_paths:
+                common_url = base_url + path
+                print(f"Trying common path: {common_url}")
+                try:
                     success, response, patterns = await navigate_with_retry(page, common_url, max_retries=1)  # Only 1 retry
-                        if success and response.ok:
-                            unverified_result = common_url
-                            break
-                    except Exception as e:
-                        print(f"Error trying common path {common_url}: {e}")
-                        continue
-                
-                return handle_navigation_failure(url, unverified_result)
+                    if success and response.ok:
+                        unverified_result = common_url
+                        break
+                except Exception as e:
+                    print(f"Error trying common path {common_url}: {e}")
+                    continue
             
+            return handle_navigation_failure(url, unverified_result)
+        
         # Optimized method ordering: Try fastest methods first
         methods = [
             (find_all_links_js, "javascript"),
@@ -143,20 +143,20 @@ async def find_privacy(request: PrivacyRequest) -> PrivacyResponse:
         
         # If no result found, try a very limited set of common paths
         if not result and not unverified_result:
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
             for path in common_paths[:2]:  # Only try first 2 paths for speed
-                    common_url = base_url + path
-                    print(f"Trying common path: {common_url}")
-                    try:
+                common_url = base_url + path
+                print(f"Trying common path: {common_url}")
+                try:
                     success, response, patterns = await navigate_with_retry(page, common_url, max_retries=1)
-                        if success and response.ok:
-                            unverified_result = common_url
-                            break
-                    except Exception as e:
-                        print(f"Error trying common path {common_url}: {e}")
-                        continue
-            
-            return create_response(url, result, unverified_result, method_used)
+                    if success and response.ok:
+                        unverified_result = common_url
+                        break
+                except Exception as e:
+                    print(f"Error trying common path {common_url}: {e}")
+                    continue
+        
+        return create_response(url, result, unverified_result, method_used)
             
     except Exception as e:
         print(f"Error during browser automation: {e}")
@@ -2022,10 +2022,10 @@ async def main():
         response = await find_privacy(request)
         print("=" * 50)
         print("Results:")
-            print(f"URL: {response.url}")
-            print(f"Success: {response.success}")
+        print(f"URL: {response.url}")
+        print(f"Success: {response.success}")
         print(f"Method used: {response.method_used}")
-            print(f"Message: {response.message}")
+        print(f"Message: {response.message}")
         print(f"Privacy Policy URL: {response.pp_url if response.pp_url else 'Not found'}")
         print("=" * 50)
         
