@@ -59,12 +59,12 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: gcr.io/${{ secrets.GCP_PROJECT_ID }}/crwlr-server:${{ github.sha }},gcr.io/${{ secrets.GCP_PROJECT_ID }}/crwlr-server:latest
+          tags: gcr.io/crwlr-server/crwlr-server:${{ github.sha }},gcr.io/crwlr-server/crwlr-server:latest
 
       - name: 'Deploy to Cloud Run'
         run: |
           gcloud run deploy crwlr-server \
-            --image gcr.io/${{ secrets.GCP_PROJECT_ID }}/crwlr-server:${{ github.sha }} \
+            --image gcr.io/crwlr-server/crwlr-server:${{ github.sha }} \
             --region us-east4 \
             --platform managed \
             --memory 2Gi \
@@ -75,4 +75,4 @@ jobs:
             --max-instances 100 \
             --allow-unauthenticated \
             --service-account github-actions-deployer@crwlr-server.iam.gserviceaccount.com \
-            --set-env-vars "PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}"
+            --set-env-vars "PROJECT_ID=crwlr-server"
