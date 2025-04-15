@@ -31,7 +31,7 @@ jobs:
   trigger-cloud-build:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Only deploy main branch automatically
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -49,20 +49,12 @@ jobs:
 
       - name: 'Trigger Cloud Build'
         run: |
-          BRANCH_NAME=${GITHUB_REF#refs/heads/}
-
-          # Set the service name based on the branch
-          if [ "$BRANCH_NAME" == "main" ]; then
-            CLOUD_RUN_SERVICE="crwlr-server"
-          elif [ "$BRANCH_NAME" == "test" ]; then
-            CLOUD_RUN_SERVICE="crwlr-server-test"
-          elif [ "$BRANCH_NAME" == "dev" ]; then
-            CLOUD_RUN_SERVICE="crwlr-server-dev"
-          fi
+          BRANCH_NAME="main"  # Hardcode to main since we only want main branch to auto-deploy
+          CLOUD_RUN_SERVICE="crwlr-server"
 
           echo "Deploying from $BRANCH_NAME branch to service: $CLOUD_RUN_SERVICE"
 
-          gcloud builds triggers run github-trigger-$BRANCH_NAME \
+          gcloud builds triggers run github-trigger-main \
             --region=us-central1 \
-            --branch=$BRANCH_NAME \
+            --branch=main \
             --substitutions=_COMMIT_SHA=${{ github.sha }},_SERVICE_NAME=$CLOUD_RUN_SERVICE
