@@ -8,7 +8,6 @@ from urllib.parse import urlparse, urljoin
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PlaywrightTimeoutError
-import httpx
 
 # Define User_Agents list for rotation
 USER_AGENTS = [
@@ -75,147 +74,99 @@ LINK_EVALUATION_WEIGHTS = {
     'position': 0.1
 }
 
-async def fallback_request(url):
-    """Fallback method using httpx when Playwright doesn't work."""
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-            }
-            response = await client.get(url, headers=headers)
-            
-            if response.status_code == 200:
-                html_content = response.text
-                # Look for common privacy links in the HTML
-                privacy_patterns = [
-                    r'href=["\']([^"\']*(?:privacy|privacy-policy|privacypolicy|datenschutz)[^"\']*)["\']',
-                    r'href=["\']([^"\']*(?:privacy|privacy-policy)[^"\']*\.(?:html|htm|php|aspx|pdf))["\']',
-                ]
-                for pattern in privacy_patterns:
-                    matches = re.findall(pattern, html_content, re.IGNORECASE)
-                    if matches:
-                        # Convert relative URLs to absolute
-                        for match in matches:
-                            if match.startswith('/'):
-                                # Handle relative URL
-                                parsed_url = urlparse(url)
-                                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                                pp_url = base_url + match
-                            elif not match.startswith(('http://', 'https://')):
-                                # Handle relative URL without leading slash
-                                parsed_url = urlparse(url)
-                                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                                pp_url = f"{base_url}/{match}"
-                            else:
-                                # Already an absolute URL
-                                pp_url = match
-                            
-                            # Verify the URL actually exists
-                            try:
-                                verify_response = await client.head(pp_url, headers=headers, timeout=5.0)
-                                if verify_response.status_code < 400:
-                                    return pp_url
-                            except:
-                                pass
-                            
-            return None
-    except Exception as e:
-        print(f"Fallback request error: {e}")
-        return None
-
 @router.post("/privacy", response_model=PrivacyResponse)
 async def find_privacy(request: PrivacyRequest) -> PrivacyResponse:
-    """
-    Find Privacy Policy URL for a given website.
-    """
+    """Find Privacy Policy page for a given URL."""
     url = request.url
+    
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+    
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    
     result = None
-    unverified_result = None
-    method_used = "none"
-    playwright = None
+    method_used = ""
     browser = None
+    playwright = None
+    unverified_result = None  # Initialize unverified_result here
+    
+    # Reduced set of common paths to try
+    common_paths = [
+        '/privacy', '/privacy-policy', '/privacy-notice', 
+        '/legal/privacy'
+    ]
+    
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
     
     try:
-        # Try browser automation first
-        try:
-            playwright = await async_playwright().start()
-            browser, context, page, random_delay = await setup_browser(playwright)
-            
-            success, response, patterns = await navigate_with_retry(page, url, max_retries=2)  # Reduced retries
-            if not success:
-                # Try common paths before giving up (fewer paths, faster checks)
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                for path in common_paths:
-                    common_url = base_url + path
-                    print(f"Trying common path: {common_url}")
-                    try:
-                        success, response, patterns = await navigate_with_retry(page, common_url, max_retries=1)  # Only 1 retry
-                        if success and response.ok:
-                            unverified_result = common_url
-                            break
-                    except Exception as e:
+        # Get playwright instance first and pass it to setup_browser
+        playwright = await async_playwright().start()
+        browser, context, page, random_delay = await setup_browser(playwright)
+        
+        success, response, patterns = await navigate_with_retry(page, url, max_retries=2)  # Reduced retries
+        if not success:
+            # Try common paths before giving up (fewer paths, faster checks)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            for path in common_paths:
+                common_url = base_url + path
+                print(f"Trying common path: {common_url}")
+                try:
+                    success, response, patterns = await navigate_with_retry(page, common_url, max_retries=1)  # Only 1 retry
+                    if success and response.ok:
+                        unverified_result = common_url
+                        break
+                except Exception as e:
                         print(f"Error trying common path {common_url}: {e}")
                         continue
-                    
-                return handle_navigation_failure(url, unverified_result)
                 
-            # Optimized method ordering: Try fastest methods first
-            methods = [
-                (find_all_links_js, "javascript"),
-                (smooth_scroll_and_click, "scroll"),
-                (find_matching_link, "standard"),
-                (analyze_landing_page, "content_analysis")
+            return handle_navigation_failure(url, unverified_result)
+            
+        # Optimized method ordering: Try fastest methods first
+        methods = [
+            (find_all_links_js, "javascript"),
+            (smooth_scroll_and_click, "scroll"),
+            (find_matching_link, "standard"),
+            (analyze_landing_page, "content_analysis")
+        ]
+        
+        for method_func, method_name in methods:
+            try:
+                result, page, unverified_result = await method_func(page, context, unverified_result)
+                if result:
+                    method_used = method_name
+                    break  # Exit early once we found a result
+            except Exception as e:
+                print(f"Error in {method_name} method: {e}")
+                continue
+        
+        # If no result found, try a very limited set of common paths
+        if not result and not unverified_result:
+            # Ensure these variables are defined in this scope
+            parsed_url = urlparse(url)
+            common_paths = [
+                '/privacy', '/privacy-policy', '/privacy-notice', 
+                '/legal/privacy'
             ]
             
-            for method_func, method_name in methods:
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            for path in common_paths[:2]:  # Only try first 2 paths for speed
+                common_url = base_url + path
+                print(f"Trying common path: {common_url}")
                 try:
-                    result, page, unverified_result = await method_func(page, context, unverified_result)
-                    if result:
-                        method_used = method_name
-                        break  # Exit early once we found a result
+                    success, response, patterns = await navigate_with_retry(page, common_url, max_retries=1)
+                    if success and response.ok:
+                        unverified_result = common_url
+                        break
                 except Exception as e:
-                    print(f"Error in {method_name} method: {e}")
-                    continue
+                        print(f"Error trying common path {common_url}: {e}")
+                        continue
             
-            # If no result found, try a very limited set of common paths
-            if not result and not unverified_result:
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                for path in common_paths[:2]:  # Only try first 2 paths for speed
-                    common_url = base_url + path
-                    print(f"Trying common path: {common_url}")
-                    try:
-                        success, response, patterns = await navigate_with_retry(page, common_url, max_retries=1)
-                        if success and response.ok:
-                            unverified_result = common_url
-                            break
-                    except Exception as e:
-                            print(f"Error trying common path {common_url}: {e}")
-                            continue
-                
-                return create_response(url, result, unverified_result, method_used)
-                
-        except Exception as e:
-            print(f"Browser automation failed: {e}")
+            return create_response(url, result, unverified_result, method_used)
             
-            # Fallback to simple request method
-            result = await fallback_request(url)
-            if result:
-                method_used = "fallback_request"
-                return create_response(url, result, None, method_used)
-        
-        # ... existing code ...
-        
     except Exception as e:
-        print(f"Error during privacy policy search: {e}")
+        print(f"Error during browser automation: {e}")
         return handle_error(url, unverified_result, str(e))
     finally:
         if browser:
