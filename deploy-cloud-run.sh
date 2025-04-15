@@ -2,17 +2,17 @@
 set -e
 
 # Configuration variables - customize these
-PROJECT_ID="your-gcp-project-id"  # Change this to your GCP project ID
+PROJECT_ID="crwlr-server"  # Updated with actual project ID
 SERVICE_NAME="crwlr-api"
-REGION="us-central1"
+REGION="us-east4"  # Northern Virginia region
 IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 
 # Make sure gcloud is configured with the correct project
 gcloud config set project ${PROJECT_ID}
 
-# Build the Docker image
+# Build the Docker image with platform targeting to ensure compatibility
 echo "Building Docker image..."
-docker build -t ${IMAGE_NAME} .
+docker build --platform linux/amd64 -t ${IMAGE_NAME} .
 
 # Push the image to Google Container Registry
 echo "Pushing image to Google Container Registry..."
@@ -25,12 +25,14 @@ gcloud run deploy ${SERVICE_NAME} \
   --platform=managed \
   --region=${REGION} \
   --allow-unauthenticated \
-  --memory=2Gi \
+  --memory=4Gi \
   --cpu=2 \
   --max-instances=10 \
-  --concurrency=80 \
-  --timeout=5m \
-  --set-env-vars="ENV=production"
+  --concurrency=50 \
+  --timeout=10m \
+  --set-env-vars="ENV=production" \
+  --port=8000 \
+  --cpu-throttling
 
 echo "Deployment completed!"
 echo "Your service URL:"

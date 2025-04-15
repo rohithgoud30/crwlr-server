@@ -161,27 +161,14 @@ async def setup_browser():
         browser = await playwright.chromium.launch(
             headless=True,
             args=[
-                '--disable-web-security',
                 '--no-sandbox',
-                '--start-maximized',
-                '--window-size=1920,1080', 
-                '--disable-notifications',
-                '--disable-infobars',
+                '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--ignore-certificate-errors',
                 '--disable-accelerated-2d-canvas',
                 '--disable-gpu',
-                '--lang=en-US,en;q=0.9',
+                '--disable-infobars',
+                '--window-size=1920,1080',
                 '--disable-extensions',
-                '--mute-audio',
-                # Cloud Run specific args
-                '--single-process',
-                '--no-zygote',
-                '--disable-setuid-sandbox',
-                '--headless=new',
-                '--hide-scrollbars'
             ],
             chromium_sandbox=False,
             slow_mo=100  # Add a small delay between actions

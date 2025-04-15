@@ -107,23 +107,14 @@ async def find_privacy(request: PrivacyRequest) -> PrivacyResponse:
             browser = await playwright.chromium.launch(
                 headless=True,
                 args=[
-                    '--disable-web-security',
                     '--no-sandbox',
-                    '--start-maximized',
-                    '--window-size=1920,1080', 
-                    '--force-device-scale-factor=1',
-                    '--disable-notifications',
-                    '--disable-infobars',
+                    '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
-                    '--disable-blink-features=AutomationControlled',  # Hide automation
-                    '--disable-features=IsolateOrigins,site-per-process', # Disable site isolation
-                    '--ignore-certificate-errors',
-                    '--enable-features=NetworkService',
                     '--disable-accelerated-2d-canvas',
                     '--disable-gpu',
-                    '--lang=en-US,en;q=0.9',
+                    '--disable-infobars',
+                    '--window-size=1920,1080',
                     '--disable-extensions',
-                    '--mute-audio'
                 ]
             )
             
@@ -225,23 +216,14 @@ async def setup_browser():
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                '--disable-web-security',
                 '--no-sandbox',
-                '--start-maximized',
-                '--window-size=1920,1080', 
-                '--force-device-scale-factor=1',
-                '--disable-notifications',
-                '--disable-infobars',
+                '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',  # Hide automation
-                '--disable-features=IsolateOrigins,site-per-process', # Disable site isolation
-                '--ignore-certificate-errors',
-                '--enable-features=NetworkService',
                 '--disable-accelerated-2d-canvas',
                 '--disable-gpu',
-                '--lang=en-US,en;q=0.9',
+                '--disable-infobars',
+                '--window-size=1920,1080',
                 '--disable-extensions',
-                '--mute-audio'
             ]
         )
         
