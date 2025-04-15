@@ -2,6 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Set default branch name to unknown
+ARG BRANCH_NAME=unknown
+ENV BRANCH_NAME=${BRANCH_NAME}
+
 # Install system dependencies for Playwright
 RUN apt-get update && apt-get install -y \
     wget \
