@@ -24,6 +24,12 @@ if [ -z "$API_KEY" ] || [ -z "$GEMINI_API_KEY" ]; then
   exit 1
 fi
 
+# Get current branch name
+BRANCH_NAME=$(git branch --show-current)
+if [ -z "$BRANCH_NAME" ]; then
+  BRANCH_NAME="main"  # Default to main if git command fails
+fi
+
 # Deployment configuration
 PROJECT_ID=$(gcloud config get-value project)
 SERVICE_NAME="crwlr-server"
@@ -51,7 +57,7 @@ gcloud run deploy $SERVICE_NAME \
   --max-instances 100 \
   --timeout 3600s \
   --allow-unauthenticated \
-  --set-env-vars "PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=$GEMINI_API_KEY"
+  --set-env-vars "PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=$GEMINI_API_KEY,BRANCH_NAME=$BRANCH_NAME,ENVIRONMENT=production"
 
 # Set the API key separately for better security
 echo "Setting API key..."
