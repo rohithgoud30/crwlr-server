@@ -10,6 +10,8 @@ import asyncio
 from playwright.async_api import async_playwright
 import logging
 from html2text import html2text
+import io
+import PyPDF2
 
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -43,25 +45,116 @@ class ExtractResponse(BaseModel):
     success: bool  # Whether the extraction was successful
     text: Optional[str] = None  # Extracted text content
     message: str  # Status message
-    method_used: str  # Method used for extraction (standard or playwright)
+    method_used: str  # Method used for extraction (standard, playwright, or pdf)
+
+
+def is_pdf_url(url: str) -> bool:
+    """Check if URL likely points to a PDF file based on extension."""
+    parsed_url = urlparse(url)
+    path = parsed_url.path.lower()
+    return path.endswith('.pdf')
+
+
+def extract_text_from_pdf(pdf_content: bytes) -> str:
+    """Extract text from PDF content."""
+    try:
+        pdf_file = io.BytesIO(pdf_content)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        
+        text = []
+        for page_num in range(len(pdf_reader.pages)):
+            page = pdf_reader.pages[page_num]
+            text.append(page.extract_text())
+            
+        return "\n\n".join(text)
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF: {str(e)}")
+        raise
 
 
 @router.post("/extract", response_model=ExtractResponse)
 async def extract_text(request: ExtractRequest, response: Response) -> ExtractResponse:
     """
     Takes a URL (such as a Terms of Service or Privacy Policy URL) and extracts 
-    the text content from the webpage.
+    the text content from the webpage or PDF document.
     
     This endpoint uses multiple methods to attempt to extract text:
-    1. Standard requests + BeautifulSoup
-    2. Headless browser rendering with Playwright for JavaScript-heavy sites
+    1. PDF extraction for PDF files
+    2. Standard requests + BeautifulSoup for HTML pages
+    3. Headless browser rendering with Playwright for JavaScript-heavy sites
     """
     url = request.url
     logger.info(f"Processing text extraction request for URL: {url}")
     
-    # Try the standard method first
+    # Check if URL points to a PDF file
+    if is_pdf_url(url):
+        logger.info(f"Detected PDF URL: {url}")
+        try:
+            # Enhanced browser-like headers
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+                'Accept': 'application/pdf,*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Connection': 'keep-alive',
+            }
+            
+            # Download the PDF
+            pdf_response = requests.get(url, headers=headers, timeout=30)
+            pdf_response.raise_for_status()
+            
+            # Check if content type is PDF
+            content_type = pdf_response.headers.get('Content-Type', '').lower()
+            if 'application/pdf' in content_type or is_pdf_url(url):
+                # Extract text from PDF
+                pdf_text = extract_text_from_pdf(pdf_response.content)
+                
+                return ExtractResponse(
+                    url=url,
+                    success=True,
+                    text=pdf_text,
+                    message="Successfully extracted text from PDF document",
+                    method_used="pdf"
+                )
+            else:
+                # Not actually a PDF, continue with regular extraction
+                logger.info(f"URL has .pdf extension but content is not PDF. Content-Type: {content_type}")
+        except Exception as e:
+            logger.error(f"PDF extraction failed: {str(e)}")
+            response.status_code = 500
+            return ExtractResponse(
+                url=url,
+                success=False,
+                text=None,
+                message=f"Error extracting text from PDF: {str(e)}",
+                method_used="pdf_failed"
+            )
+    
+    # Try the standard method first for non-PDF URLs
     try:
-        # Enhanced browser-like headers
+        # Check content type before full extraction
+        head_headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        }
+        
+        head_response = requests.head(url, headers=head_headers, timeout=10, allow_redirects=True)
+        content_type = head_response.headers.get('Content-Type', '').lower()
+        
+        # If it's actually a PDF despite the URL not ending with .pdf
+        if 'application/pdf' in content_type:
+            logger.info(f"Detected PDF content type for URL: {url}")
+            pdf_response = requests.get(url, headers=head_headers, timeout=30)
+            pdf_response.raise_for_status()
+            pdf_text = extract_text_from_pdf(pdf_response.content)
+            
+            return ExtractResponse(
+                url=url,
+                success=True,
+                text=pdf_text,
+                message="Successfully extracted text from PDF document (detected by content type)",
+                method_used="pdf"
+            )
+        
+        # Enhanced browser-like headers for HTML content
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -81,6 +174,20 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
         logger.info(f"Attempting standard extraction from: {url}")
         response_data = requests.get(url, headers=headers, timeout=30)
         response_data.raise_for_status()
+        
+        # Check again if the content might be PDF after redirection
+        content_type = response_data.headers.get('Content-Type', '').lower()
+        if 'application/pdf' in content_type:
+            logger.info(f"Detected PDF content type after redirection for URL: {url}")
+            pdf_text = extract_text_from_pdf(response_data.content)
+            
+            return ExtractResponse(
+                url=url,
+                success=True,
+                text=pdf_text,
+                message="Successfully extracted text from PDF document (detected after redirection)",
+                method_used="pdf"
+            )
         
         # Parse the HTML
         soup = BeautifulSoup(response_data.text, 'html.parser')
@@ -125,7 +232,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
                 success=False,
                 text=None,
                 message="Failed to extract meaningful text content from the URL",
-                method_used="both_failed"
+                method_used="all_methods_failed"
             )
             
     except Exception as e:
@@ -136,7 +243,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
             success=False,
             text=None,
             message=f"Error extracting text: {str(e)}",
-            method_used="both_failed_with_error"
+            method_used="all_methods_failed_with_error"
         )
 
 
@@ -193,8 +300,22 @@ async def extract_with_playwright(url) -> str:
         page = await context.new_page()
         
         try:
-            # Navigate to the URL with a longer timeout
-            await page.goto(url, wait_until="networkidle", timeout=60000)
+            # Check if URL might be a PDF by doing a head request
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            content_type = response.headers.get('content-type', '')
+            
+            if 'application/pdf' in content_type.lower():
+                logger.info(f"Playwright detected PDF content type for URL: {url}")
+                
+                # Use requests to download the PDF directly
+                pdf_response = requests.get(url, timeout=30)
+                pdf_response.raise_for_status()
+                
+                return extract_text_from_pdf(pdf_response.content)
+            
+            # Continue with normal Playwright extraction for non-PDF content
+            # Wait for the page to be fully loaded
+            await page.wait_for_load_state("networkidle", timeout=60000)
             
             # Wait a moment for any delayed JS rendering
             await page.wait_for_timeout(2000)
