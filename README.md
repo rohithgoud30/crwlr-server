@@ -116,14 +116,21 @@ The API is protected with API key authentication to ensure secure access. This r
    ```
 
 3. For deployment to Cloud Run:
-   - The deployment script (`deploy.sh`) and Cloud Build configuration automatically set the API key
-   - The API key is set directly on the Cloud Run service rather than in GitHub Secrets
-   - This provides better security by reducing the number of places where the key is stored
+   - The deployment script (`deploy.sh`) uses environment variables to set the API key
+   - You must first set these environment variables before running the script:
+     ```bash
+     export API_KEY=your_unique_api_key_here
+     export GEMINI_API_KEY=your_gemini_api_key_here
+     ./deploy.sh
+     ```
+   - For Cloud Build deployments, the API keys are stored as Secret Manager secrets
+   - The cloudbuild.yaml file is configured to access these secrets securely
 
 To manually set or update the API key on an existing Cloud Run service:
 
 ```bash
-gcloud run services update crwlr-server --platform managed --region us-east4 --set-env-vars API_KEY=your_api_key_here
+export API_KEY=your_api_key_here
+gcloud run services update crwlr-server --platform managed --region us-east4 --set-env-vars API_KEY=$API_KEY
 ```
 
 Without a valid API key, all API endpoints will return a 401 Unauthorized error.

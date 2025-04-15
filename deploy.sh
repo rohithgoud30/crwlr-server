@@ -3,12 +3,23 @@
 # Exit on any error
 set -e
 
+# Check for required environment variables
+if [ -z "$API_KEY" ]; then
+  echo "Error: API_KEY environment variable is not set."
+  echo "Please set it using: export API_KEY=your-api-key"
+  exit 1
+fi
+
+if [ -z "$GEMINI_API_KEY" ]; then
+  echo "Error: GEMINI_API_KEY environment variable is not set."
+  echo "Please set it using: export GEMINI_API_KEY=your-gemini-api-key"
+  exit 1
+fi
+
 # Deployment configuration
 PROJECT_ID=$(gcloud config get-value project)
 SERVICE_NAME="crwlr-server"
 REGION="us-east4"
-API_KEY="6e878bf1-c92d-4ba1-99c9-50e3343efd5d"
-GEMINI_API_KEY="AIzaSyCcf-yVRysl-JnwdaEwb3I-JaYzNF4M36g"
 IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:latest"
 
 # Build the Docker image

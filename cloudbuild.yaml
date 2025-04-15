@@ -40,12 +40,13 @@ steps:
       - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY}'
 
   # Update the Cloud Run service to set API_KEY separately for better security
+  # Using a secure secret instead of hardcoding the API key
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: bash
     args:
       - '-c'
       - |
-        gcloud run services update $_SERVICE_NAME --platform managed --region us-east4 --set-env-vars API_KEY=6e878bf1-c92d-4ba1-99c9-50e3343efd5d
+        gcloud run services update $_SERVICE_NAME --platform managed --region us-east4 --set-env-vars API_KEY=$${_API_KEY}
 
   # Add tags for latest version
   - name: 'gcr.io/cloud-builders/docker'
@@ -66,9 +67,16 @@ images:
 # Set timeout for the build
 timeout: 3600s
 
+# Available secrets in Cloud Build
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/api-key/versions/latest
+      env: '_API_KEY'
+    - versionName: projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest
+      env: '_GEMINI_API_KEY'
+
 substitutions:
   _COMMIT_SHA: ${_COMMIT_SHA}
-  _GEMINI_API_KEY: ${_GEMINI_API_KEY}
   _SERVICE_ACCOUNT: ${_SERVICE_ACCOUNT}
   _SERVICE_NAME: crwlr-server # Default value, will be overridden when specified
 
