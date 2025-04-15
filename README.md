@@ -103,7 +103,7 @@ The API will be available at http://localhost:8000, and the interactive document
 
 The API is protected with API key authentication to ensure secure access. This requires:
 
-1. Setting up an API key in your `.env` file:
+1. Setting up an API key in your `.env` file for local development:
 
    ```
    API_KEY=your_unique_api_key_here
@@ -115,10 +115,16 @@ The API is protected with API key authentication to ensure secure access. This r
    X-API-Key: your_unique_api_key_here
    ```
 
-3. For deployment environments (Cloud Run, etc.), set the API key as an environment variable:
-   - In Google Cloud Build, add the API key as a substitution variable `_API_KEY`
-   - This keeps sensitive credentials out of your codebase
-   - The cloudbuild.yaml file is configured to pass this to the deployed service
+3. For deployment to Cloud Run:
+   - The deployment script (`deploy.sh`) and Cloud Build configuration automatically set the API key
+   - The API key is set directly on the Cloud Run service rather than in GitHub Secrets
+   - This provides better security by reducing the number of places where the key is stored
+
+To manually set or update the API key on an existing Cloud Run service:
+
+```bash
+gcloud run services update crwlr-server --platform managed --region us-east4 --set-env-vars API_KEY=your_api_key_here
+```
 
 Without a valid API key, all API endpoints will return a 401 Unauthorized error.
 

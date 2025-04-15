@@ -37,7 +37,15 @@ steps:
       - '--service-account'
       - '${_SERVICE_ACCOUNT}'
       - '--set-env-vars'
-      - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY},API_KEY=${_API_KEY}'
+      - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY}'
+
+  # Update the Cloud Run service to set API_KEY separately for better security
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        gcloud run services update $_SERVICE_NAME --platform managed --region us-east4 --set-env-vars API_KEY=6e878bf1-c92d-4ba1-99c9-50e3343efd5d
 
   # Add tags for latest version
   - name: 'gcr.io/cloud-builders/docker'
@@ -61,7 +69,6 @@ timeout: 3600s
 substitutions:
   _COMMIT_SHA: ${_COMMIT_SHA}
   _GEMINI_API_KEY: ${_GEMINI_API_KEY}
-  _API_KEY: ${_API_KEY}
   _SERVICE_ACCOUNT: ${_SERVICE_ACCOUNT}
   _SERVICE_NAME: crwlr-server # Default value, will be overridden when specified
 
