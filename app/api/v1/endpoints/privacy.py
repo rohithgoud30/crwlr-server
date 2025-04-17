@@ -545,6 +545,75 @@ async def detect_anti_bot_patterns(page):
     except Exception as e:
         print(f"Error detecting anti-bot patterns: {e}")
         return False, []
+
+async def verify_is_privacy_page(page):
+    """Verify if the current page is a privacy policy page."""
+    try:
+        # Check for privacy indicators in page text
+        privacy_check = await page.evaluate("""() => {
+            const text = document.body.innerText.toLowerCase();
+            
+            // Check for common privacy policy terms (strong indicators)
+            const hasPrivacyPolicy = text.includes('privacy policy') || text.includes('privacy notice');
+            const hasDataCollection = text.includes('data we collect') || text.includes('information we collect');
+            const hasDataUsage = text.includes('use of your information') || text.includes('how we use');
+            const hasCookies = text.includes('cookies') || text.includes('tracking technologies');
+            const hasRights = text.includes('your rights') || text.includes('your choices');
+            const hasGDPR = text.includes('gdpr') || text.includes('ccpa') || text.includes('data protection');
+            
+            // Count occurrences of "privacy" word
+            const privacyCount = (text.match(/privacy/g) || []).length;
+            
+            // Calculate confidence score based on indicators
+            let confidence = 0;
+            
+            if (hasPrivacyPolicy) confidence += 30;
+            if (hasDataCollection) confidence += 20;
+            if (hasDataUsage) confidence += 15;
+            if (hasCookies) confidence += 10;
+            if (hasRights) confidence += 15;
+            if (hasGDPR) confidence += 20;
+            
+            // Add points based on how many times "privacy" appears (up to 30 points)
+            confidence += Math.min(privacyCount * 3, 30);
+            
+            // Page title check - strong indicator
+            const title = document.title.toLowerCase();
+            if (title.includes('privacy policy') || title.includes('privacy notice')) confidence += 30;
+            else if (title.includes('privacy')) confidence += 15;
+            
+            // Check if main heading contains privacy-related terms
+            const h1Elements = document.querySelectorAll('h1, h2');
+            for (const h of h1Elements) {
+                const headingText = h.innerText.toLowerCase();
+                if (headingText.includes('privacy policy') || headingText.includes('privacy notice')) {
+                    confidence += 20;
+                    break;
+                } else if (headingText.includes('privacy') || headingText.includes('data protection')) {
+                    confidence += 10;
+                    break;
+                }
+            }
+            
+            // Cap at 100
+            confidence = Math.min(confidence, 100);
+            
+            return {
+                confidence: confidence,
+                isPrivacyPage: confidence >= 60,
+                hasPrivacyPolicy: hasPrivacyPolicy,
+                hasDataCollection: hasDataCollection,
+                hasDataUsage: hasDataUsage,
+                hasCookies: hasCookies,
+                hasRights: hasRights
+            };
+        }""")
+        
+        return privacy_check
+    except Exception as e:
+        print(f"Error verifying privacy page: {e}")
+        return {"confidence": 0, "isPrivacyPage": False}
+
 async def find_all_privacy_links_js(page, domain):
     """Find all potential privacy policy links using JavaScript evaluation."""
     try:
@@ -650,7 +719,7 @@ async def find_all_privacy_links_js(page, domain):
                            html.includes('security check') ||
                            html.includes('ddos') ||
                            html.includes('please verify') ||
-                           html.includes('challenge') ||
+                           html.includes('challenge') || 
                            html.includes('just a moment') ||
                            document.title.toLowerCase().includes('just a moment') ||
                            document.title.toLowerCase().includes('please wait'),
@@ -722,7 +791,7 @@ async def find_all_privacy_links_js(page, domain):
                         if (text.match(/^(\d+|next|prev|previous|back|forward)$/)) return;
                         
                         // Calculate score
-                        let score = 0;
+                    let score = 0;
                         
                         // Text-based scoring
                         if (text === 'privacy policy') score += 100;
@@ -743,8 +812,8 @@ async def find_all_privacy_links_js(page, domain):
                         else if (text.includes('cookies')) score += 45;
                         else if (text.includes('terms')) score += 30;
                         else if (text.includes('legal')) score += 25;
-                        
-                        // URL-based scoring
+                    
+                    // URL-based scoring
                         if (href.includes('privacy-policy')) score += 90;
                         else if (href.includes('privacy_policy')) score += 90;
                         else if (href.includes('privacy-notice')) score += 85;
@@ -803,14 +872,14 @@ async def find_all_privacy_links_js(page, domain):
                     // Return top 3 links only
                     return privacyLinks.slice(0, 3);
                 }
-            }"""
-            )
+                    }"""
+                    )
 
             if footer_links and len(footer_links) > 0:
-                return footer_links
+                return footer_links[0]['href'], page, footer_links
             else:
                 print("No privacy links found in footer with anti-bot protection")
-                return []
+                return None, page, None
 
         # Original comprehensive evaluation for no anti-bot case
         privacy_links = await page.evaluate(
@@ -911,185 +980,29 @@ async def find_all_privacy_links_js(page, domain):
                         href: href,
                         confidence: score,
                         isExternal: !href.includes(window.location.hostname),
-                        url: a.href,
-                        title: title || "No Title",  // Fallback title
-                        description: description,
-                        score: score
+                        targetBlank: targetBlank,
+                        rel: rel
                     };
                 })
-                .filter(result => 
-                    result.score > 0 || 
-                    result.url.toLowerCase().includes('privacy') || 
-                    result.url.toLowerCase().includes('gdpr') || 
-                    result.url.toLowerCase().includes('data-protection')
-                );
+                .filter(Boolean); // Remove nulls
                 
-            // Deduplicate results based on URL
-            const uniqueResults = [];
-            const seenUrls = new Set();
+            // Sort by confidence score (highest first)
+            privacyLinks.sort((a, b) => b.confidence - a.confidence);
             
-            for (const result of results) {
-                if (!seenUrls.has(result.url)) {
-                    seenUrls.add(result.url);
-                    uniqueResults.push(result);
-                }
-            }
-            
-            return uniqueResults;
-        }""",
-            domain,
+            // Return top 3 links only
+            return privacyLinks.slice(0, 3);
+        }"""
         )
 
-        if search_results and len(search_results) > 0:
-            print(f"Found {len(search_results)} potential results from Bing search")
+        if (privacy_links and len(privacy_links) > 0):
+            best_link = privacy_links[0]
+            return best_link['href'], page, privacy_links
 
-            # Sort by score
-            search_results.sort(key=lambda x: x["score"], reverse=True)
-
-            # Store the best result in case all verifications fail
-            best_result_url = search_results[0]["url"]
-            best_result_score = search_results[0]["score"]
-
-            # Display top results for debugging
-            for i, result in enumerate(search_results[:3]):
-                print(
-                    f"Result #{i+1}: {result['title']} - {result['url']} (Score: {result['score']})"
-                )
-
-            # Check the top 5 results
-            for result_index in range(min(5, len(search_results))):
-                best_result = search_results[result_index]["url"]
-
-                try:
-                    # Visit the page to verify it's a privacy page
-                    print(f"Checking result: {best_result}")
-                    await page.goto(
-                        best_result, timeout=10000, wait_until="domcontentloaded"
-                    )
-                    await page.wait_for_timeout(1000)  # Allow time for page to load
-
-                    # Check if we hit a captcha
-                    is_captcha = await page.evaluate(
-                        """() => {
-                        const html = document.documentElement.innerHTML.toLowerCase();
-                        const url = window.location.href.toLowerCase();
-                        return {
-                            isCaptcha: html.includes('captcha') || 
-                                      url.includes('captcha') ||
-                                      html.includes('security measure') ||
-                                      html.includes('security check') ||
-                                      html.includes('please verify') ||
-                                      html.includes('just a moment'),
-                            url: window.location.href
-                        };
-                    }"""
-                    )
-
-                    # Special handling for high-scoring URLs that hit captchas
-                    if is_captcha["isCaptcha"]:
-                        print(f"⚠️ Captcha detected when accessing: {is_captcha['url']}")
-
-                        # If the original URL was high-scoring and contains key terms, accept it even with captcha
-                        original_url_lower = best_result.lower()
-                        captcha_bypass_domains = [
-                            "facebook.com",
-                            "meta.com",
-                            "instagram.com",
-                            "amazon.com",
-                            "openai.com",
-                            "apple.com",
-                            "google.com",
-                        ]
-
-                        # Check if it's from a known domain and has privacy policy in URL
-                        is_known_domain = any(
-                            domain in original_url_lower
-                            for domain in captcha_bypass_domains
-                        )
-                        has_privacy_path = (
-                            "privacy-policy" in original_url_lower
-                            or "privacy-notice" in original_url_lower
-                            or "data-protection" in original_url_lower
-                            or "privacy" in original_url_lower
-                            or "policies" in original_url_lower
-                        )
-
-                        if (
-                            is_known_domain
-                            and has_privacy_path
-                            and search_results[result_index]["score"] >= 60
-                        ):
-                            print(
-                                f"✅ Accepting high-scoring URL from known domain despite captcha: {best_result}"
-                            )
-                            return best_result
-                        else:
-                            print(
-                                f"❌ Not accepting captcha-protected URL as it doesn't meet criteria"
-                            )
-
-                    # Perform verification
-                    verification = await verify_is_privacy_page(page)
-
-                    if verification["isPrivacyPage"] and verification["confidence"] >= 60:
-                        print(f"✅ Verified privacy page from Bing results: {page.url}")
-                        return page.url
-                    else:
-                        print(
-                            f"❌ Not a valid Privacy page (verification score: {verification['confidence']})"
-                        )
-                except Exception as e:
-                    print(f"Error checking Bing search result: {e}")
-
-            # If we checked all results but none were verified, consider the highest scored result
-            # with a minimum score threshold
-            if len(search_results) > 0 and search_results[0]["score"] >= 70:
-                print(
-                    f"⚠️ No verified pages found. Checking highest-scored result: {search_results[0]['url']} (Score: {search_results[0]['score']})"
-                )
-                try:
-                    await page.goto(
-                        search_results[0]["url"],
-                        timeout=10000,
-                        wait_until="domcontentloaded",
-                    )
-                    await page.wait_for_timeout(1000)  # Reduced wait time for full page load
-
-                    verification = await verify_is_privacy_page(page)
-                    if verification["confidence"] >= 50:  # Higher minimum threshold
-                        print(
-                            f"⚠️ Final verification passed with sufficient confidence: {verification['confidence']}"
-                        )
-                        return page.url
-                    else:
-                        print(
-                            f"❌ Final verification failed with confidence score: {verification['confidence']}"
-                        )
-                        # Return the highest-scored result even if verification fails
-                        print(
-                            f"⚠️ Returning highest-scored result as last resort: {search_results[0]['url']}"
-                        )
-                        return search_results[0]["url"]
-                except Exception as e:
-                    print(f"Error in final verification: {e}")
-                    # Return the highest-scored result even if verification fails due to error
-                    print(
-                        f"⚠️ Verification failed with error, returning highest-scored result: {search_results[0]['url']}"
-                    )
-                    return search_results[0]["url"]
-
-            # Return the best result anyway if it has a decent score (60+)
-            if best_result_score >= 60:
-                print(
-                    f"⚠️ All verification methods failed, returning best unverified result: {best_result_url} (Score: {best_result_score})"
-                )
-                return best_result_url
-
-        print("No relevant Bing search results found")
-        return None
+        return None, page, None
+    
     except Exception as e:
-        print(f"Error in Bing search fallback: {e}")
-        return None
+        print(f"Error finding privacy links with JavaScript: {e}")
+        return None, page, None
 
 async def duckduckgo_search_fallback_privacy(domain, page):
     """Search for privacy policy using DuckDuckGo Search."""
