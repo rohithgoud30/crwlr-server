@@ -675,7 +675,7 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                         else if (href.includes('data-protection') || href.includes('data_protection')) score += 40;
                         else if (href.includes('cookie') || href.includes('personal-information')) score += 30;
                         // Additional boost for user-specific privacy links
-                        if (text.includes('user') || href.includes('user')) score += 40;
+                        if (text.includes('user') || href.includes('user')) score += 100;
                         
                         return {
                             text: a.textContent.trim(),
