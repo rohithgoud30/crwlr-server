@@ -1465,3 +1465,392 @@ async def smooth_scroll_and_click_privacy(
         print(f"Error in footer/scroll check: {e}")
 
     return None, current_page, unverified_result
+
+async def bing_search_fallback_privacy(domain, page):
+    """Search for privacy policy using Bing Search."""
+    try:
+        print("Attempting search engine fallback with Bing...")
+        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data protection" OR "privacy statement"'
+        bing_search_url = f"https://www.bing.com/search?q={search_query}"
+
+        await page.goto(bing_search_url, timeout=15000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)
+
+        search_results = await page.evaluate("""(domain) => {
+            const results = [];
+            const links = Array.from(document.querySelectorAll('#b_results .b_algo h2 a, #b_results .b_algo .b_title a, #b_results .b_algo a.tilk'));
+            
+            for (const link of links) {
+                try {
+                    // Skip if link doesn't have proper URL or doesn't contain domain
+                    const href = link.href.toLowerCase();
+                    if (!href || !href.includes(domain.toLowerCase())) continue;
+                    
+                    // Skip search engine links
+                    if (href.includes('bing.com') || 
+                        href.includes('google.com') || 
+                        href.includes('yahoo.com') ||
+                        href.includes('duckduckgo.com')) continue;
+                    
+                    // Get title and snippet
+                    const title = link.textContent.trim();
+                    let description = '';
+                    let parentElem = link.closest('.b_algo');
+                    if (parentElem) {
+                        const descElem = parentElem.querySelector('.b_caption p');
+                        if (descElem) description = descElem.textContent.trim();
+                    }
+                    
+                    // Score the result
+                    let score = 0;
+                    const titleLower = title.toLowerCase();
+                    const descLower = description.toLowerCase();
+                    const urlLower = href.toLowerCase();
+                    
+                    // Title scoring
+                    if (titleLower.includes('privacy policy')) score += 50;
+                    else if (titleLower.includes('privacy notice')) score += 48;
+                    else if (titleLower.includes('privacy statement')) score += 45;
+                    else if (titleLower.includes('data protection')) score += 40;
+                    else if (titleLower.includes('privacy')) score += 30;
+                    else if (titleLower.includes('gdpr') || titleLower.includes('ccpa')) score += 20;
+                    
+                    // Description scoring
+                    if (descLower.includes('privacy policy')) score += 20;
+                    else if (descLower.includes('privacy notice')) score += 18;
+                    else if (descLower.includes('data protection')) score += 16;
+                    else if (descLower.includes('privacy') && descLower.includes('data')) score += 15;
+                    
+                    // URL scoring
+                    if (urlLower.includes('/privacy-policy') || urlLower.includes('/privacy-notice')) score += 60;
+                    else if (urlLower.includes('/data-protection') || urlLower.includes('/gdpr')) score += 55;
+                    else if (urlLower.includes('/privacy/') || urlLower.includes('/privacy')) score += 50;
+                    else if (urlLower.includes('/legal/privacy')) score += 45;
+                    else if (urlLower.includes('/legal/')) score += 30;
+                    
+                    // Corporate/official domains boost
+                    const corpKeywords = ['company/', 'privacy-center', 'privacy-notice', '/legal/', '/about/', '/corporate/'];
+                    if (corpKeywords.some(kw => urlLower.includes(kw))) {
+                        score += 15;
+                    }
+                    
+                    // Filter to include corporate privacy links even if hostname doesn't match
+                    const currentHostname = new URL(href).hostname.replace('www.', '');
+                    const mainDomain = domain.replace('www.', '');
+                    
+                    // Always include if it's the same domain
+                    let shouldInclude = currentHostname.includes(mainDomain) || mainDomain.includes(currentHostname);
+                    
+                    if (!shouldInclude) {
+                        // Include external privacy links with corporate-style paths
+                        const path = new URL(href).pathname.toLowerCase();
+                        shouldInclude = corpKeywords.some(kw => path.includes(kw)) && 
+                                       (urlLower.includes('privacy') || urlLower.includes('data-protection'));
+                    }
+                    
+                    if (shouldInclude) {
+                        results.push({
+                            url: href,
+                            title: title || 'No Title',
+                            description: description || 'No Description',
+                            score: score
+                        });
+                    }
+                } catch (e) {
+                    // Skip problematic links
+                    continue;
+                }
+            }
+            
+            // Deduplicate by URL
+            const uniqueResults = [];
+            const seenUrls = new Set();
+            
+            for (const result of results) {
+                if (!seenUrls.has(result.url)) {
+                    seenUrls.add(result.url);
+                    uniqueResults.push(result);
+                }
+            }
+            
+            return uniqueResults;
+        }""", domain)
+
+        if search_results and len(search_results) > 0:
+            print(f"Found {len(search_results)} potential results from Bing search")
+            
+            # Sort by score
+            search_results.sort(key=lambda x: x["score"], reverse=True)
+            
+            # Store the best result in case all verifications fail
+            best_result_url = search_results[0]["url"]
+            best_result_score = search_results[0]["score"]
+            
+            # Display top results for debugging
+            for i, result in enumerate(search_results[:3]):
+                print(f"Result #{i+1}: {result['title']} - {result['url']} (Score: {result['score']})")
+            
+            # Check the top 5 results
+            for result_index in range(min(5, len(search_results))):
+                best_result = search_results[result_index]["url"]
+                
+                try:
+                    # Visit the page to verify it's a privacy page
+                    print(f"Checking result: {best_result}")
+                    await page.goto(best_result, timeout=10000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(1000)  # Allow time for page to load
+                    
+                    # Check if we hit a captcha
+                    is_captcha = await page.evaluate("""() => {
+                        const html = document.documentElement.innerHTML.toLowerCase();
+                        const url = window.location.href.toLowerCase();
+                        return {
+                            isCaptcha: html.includes('captcha') || 
+                                      url.includes('captcha') ||
+                                      html.includes('security measure') ||
+                                      html.includes('security check') ||
+                                      html.includes('please verify') ||
+                                      html.includes('just a moment'),
+                            url: window.location.href
+                        };
+                    }""")
+                    
+                    # Special handling for high-scoring URLs that hit captchas
+                    if is_captcha["isCaptcha"]:
+                        print(f"⚠️ Captcha detected when accessing: {is_captcha['url']}")
+                        
+                        # If the original URL was high-scoring and contains key terms, accept it even with captcha
+                        original_url_lower = best_result.lower()
+                        captcha_bypass_domains = [
+                            "facebook.com",
+                            "meta.com",
+                            "instagram.com",
+                            "amazon.com",
+                            "openai.com",
+                            "apple.com",
+                            "google.com",
+                        ]
+                        
+                        # Check if it's from a known domain and has privacy policy in URL
+                        is_known_domain = any(domain in original_url_lower for domain in captcha_bypass_domains)
+                        has_privacy_path = (
+                            "privacy-policy" in original_url_lower or
+                            "privacy-notice" in original_url_lower or
+                            "data-protection" in original_url_lower or
+                            "privacy" in original_url_lower or
+                            "policies" in original_url_lower
+                        )
+                        
+                        if is_known_domain and has_privacy_path and search_results[result_index]["score"] >= 60:
+                            print(f"✅ Accepting high-scoring URL from known domain despite captcha: {best_result}")
+                            return best_result
+                        else:
+                            print(f"❌ Not accepting captcha-protected URL as it doesn't meet criteria")
+                    
+                    # Perform verification
+                    verification = await verify_is_privacy_page(page)
+                    
+                    if verification["isPrivacyPage"] and verification["confidence"] >= 60:
+                        print(f"✅ Verified privacy page from Bing results: {page.url}")
+                        return page.url
+                    else:
+                        print(f"❌ Not a valid Privacy page (verification score: {verification['confidence']})")
+                except Exception as e:
+                    print(f"Error checking Bing search result: {e}")
+            
+            # If we checked all results but none were verified, consider the highest scored result
+            # with a minimum score threshold
+            if len(search_results) > 0 and search_results[0]["score"] >= 70:
+                print(f"⚠️ No verified pages found. Checking highest-scored result: {search_results[0]['url']} (Score: {search_results[0]['score']})")
+                try:
+                    await page.goto(search_results[0]["url"], timeout=10000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(1000)  # Reduced wait time for full page load
+                    
+                    verification = await verify_is_privacy_page(page)
+                    if verification["confidence"] >= 50:  # Higher minimum threshold
+                        print(f"⚠️ Final verification passed with sufficient confidence: {verification['confidence']}")
+                        return page.url
+                    else:
+                        print(f"❌ Final verification failed with confidence score: {verification['confidence']}")
+                        # Return the highest-scored result even if verification fails
+                        print(f"⚠️ Returning highest-scored result as last resort: {search_results[0]['url']}")
+                        return search_results[0]["url"]
+                except Exception as e:
+                    print(f"Error in final verification: {e}")
+                    # Return the highest-scored result even if verification fails due to error
+                    print(f"⚠️ Verification failed with error, returning highest-scored result: {search_results[0]['url']}")
+                    return search_results[0]["url"]
+            
+            # Return the best result anyway if it has a decent score (60+)
+            if best_result_score >= 60:
+                print(f"⚠️ All verification methods failed, returning best unverified result: {best_result_url} (Score: {best_result_score})")
+                return best_result_url
+        
+        print("No relevant Bing search results found")
+        return None
+    except Exception as e:
+        print(f"Error in Bing search fallback: {e}")
+        return None
+
+async def yahoo_search_fallback_privacy(domain, page):
+    """Search for privacy policy using Yahoo Search."""
+    try:
+        print("Attempting search engine fallback with Yahoo...")
+        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data protection" OR "privacy statement"'
+        yahoo_search_url = f"https://search.yahoo.com/search?p={search_query}"
+
+        await page.goto(yahoo_search_url, timeout=15000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)
+
+        search_results = await page.evaluate("""(domain) => {
+            const results = [];
+            // Yahoo search result selectors
+            const resultSelectors = [
+                'div.algo-sr a', // Standard results
+                'div.algo a',     // Alternative result format
+                'h3.title a',     // Another format
+                '#web a.d-ib'     // Another format
+            ];
+            
+            // Try each selector until we find some results
+            let links = [];
+            for (const selector of resultSelectors) {
+                links = Array.from(document.querySelectorAll(selector));
+                if (links.length > 0) break;
+            }
+            
+            for (const link of links) {
+                try {
+                    // Skip if link doesn't have proper URL or doesn't contain domain
+                    const href = link.href.toLowerCase();
+                    if (!href || !href.includes(domain.toLowerCase())) continue;
+                    
+                    // Skip search engine links
+                    if (href.includes('yahoo.com') || 
+                        href.includes('google.com') || 
+                        href.includes('bing.com') ||
+                        href.includes('duckduckgo.com')) continue;
+                    
+                    // Get title and snippet
+                    const title = link.textContent.trim();
+                    let description = '';
+                    
+                    // Look for description in parent elements
+                    let parentElem = link.closest('div.algo') || link.closest('div.algo-sr');
+                    if (parentElem) {
+                        const descElem = parentElem.querySelector('p.fz-ms') || 
+                                        parentElem.querySelector('p') ||
+                                        parentElem.querySelector('div.compText');
+                        if (descElem) description = descElem.textContent.trim();
+                    }
+                    
+                    // Score the result
+                    let score = 0;
+                    const titleLower = title.toLowerCase();
+                    const descLower = description.toLowerCase();
+                    const urlLower = href.toLowerCase();
+                    
+                    // Title scoring
+                    if (titleLower.includes('privacy policy')) score += 50;
+                    else if (titleLower.includes('privacy notice')) score += 48;
+                    else if (titleLower.includes('privacy statement')) score += 45;
+                    else if (titleLower.includes('data protection')) score += 40;
+                    else if (titleLower.includes('privacy')) score += 30;
+                    else if (titleLower.includes('gdpr') || titleLower.includes('ccpa')) score += 20;
+                    
+                    // Description scoring
+                    if (descLower.includes('privacy policy')) score += 20;
+                    else if (descLower.includes('privacy notice')) score += 18;
+                    else if (descLower.includes('data protection')) score += 16;
+                    else if (descLower.includes('privacy') && descLower.includes('data')) score += 15;
+                    
+                    // URL scoring
+                    if (urlLower.includes('/privacy-policy') || urlLower.includes('/privacy-notice')) score += 60;
+                    else if (urlLower.includes('/data-protection') || urlLower.includes('/gdpr')) score += 55;
+                    else if (urlLower.includes('/privacy/') || urlLower.includes('/privacy')) score += 50;
+                    else if (urlLower.includes('/legal/privacy')) score += 45;
+                    else if (urlLower.includes('/legal/')) score += 30;
+                    
+                    // Corporate/official domains boost
+                    const corpKeywords = ['company/', 'privacy-center', 'privacy-notice', '/legal/', '/about/', '/corporate/'];
+                    if (corpKeywords.some(kw => urlLower.includes(kw))) {
+                        score += 15;
+                    }
+                    
+                    // Filter to include corporate privacy links even if hostname doesn't match
+                    const currentHostname = new URL(href).hostname.replace('www.', '');
+                    const mainDomain = domain.replace('www.', '');
+                    
+                    // Always include if it's the same domain
+                    let shouldInclude = currentHostname.includes(mainDomain) || mainDomain.includes(currentHostname);
+                    
+                    if (!shouldInclude) {
+                        // Include external privacy links with corporate-style paths
+                        const path = new URL(href).pathname.toLowerCase();
+                        shouldInclude = corpKeywords.some(kw => path.includes(kw)) && 
+                                       (urlLower.includes('privacy') || urlLower.includes('data-protection'));
+                    }
+                    
+                    if (shouldInclude) {
+                        results.push({
+                            url: href,
+                            title: title || 'No Title',
+                            description: description || 'No Description',
+                            score: score
+                        });
+                    }
+                } catch (e) {
+                    // Skip problematic links
+                    continue;
+                }
+            }
+            
+            // Deduplicate by URL
+            const uniqueResults = [];
+            const seenUrls = new Set();
+            
+            for (const result of results) {
+                if (!seenUrls.has(result.url)) {
+                    seenUrls.add(result.url);
+                    uniqueResults.push(result);
+                }
+            }
+            
+            return uniqueResults;
+        }""", domain)
+
+        if search_results and len(search_results) > 0:
+            print(f"Found {len(search_results)} potential results from Yahoo search")
+            
+            # Sort by score
+            search_results.sort(key=lambda x: x["score"], reverse=True)
+            
+            # Display top results for debugging
+            for i, result in enumerate(search_results[:3]):
+                print(f"Result #{i+1}: {result['title']} - {result['url']} (Score: {result['score']})")
+            
+            # Check the top 3 results
+            for result in search_results[:3]:
+                try:
+                    await page.goto(result["url"], timeout=10000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(1000)
+                    
+                    verification = await verify_is_privacy_page(page)
+                    if verification["isPrivacyPage"]:
+                        print(f"✅ Verified privacy page from Yahoo results: {page.url}")
+                        return page.url
+                    else:
+                        print(f"Not a privacy page (score: {verification['confidence']})")
+                except Exception as e:
+                    print(f"Error checking Yahoo search result: {e}")
+            
+            # If no verification succeeded but we have high-confidence results, return the best one
+            if search_results[0]["score"] >= 60:
+                print(f"⚠️ Returning unverified high-confidence result: {search_results[0]['url']}")
+                return search_results[0]["url"]
+            
+        print("No relevant Yahoo search results found")
+        return None
+    except Exception as e:
+        print(f"Error in Yahoo search fallback: {e}")
+        return None
