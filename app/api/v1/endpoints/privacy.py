@@ -203,13 +203,12 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 print(f"Error verifying link {link}: {e}")
                 continue
 
-        # Sort by score (confidence), prefer is_privacy True, then corporate pages, then score
-        corporate_patterns = ["company/", "privacy-center", "privacy-notice", "/legal/"]
-        # Sort by (is_privacy, is_corporate, confidence)
+        # Sort by score: prioritize is_privacy True, then internal domain, then confidence
+        plain_domain = domain.replace('www.', '')
         scored_links.sort(
             key=lambda x: (
                 x["is_privacy"],
-                any(p in x["url"].lower() for p in corporate_patterns),
+                urlparse(x["url"]).netloc.replace('www.', '').endswith(plain_domain),
                 x["score"]
             ),
             reverse=True
@@ -1267,7 +1266,7 @@ async def yahoo_search_fallback_privacy(domain, page):
                             // Allow corporate/external privacy links based on path keywords
                             const corpKeywords = ['company/', 'privacy-center', 'privacy-notice', '/legal/'];
                             if (!corpKeywords.some(k => pathLower.includes(k))) {
-                                return false;
+                            return false;
                             }
                         }
                         
@@ -1533,7 +1532,7 @@ async def yahoo_search_fallback_privacy(domain, page):
                     await page.wait_for_timeout(2000)
 
                     verification = await verify_is_privacy_page(page)
-                    if verification["confidence"] >= 50:  # Higher minimum threshold
+                    if verification.get("confidence", 0) >= 50:  # Higher minimum threshold
                         print(
                             f"⚠️ Final verification passed with sufficient confidence: {verification['confidence']}"
                         )
@@ -1635,9 +1634,13 @@ async def bing_search_fallback_privacy(domain, page):
                         const url = new URL(a.href);
                         const urlPath = url.pathname.toLowerCase();
                         
-                        // Only include links to the target domain
+                        // Only include links to the target domain or corporate/external privacy links
                         if (!url.hostname.includes(domain) && !domain.includes(url.hostname)) {
+                            // Allow corporate/external privacy links based on path keywords
+                            const corpKeywords = ['company/','privacy-center','privacy-notice','/legal/'];
+                            if (!corpKeywords.some(k => urlPath.includes(k))) {
                             return false;
+                            }
                         }
                         
                         // Filter out search engines and unrelated domains
