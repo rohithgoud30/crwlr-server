@@ -615,12 +615,14 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                         else if (text.includes('data protection')) score += 70;
                         else if (text.includes('personal information')) score += 60;
                         else if (text.includes('cookies')) score += 50;
-                        
+
                         if (href.includes('privacy-policy') || href.includes('privacy_policy')) score += 50;
                         else if (href.includes('privacy') || href.includes('gdpr')) score += 40;
                         else if (href.includes('data-protection') || href.includes('data_protection')) score += 40;
                         else if (href.includes('cookie') || href.includes('personal-information')) score += 30;
-                        
+                        // Additional boost for user-specific privacy links
+                        if (text.includes('user') || href.includes('user')) score += 40;
+
                         return {
                             text: a.textContent.trim(),
                             href: a.href,
