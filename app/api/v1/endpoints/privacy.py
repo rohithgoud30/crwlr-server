@@ -676,6 +676,8 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                         else if (href.includes('cookie') || href.includes('personal-information')) score += 30;
                         // Additional boost for user-specific privacy links
                         if (text.includes('user') || href.includes('user')) score += 100;
+                        // Additional boost for customer-specific privacy links
+                        if (text.includes('customer') || href.includes('customer')) score += 100;
                         
                         return {
                             text: a.textContent.trim(),
@@ -821,6 +823,8 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                     
                     // Additional boost for user-specific privacy links
                     if (text.includes('user') || href.includes('user')) score += 100;
+                    // Additional boost for customer-specific privacy links
+                    if (text.includes('customer') || href.includes('customer')) score += 100;
                 
                     return {
                         text: text,
