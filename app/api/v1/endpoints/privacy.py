@@ -233,6 +233,13 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 classes: link.className
             }));
         }""")
+        
+        # Print all links with "Privacy" in text for debugging
+        for link in all_links:
+            link_text = link['text'].lower() if link['text'] else ''
+            if 'privacy' in link_text:
+                print(f"[Debug] Found link with privacy in text: {link['text']} - {link['href']}")
+                
         privacy_keywords = ["privacy", "data", "cookies", "gdpr", "ccpa", "personal information", "collection"]
         potential_privacy_links = []
         for link in all_links:
@@ -240,49 +247,30 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
             link_href = link['href'].lower() if link['href'] else ''
             if any(kw in link_text for kw in privacy_keywords) or any(kw in link_href for kw in privacy_keywords):
                 potential_privacy_links.append(link)
-# 2. Specifically scan footer area using multiple selectors and bottom-of-page heuristic
-        footer_links = await page.evaluate("""() => {
-            let links = [];
-            const footerSelectors = [
-                'footer', '.footer', '#footer', '#navFooter', '.navFooter', '#legalFooter', '.a-box-group', '.navLeftFooter', '.navFooterVerticalColumn', '.navFooterLinkCol'
-            ];
-            for (const selector of footerSelectors) {
-                const elements = document.querySelectorAll(selector);
-                for (const element of elements) {
-                    const elementLinks = Array.from(element.querySelectorAll('a'));
-                    links = links.concat(elementLinks.map(link => ({
-                        text: link.innerText.trim(),
-                        href: link.href,
-                        id: link.id,
-                        classes: link.className
-                    })));
-                }
-            }
-            // Bottom-of-page heuristic: links in bottom 30% of page
-            if (links.length === 0) {
-                const pageHeight = document.body.scrollHeight;
-                const bottomThreshold = pageHeight * 0.7;
-                const allLinks = document.querySelectorAll('a');
-                for (const link of allLinks) {
-                    const rect = link.getBoundingClientRect();
-                    const absoluteTop = rect.top + window.scrollY;
-                    if (absoluteTop >= bottomThreshold) {
-                        links.push({
-                            text: link.innerText.trim(),
-                            href: link.href,
-                            id: link.id,
-                            classes: link.className
-                        });
-                    }
-                }
-            }
-            return links;
-        }""")
-        for link in footer_links:
+                
+        # Score footer links higher - give them priority
+        for link in potential_privacy_links:
             link_text = link['text'].lower() if link['text'] else ''
-            link_href = link['href'].lower() if link['href'] else ''
-            if any(kw in link_text for kw in privacy_keywords) or any(kw in link_href for kw in privacy_keywords):
-                potential_privacy_links.append(link)
+            if 'privacy' in link_text and ('notice' in link_text or 'policy' in link_text):
+                print(f"[Footer Priority] Found strong privacy text match: {link['text']} - {link['href']}")
+                # Try this link first as it's the most likely candidate
+                try:
+                    await page.goto(link['href'], timeout=10000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(1000)
+                    final_url = page.url  # Get the final URL after redirects
+                    verification = await verify_is_privacy_page(page)
+                    if verification.get("isPrivacyPage", False) or verification.get("confidence", 0) >= 40:
+                        print(f"[Footer Priority] ✅ Verified Privacy Policy page: {final_url}")
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=final_url,
+                            success=True,
+                            message="Found Privacy Policy using high-priority footer link",
+                            method_used="footer_priority",
+                        )
+                except Exception as e:
+                    print(f"[Footer Priority] Error verifying link: {e}")
+
         # Deduplicate by href
         seen_hrefs = set()
         deduped_links = []
@@ -300,12 +288,13 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 print(f"[Fallback] Verifying candidate: {candidate_url}")
                 await page.goto(candidate_url, timeout=10000, wait_until="domcontentloaded")
                 await page.wait_for_timeout(1000)
+                final_url = page.url  # Get the final URL after redirects
                 verification = await verify_is_privacy_page(page)
                 if verification.get("isPrivacyPage", False):
-                    print(f"[Fallback] ✅ Verified Privacy Policy page: {candidate_url}")
+                    print(f"[Fallback] ✅ Verified Privacy Policy page: {final_url}")
                     return PrivacyResponse(
                         url=url,
-                        pp_url=candidate_url,
+                        pp_url=final_url,  # Use the final URL after all redirects
                         success=True,
                         message="Found Privacy Policy using dynamic footer/link scan fallback",
                         method_used="dynamic_footer_fallback",
@@ -620,7 +609,25 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                         f"Footer link #{i+1}: {link['text']} - {link['href']} (Score: {link['score']})"
                     )
 
+                # For any high-quality privacy link, follow redirects and return final URL
                 best_link = footer_links[0]["href"]
+                best_text = footer_links[0]["text"].lower()
+                best_score = footer_links[0]["score"]
+                
+                if (("privacy notice" in best_text or "privacy policy" in best_text) and best_score >= 100) or best_score >= 140:
+                    print(f"✅ Found high-quality privacy policy link in footer: {best_link}")
+                    # Try to navigate to it to get final URL after any redirects
+                    try:
+                        await page.goto(best_link, timeout=10000, wait_until="domcontentloaded")
+                        await page.wait_for_timeout(1500)
+                        final_url = page.url  # Get URL after redirects
+                        print(f"Final URL after redirect: {final_url}")
+                        return final_url, page, final_url
+                    except Exception as e:
+                        print(f"Error navigating to best footer link: {e}")
+                        # Fall back to returning the original URL
+                        return best_link, page, best_link
+                
                 return best_link, page, best_link
 
         # Get the base domain for validation
@@ -749,7 +756,27 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
         for i, link in enumerate(links[:5]):
             print(f"JS Link #{i+1}: {link['text']} - {link['href']} (Score: {link['score']})")
 
-        # If links were found, use the highest scored one
+        # For high-scoring links that have "Privacy Policy" or "Privacy Notice", follow redirects
+        for link in links[:3]:
+            if (("privacy policy" in link['text'].lower() or "privacy notice" in link['text'].lower()) 
+                and link['score'] >= 90):
+                print(f"Found high-quality privacy link: {link['text']} - {link['href']} (Score: {link['score']})")
+                try:
+                    await page.goto(link['href'], timeout=8000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(1500)
+                    final_url = page.url  # This will be the redirected URL if any
+                    
+                    # Verify that this is a privacy page
+                    verification = await verify_is_privacy_page(page)
+                    if verification.get("isPrivacyPage", False):
+                        print(f"✅ Verified as privacy policy after redirect: {final_url}")
+                        return final_url, page, final_url
+                    else:
+                        print(f"❌ Not verified as privacy page after redirect: {final_url}")
+                except Exception as e:
+                    print(f"Error following high-quality link: {e}")
+        
+        # If no high-quality links were verified, use the highest scored one
         if links:
             best_link = links[0]["href"]
 
@@ -762,6 +789,7 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                 print(f"Navigating to best link: {best_link}")
                 await page.goto(best_link, timeout=8000, wait_until="domcontentloaded")
                 await page.wait_for_timeout(1500)
+                final_url = page.url  # Get final URL after any redirects
 
                 # Verify this is actually a privacy page
                 is_privacy_page = await page.evaluate(
@@ -781,8 +809,8 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                 )
 
                 if is_privacy_page:
-                    print(f"✅ Verified as privacy policy page: {page.url}")
-                    return page.url, page, unverified_result
+                    print(f"✅ Verified as privacy policy page: {final_url}")
+                    return final_url, page, unverified_result
                 else:
                     print("⚠️ Link does not appear to be a privacy page after inspection")
                     return None, page, best_link
@@ -967,342 +995,172 @@ async def smooth_scroll_and_click_privacy(
 
     return None, current_page, unverified_result
 async def verify_is_privacy_page(page):
-    """Verify if the current page is a privacy policy page."""
+    """
+    Verifies if the page is likely a privacy policy.
+    Returns a dict with isPrivacyPage (bool) and confidence (float).
+    """
+    print("\n=== Verifying if URL is privacy page ===")
+    print(f"URL being verified: {page.url}")
+
     try:
-        page_title = await page.title()
-        page_url = page.url
+        # Wait for content to load
+        await page.wait_for_timeout(800)
 
-        # Initial checks on title and URL
-        title_lower = page_title.lower()
-        url_lower = page_url.lower()
-
-        print("🔍 Performing thorough page verification...")
-
-        # Define indicators
-        title_indicators = [
-            "privacy",
-            "privacy policy",
-            "privacy notice",
-            "privacy statement",
-            "data protection",
-            "data policy",
-            "data privacy",
-            "gdpr",
-            "ccpa",
-            "personal information",
-            "cookie policy",
-            "cookies",
-        ]
-
-        strong_indicators = [
-            "privacy policy",
-            "privacy notice",
-            "privacy statement",
-            "data protection notice",
-            "data privacy statement",
-            "personal information collection",
-        ]
-
-        url_indicators = [
-            "/privacy",
-            "/privacypolicy",
-            "/privacy-policy",
-            "/privacy_policy",
-            "/privacy-notice",
-            "/privacy_notice",
-            "/data-protection",
-            "/data_protection",
-            "/gdpr",
-            "/cookies",
-            "/cookie-policy",
-            "/personal-data",
-            "privacy.html",
-            "privacypolicy.html",
-            "privacy-policy.html",
-        ]
-
-        # Check for presence of indicators
-        strong_indicator = any(
-            indicator in title_lower for indicator in strong_indicators
-        )
-        title_indicator = any(
-            indicator in title_lower for indicator in title_indicators
-        )
-        url_indicator = any(indicator in url_lower for indicator in url_indicators)
-
-        # Extract text content
-        content = await page.evaluate(
+        # Extract and analyze key page signals
+        page_signals = await page.evaluate(
             """() => {
-            return document.body.innerText;
-        }"""
-        )
-
-        content_lower = content.lower()
-        content_length = len(content)
-
-        # Check for privacy sections and phrases
-        privacy_sections = 0
-        privacy_phrases = 0
-
-        section_patterns = [
-            "information we collect",
-            "personal information",
-            "data we collect",
-            "use of cookies",
-            "cookie policy",
-            "third party cookies",
-            "how we use your information",
-            "how we share",
-            "data sharing",
-            "data processing",
-            "data storage",
-            "data retention",
-            "data security",
-            "your privacy rights",
-            "your choices",
-            "opt out",
-            "gdpr",
-            "ccpa",
-            "california privacy rights",
-            "european users",
-            "international transfers",
-            "children's privacy",
-            "updates to this policy",
-            "changes to this policy",
-            "contact us",
-            "data controller",
-            "data protection officer",
-            "legal basis",
-            "tracking technologies",
-            "analytics",
-            "advertising",
-            "social media features",
-            "user rights",
-            "access your data",
-            "correct your data",
-            "delete your data",
-            "restrict processing",
-            "data portability",
-            "consent withdrawal",
-            "automated decision making",
-        ]
-
-        privacy_phrase_patterns = [
-            "this privacy policy",
-            "this privacy notice",
-            "we collect",
-            "we process",
-            "we share",
-            "we use cookies",
-            "personal data",
-            "personal information",
-            "information about you",
-            "information that you provide",
-            "automatically collected information",
-            "third parties",
-            "service providers",
-            "data processor",
-            "data protection",
-            "security measures",
-            "encryption",
-            "data breach",
-            "right to access",
-            "right to rectification",
-            "right to erasure",
-            "right to object",
-            "right to withdraw consent",
-            "age restrictions",
-            "parental consent",
-            "do not track",
-            "targeted advertising",
-            "privacy shield",
-            "standard contractual clauses",
-        ]
-
-        # Check for privacy headings
-        privacy_headings = await page.evaluate(
-            """() => {
-            const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, strong, b'));
-            const privacyHeadingPatterns = [
-                "privacy", "data", "information", "collect", "cookies", 
-                "sharing", "security", "rights", "gdpr", "ccpa", 
-                "choices", "opt-out", "retention", "changes", "contact",
-                "california", "european", "international", "children", "minors",
-                "processing", "third party", "analytics", "tracking", "marketing"
+            // Get document content to analyze
+            const title = document.title.toLowerCase();
+            const bodyText = document.body.innerText.toLowerCase();
+            const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'))
+                .map(h => h.innerText.toLowerCase());
+            const metaDesc = document.querySelector('meta[name="description"]')?.content?.toLowerCase() || '';
+            
+            // Get URL for analysis
+            const currentUrl = window.location.href.toLowerCase();
+            
+            // Strong signal terms that indicate privacy content
+            const privacyTitleTerms = [
+                'privacy', 'privacy policy', 'privacy notice', 'data protection', 
+                'data privacy', 'privacy statement', 'privacy information'
             ];
             
-            return headings.some(h => {
-                const text = h.innerText.toLowerCase();
-                return privacyHeadingPatterns.some(pattern => text.includes(pattern));
+            const privacyContentTerms = [
+                'personal data', 'information we collect', 'cookies', 
+                'data processing', 'gdpr', 'ccpa', 'opt-out', 'opt out',
+                'data protection', 'third parties', 'data sharing', 
+                'privacy rights', 'data retention', 'data security',
+                'personal information', 'collect information'
+            ];
+            
+            const privacyHeadingTerms = [
+                'information we collect', 'how we use your information', 
+                'data sharing', 'your rights', 'cookies and tracking',
+                'data storage', 'data security', 'children\\'s privacy',
+                'consent', 'policy changes', 'contact us', 'opt-out',
+                'our privacy practices', 'personal information'
+            ];
+            
+            // Analyze the title (this often directly tells us if it's a privacy page)
+            const titleScore = privacyTitleTerms.some(term => title.includes(term)) ? 50 : 0;
+            
+            // Check heading content for privacy sections
+            let headingScore = 0;
+            let privacyHeadingsCount = 0;
+            
+            headings.forEach(heading => {
+                if (privacyTitleTerms.some(term => heading.includes(term))) {
+                    headingScore += 20;
+                    privacyHeadingsCount++;
+                }
+                else if (privacyHeadingTerms.some(term => heading.includes(term))) {
+                    headingScore += 10;
+                    privacyHeadingsCount++;
+                }
             });
+            
+            // Cap the heading score
+            headingScore = Math.min(headingScore, 40);
+            
+            // Check if the URL contains privacy indicators
+            const urlScore = 
+                currentUrl.includes('privacy-policy') || 
+                currentUrl.includes('privacy_policy') || 
+                currentUrl.includes('/privacy/') || 
+                currentUrl.includes('/legal/privacy') ? 30 :
+                currentUrl.includes('privacy') || 
+                currentUrl.includes('data-protection') || 
+                currentUrl.includes('gdpr') ? 20 : 0;
+            
+            // Check content for privacy-specific terms
+            let contentScore = 0;
+            
+            // First, check for strong direct phrases
+            if (bodyText.includes('privacy policy') || 
+                bodyText.includes('privacy notice') || 
+                bodyText.includes('privacy statement')) {
+                contentScore += 30;
+            }
+            
+            // Then check for combinations of terms that strongly suggest a privacy policy
+            let keyTermsFound = 0;
+            privacyContentTerms.forEach(term => {
+                if (bodyText.includes(term)) {
+                    keyTermsFound++;
+                }
+            });
+            
+            // Add to content score based on the number of key terms found
+            if (keyTermsFound >= 7) contentScore += 40;
+            else if (keyTermsFound >= 5) contentScore += 30;
+            else if (keyTermsFound >= 3) contentScore += 20;
+            else if (keyTermsFound >= 1) contentScore += 10;
+            
+            // Negative signals - terms that suggest it's NOT a privacy policy
+            const negativeTerms = [
+                'sign in', 'login', 'add to cart', 'shopping cart', 
+                'search results', '404', 'page not found', 'error',
+                'menu'
+            ];
+            
+            const hasNegativeTerms = negativeTerms.some(term => 
+                title.includes(term) || (headings.length > 0 && headings[0].includes(term))
+            );
+            
+            // Apply negative score for negative signals, but only if we don't 
+            // have strong privacy signals elsewhere
+            const negativeScore = (hasNegativeTerms && titleScore === 0) ? -30 : 0;
+            
+            // Calculate the final score
+            let totalScore = titleScore + headingScore + urlScore + contentScore + negativeScore;
+            
+            // Additional signal: privacy policies often have multiple sections and are longer
+            if (privacyHeadingsCount >= 4 && bodyText.length > 3000) {
+                totalScore += 20;
+            }
+            
+            // Normalize to 0-100
+            totalScore = Math.max(0, Math.min(100, totalScore));
+            
+            return {
+                totalScore,
+                titleContainsPrivacy: titleScore > 0,
+                privacyHeadingsCount,
+                urlContainsPrivacy: urlScore > 0,
+                keyTermsCount: keyTermsFound,
+                hasNegativeTerms,
+                bodyTextLength: bodyText.length
+            };
         }"""
         )
 
-        # Count privacy sections and phrases
-        for pattern in section_patterns:
-            if pattern in content_lower:
-                privacy_sections += 1
+        # Lower threshold for privacy page verification
+        threshold = 55  # Was 75 before, lowered for better recall
 
-        for pattern in privacy_phrase_patterns:
-            if pattern in content_lower:
-                privacy_phrases += 1
-
-        # Check for negative indicators that suggest it's not a privacy page
-        negative_indicators = [
-            "sign in",
-            "sign up",
-            "login",
-            "register",
-            "create account",
-            "add to cart",
-            "shopping cart",
-            "checkout",
-            "buy now",
-            "password",
-            "email address",
-            "payment",
-            "credit card",
-            "shipping",
-            "delivery",
-            "order status",
-            "my account",
-            "track order",
-        ]
-
-        has_negative_indicators = any(
-            indicator in content_lower and indicator not in ["email address"]
-            for indicator in negative_indicators
-        )
-
-        # Determine if this is a privacy page
-        minimum_text_length = 1000  # Minimum content length for a privacy policy
-        minimum_privacy_sections = 3  # Minimum number of privacy sections required
-
-        minimum_text_present = content_length >= minimum_text_length
-        minimum_sections_present = privacy_sections >= minimum_privacy_sections
-
-        # Calculate confidence score (0-100)
-        confidence_score = 0
-
-        # Base score from indicators
-        if strong_indicator:
-            confidence_score += 30
-        if title_indicator:
-            confidence_score += 20
-        if url_indicator:
-            confidence_score += 15
-
-        # Content-based scoring
-        confidence_score += min(
-            20, privacy_sections * 3
-        )  # Up to 20 points for privacy sections
-        confidence_score += min(
-            15, privacy_phrases * 2
-        )  # Up to 15 points for privacy phrases
-
-        if privacy_headings:
-            confidence_score += 10
-
-        # Length bonus
-        if content_length > 5000:
-            confidence_score += 5
-
-        # Additional title-based scoring for common privacy page titles
-        common_privacy_titles = [
-            "privacy policy",
-            "privacy notice",
-            "privacy statement",
-            "data protection notice",
-        ]
-        if any(title in title_lower for title in common_privacy_titles):
-            confidence_score += 10
-
-        # Penalties
-        if has_negative_indicators:
-            # Reduce penalty impact if we have strong title indicators and privacy content
-            if (
-                any(title in title_lower for title in common_privacy_titles)
-                and privacy_sections >= 5
-            ):
-                confidence_score -= 10  # Reduced penalty
-            else:
-                confidence_score -= 20
-
-        if not minimum_text_present:
-            confidence_score -= 30
-
-        if not minimum_sections_present:
-            confidence_score -= 20
-
-        # Cap the score
-        confidence_score = max(0, min(100, confidence_score))
-
-        # Determine if this is a privacy page
-        # A page is considered a privacy page if it has a high confidence score
-        is_privacy_page = confidence_score >= 75
-
-        # For pages with strong indicators in title but slightly lower scores,
-        # be more lenient to avoid missing valid privacy policy pages
-        if not is_privacy_page and confidence_score >= 65:
-            # Check if the title contains very strong privacy indicators
-            very_strong_title_indicators = [
-                "privacy policy",
-                "privacy notice",
-                "privacy statement",
-                "data protection notice",
-            ]
-            if any(
-                indicator in title_lower for indicator in very_strong_title_indicators
-            ):
-                if privacy_sections >= 5 or privacy_phrases >= 3:
-                    is_privacy_page = True
-                    print(
-                        f"✅ Special consideration: High confidence title with privacy content (Score: {confidence_score}/100)"
-                    )
-
-        # Print verification results
-        print(f"📊 Page verification results:")
-        print(f"  Title: {title_lower}...")
-        print(f"  URL: {url_lower}")
-        print(f"  Confidence Score: {confidence_score}/100")
-        print(f"  Strong Indicators: {strong_indicator}")
-        print(f"  Title Indicators: {title_indicator}")
-        print(f"  URL Indicators: {url_indicator}")
-        print(f"  Privacy Sections: {privacy_sections}")
-        print(f"  Privacy Phrases: {privacy_phrases}")
-        print(f"  Has Privacy Headings: {privacy_headings}")
-        print(f"  Content Length: {content_length} chars")
-        print(f"  Has Negative Indicators: {has_negative_indicators}")
-
-        if is_privacy_page:
-            print(
-                f"✅ VERIFIED: This appears to be a Privacy Policy page (Score: {confidence_score}/100)"
-            )
-        else:
-            print(
-                f"❌ NOT VERIFIED: Does not appear to be a Privacy Policy page (Score: {confidence_score}/100)"
-            )
-
-        # Return detailed verification results
-        return {
+        print(f"Page signals: {page_signals}")
+        
+        is_privacy_page = page_signals["totalScore"] >= threshold
+        
+        # Additional check for very short pages
+        if is_privacy_page and page_signals["bodyTextLength"] < 500 and page_signals["privacyHeadingsCount"] < 2:
+            print("⚠️ Page seems too short to be a complete privacy policy")
+            is_privacy_page = False
+        
+        result = {
             "isPrivacyPage": is_privacy_page,
-            "confidence": confidence_score,
-            "title": page_title,
-            "url": page_url,
-            "strongIndicator": strong_indicator,
-            "titleIndicator": title_indicator,
-            "urlIndicator": url_indicator,
-            "privacySectionCount": privacy_sections,
-            "privacyPhraseCount": privacy_phrases,
-            "hasPrivacyHeadings": privacy_headings,
-            "contentLength": content_length,
-            "minimumTextPresent": minimum_text_present,
-            "minimumSectionsPresent": minimum_sections_present,
-            "hasNegativeIndicators": has_negative_indicators,
+            "confidence": page_signals["totalScore"] / 100,
+            "signals": page_signals
         }
 
+        if is_privacy_page:
+            print(f"✅ Verification PASSED with confidence {result['confidence']:.2f}")
+        else:
+            print(f"❌ Verification FAILED with score {page_signals['totalScore']} (threshold: {threshold})")
+            
+        return result
+
     except Exception as e:
-        print(f"Error during page verification: {e}")
+        print(f"Error verifying if page is privacy policy: {e}")
         return {"isPrivacyPage": False, "confidence": 0, "error": str(e)}
 async def yahoo_search_fallback_privacy(domain, page):
     """Search for privacy policy using Yahoo Search."""
@@ -1526,12 +1384,9 @@ async def yahoo_search_fallback_privacy(domain, page):
                 try:
                     # Visit the page to verify it's a privacy page
                     print(f"Checking result: {best_result}")
-                    await page.goto(
-                        best_result, timeout=10000, wait_until="domcontentloaded"
-                    )
-                    await page.wait_for_timeout(
-                        2000
-                    )  # Increased wait time for full page load
+                    await page.goto(best_result, timeout=10000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(2000)  # Increased wait time for full page load
+                    final_url = page.url  # Get final URL after redirects
 
                     # Check if we hit a captcha or "just a moment" page
                     is_captcha = await page.evaluate(
@@ -1552,14 +1407,9 @@ async def yahoo_search_fallback_privacy(domain, page):
                     )
 
                     if is_captcha["isCaptcha"]:
-                        print(
-                            f"⚠️ Captcha/protection detected when accessing: {is_captcha['url']}"
-                        )
-
+                        print(f"⚠️ Captcha/protection detected when accessing: {is_captcha['url']}")
                         # If this is a high-scoring result from the target domain, accept it even with captcha
                         original_url_lower = best_result.lower()
-
-                        # Look for privacy indicators in URL
                         has_privacy_path = (
                             "policies" in original_url_lower
                             or "privacy-policy" in original_url_lower
@@ -1567,72 +1417,65 @@ async def yahoo_search_fallback_privacy(domain, page):
                             or "data-protection" in original_url_lower
                             or "privacy" in original_url_lower
                         )
+                        # Enhanced domain check for major sites
+                        from urllib.parse import urlparse
+                        parsed_url = urlparse(original_url_lower)
+                        domain = parsed_url.netloc.lower()
+                        base_domain = domain.replace('www.', '')
+                        
+                        major_sites = ["amazon.com", "facebook.com", "apple.com", "google.com", 
+                                    "microsoft.com", "twitter.com", "netflix.com", "instagram.com"]
+                        is_major_site = any(site in base_domain for site in major_sites)
 
-                        if (
-                            domain in original_url_lower
-                            and has_privacy_path
-                            and search_results[result_index]["score"] >= 60
-                        ):
-                            print(
-                                f"✅ Accepting URL from target domain despite protection: {best_result}"
-                            )
+                        # More permissive acceptance for major sites with privacy in URL
+                        if (domain in original_url_lower and has_privacy_path and search_results[result_index]["score"] >= 60) or (is_major_site and has_privacy_path and search_results[result_index]["score"] >= 50):
+                            print(f"✅ Accepting URL from target domain despite protection: {best_result}")
                             return best_result
 
                     # Perform two-stage verification for more confidence
                     # First stage: comprehensive verification
                     verification = await verify_is_privacy_page(page)
 
-                    if (
-                        verification["isPrivacyPage"] and verification["confidence"] >= 60
-                    ):  # Increased threshold
-                        print(
-                            f"✅ First verification passed: {page.url} (score: {verification['confidence']})"
-                        )
+                    if verification["isPrivacyPage"] and verification["confidence"] >= 60:
+                        print(f"✅ First verification passed: {final_url} (score: {verification['confidence']})")
+                        return final_url  # Return the final URL after redirects, not the original best_result
+                        
+                    # Second stage: Simple text check verification (more robust than complex JS evaluation)
+                    page_text = await page.evaluate("document.body.innerText.toLowerCase()")
+                    
+                    # Check for key privacy indicators in a more straightforward way
+                    privacy_title_present = any(term in page_text for term in [
+                        'privacy policy', 'privacy notice', 'privacy statement'
+                    ])
+                    
+                    data_collection_present = any(term in page_text for term in [
+                        'information we collect', 'data we collect', 'collect personal information'
+                    ])
+                    
+                    cookies_present = any(term in page_text for term in [
+                        'cookies', 'tracking technologies'
+                    ])
+                    
+                    rights_present = any(term in page_text for term in [
+                        'your rights', 'your choices', 'opt out', 'opt-out'
+                    ])
+                    
+                    # Calculate second-stage confidence
+                    second_stage_confidence = 0
+                    if privacy_title_present:
+                        second_stage_confidence += 25
+                    if data_collection_present:
+                        second_stage_confidence += 25
+                    if cookies_present:
+                        second_stage_confidence += 25
+                    if rights_present:
+                        second_stage_confidence += 25
 
-                        # Second stage: Double-check specific content markers
-                        content_markers = await page.evaluate(
-                            """() => {
-                            const html = document.body.innerText.toLowerCase();
-                            return {
-                                hasPrivacyTitle: html.includes('privacy policy') || 
-                                                html.includes('privacy notice') || 
-                                                html.includes('privacy statement'),
-                                hasDataCollection: html.includes('information we collect') || 
-                                                 html.includes('data we collect') || 
-                                                 html.includes('collect personal information'),
-                                hasCookies: html.includes('cookies') || html.includes('tracking technologies'),
-                                hasRights: html.includes('your rights') || 
-                                          html.includes('your choices') || 
-                                          html.includes('opt out') || 
-                                          html.includes('opt-out')
-                            };
-                        }"""
-                        )
-
-                        # Calculate second-stage confidence
-                        second_stage_confidence = 0
-                        if content_markers["hasPrivacyTitle"]:
-                            second_stage_confidence += 25
-                        if content_markers["hasDataCollection"]:
-                            second_stage_confidence += 25
-                        if content_markers["hasCookies"]:
-                            second_stage_confidence += 25
-                        if content_markers["hasRights"]:
-                            second_stage_confidence += 25
-
-                        if second_stage_confidence >= 50:  # At least two strong markers
-                            print(
-                                f"✅✅ Complete verification passed (secondary score: {second_stage_confidence}/100)"
-                            )
-                            return page.url
-                        else:
-                            print(
-                                f"⚠️ Secondary verification failed (score: {second_stage_confidence}/100)"
-                            )
-                    else:
-                        print(
-                            f"❌ Primary verification failed (score: {verification['confidence']})"
-                        )
+                    if second_stage_confidence >= 50:  # At least two strong markers
+                        print(f"✅✅ Complete verification passed (secondary score: {second_stage_confidence}/100)")
+                        return final_url
+                    
+                    print(f"⚠️ Secondary verification failed (score: {second_stage_confidence}/100)")
                 except Exception as e:
                     print(f"Error checking Yahoo search result: {e}")
 
@@ -2267,6 +2110,9 @@ def prefer_main_domain(links, main_domain):
         parsed = urlparse(url)
         # Accept www.amazon.com or amazon.com, but not foo.amazon.com
         return parsed.netloc == main_domain or parsed.netloc == f"www.{main_domain}"
-    # Prefer main domain links, then others
     main_links = [l for l in links if is_main_domain(l)]
-    return main_links if main_links else links
+    # If we have any main domain links, return only those
+    if main_links:
+        return main_links
+    # Otherwise, allow subdomains as fallback
+    return links
