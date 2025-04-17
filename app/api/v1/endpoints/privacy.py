@@ -145,11 +145,14 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 method_sources.append((js_result, "javascript"))
         except Exception as e:
             print(f"Error in JavaScript method: {e}")
+            js_unverified = None
 
         # 2. Scroll method
         print("Trying smooth_scroll_and_click approach...")
         try:
-            scroll_result, page, scroll_unverified = await smooth_scroll_and_click_privacy(page, context, js_unverified if 'js_unverified' in locals() else None)
+            # Safely pass js_unverified only if it exists
+            js_unverified_safe = js_unverified if 'js_unverified' in locals() and js_unverified is not None else None
+            scroll_result, page, scroll_unverified = await smooth_scroll_and_click_privacy(page, context, js_unverified_safe)
             if scroll_result:
                 all_links.append(scroll_result)
                 method_sources.append((scroll_result, "scroll"))
@@ -174,14 +177,15 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 continue
 
         # Deduplicate links
-        seen = set()
+        seen_urls = set()
         unique_links = []
         unique_sources = []
         for link, src in method_sources:
-            if link and link not in seen:
+            # We need to use the URL string as the key for deduplication, not the object
+            if link and isinstance(link, str) and link not in seen_urls:
                 unique_links.append(link)
                 unique_sources.append(src)
-                seen.add(link)
+                seen_urls.add(link)
 
         # Score each link using verify_is_privacy_page
         scored_links = []
@@ -692,21 +696,18 @@ async def find_all_privacy_links_js(page, domain):
             # Skip links that clearly open in new tab/window to avoid timeouts
             if top_quick_link.get("targetBlank") or "noopener" in top_quick_link.get("rel", ""):
                 print("⚠️ Top link opens in new tab/window, returning without navigation")
-                return quick_found
+                return top_quick_link["href"], page, quick_found
                 
             # Try to navigate to the top link to get final URL
             try:
-                await click_and_wait_for_navigation(
-                    page, 
-                    f"""document.querySelector('a[href="{top_quick_link['href']}"]')""",
-                    timeout=4000  # Reduced from 5000ms
-                )
-                await page.wait_for_timeout(300)  # Reduced from 500ms
-                top_quick_link["href"] = page.url  # Update with final URL after redirects
+                # Use page navigation rather than click_and_wait_for_navigation which might not exist
+                await page.goto(top_quick_link["href"], timeout=4000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(300)
+                return page.url, page, quick_found
             except Exception as e:
                 print(f"Navigation failed for quick link: {e}")
-                
-            return quick_found
+                # Return the href without navigation if navigation fails
+                return top_quick_link["href"], page, quick_found
 
         # Check if we're likely facing anti-bot protection
         anti_bot_check = await page.evaluate(
@@ -876,7 +877,8 @@ async def find_all_privacy_links_js(page, domain):
                     )
 
             if footer_links and len(footer_links) > 0:
-                return footer_links[0]['href'], page, footer_links
+                best_footer_link = footer_links[0]
+                return best_footer_link['href'], page, footer_links
             else:
                 print("No privacy links found in footer with anti-bot protection")
                 return None, page, None
@@ -994,7 +996,7 @@ async def find_all_privacy_links_js(page, domain):
         }"""
         )
 
-        if (privacy_links and len(privacy_links) > 0):
+        if privacy_links and len(privacy_links) > 0:
             best_link = privacy_links[0]
             return best_link['href'], page, privacy_links
 
@@ -1122,7 +1124,7 @@ async def duckduckgo_search_fallback_privacy(domain, page):
                 return search_results[0]['url']
         else:
             print("No relevant search results found from DuckDuckGo")
-        return None
+            return None
     except Exception as e:
         print(f"Error in DuckDuckGo search fallback: {e}")
         return None
