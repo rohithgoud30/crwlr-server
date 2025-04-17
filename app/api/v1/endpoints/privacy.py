@@ -183,11 +183,6 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 unique_sources.append(src)
                 seen.add(link)
 
-        # Prefer main domain links before scoring
-        main_domain = domain.replace('www.', '')
-        unique_links = prefer_main_domain(unique_links, main_domain)
-        unique_sources = [src for link, src in zip(unique_links, unique_sources) if link in unique_links]
-
         # Score each link using verify_is_privacy_page
         scored_links = []
         for link, src in zip(unique_links, unique_sources):
