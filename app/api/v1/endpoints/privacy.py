@@ -203,17 +203,54 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 print(f"Error verifying link {link}: {e}")
                 continue
 
-        # Sort by score (confidence), prefer is_privacy True
-        scored_links.sort(key=lambda x: (x["is_privacy"], x["score"]), reverse=True)
+        # Sort by score (confidence), prefer is_privacy True, then corporate pages, then score
+        corporate_patterns = ["company/", "privacy-center", "privacy-notice", "/legal/"]
+        # Sort by (is_privacy, is_corporate, confidence)
+        scored_links.sort(
+            key=lambda x: (
+                x["is_privacy"],
+                any(p in x["url"].lower() for p in corporate_patterns),
+                x["score"]
+            ),
+            reverse=True
+        )
 
         if scored_links:
+            # After prioritizing, the first link is the best candidate
             best = scored_links[0]
+            # Try to follow any corporate-style privacy link on the selected page
+            try:
+                await page.goto(best["url"], timeout=10000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(1000)
+                corp_link = await page.evaluate(f"""
+                    () => {{
+                        const anchors = Array.from(document.querySelectorAll('a[href]'));
+                        const corpKeywords = ['company/', 'privacy-center', 'privacy-notice', '/legal/'];
+                        const currentHost = new URL(window.location.href).hostname.replace('www.', '');
+                        for (const a of anchors) {{
+                            const href = a.href;
+                            try {{
+                                const u = new URL(href);
+                                const host = u.hostname.replace('www.', '');
+                                const path = u.pathname.toLowerCase();
+                                // external host with corporate path segment
+                                if (host !== currentHost && corpKeywords.some(k => path.includes(k))) {{
+                                    return href;
+                                }}
+                            }} catch {{}}
+                        }}
+                        return null;
+                    }}
+                """)
+                final_pp = corp_link or best["url"]
+            except Exception:
+                final_pp = best["url"]
             return PrivacyResponse(
                 url=url,
-                pp_url=best["url"],
+                pp_url=final_pp,
                 success=True,
                 message=f"Found Privacy Policy using {best['source']} method (highest confidence)",
-                method_used=best["source"],
+                method_used=best['source'],
             )
 
         # === Fallback: Dynamically scan all links and footer links for Privacy Policy candidates ===
@@ -1224,9 +1261,14 @@ async def yahoo_search_fallback_privacy(domain, page):
                         const url = new URL(a.href);
                         const urlPath = url.pathname.toLowerCase();
                         
-                        // Only include links to the target domain
+                        // Only include links to the target domain or corporate-style external links
                         if (!url.hostname.includes(domain) && !domain.includes(url.hostname)) {
-                            return false;
+                            const pathLower = url.pathname.toLowerCase();
+                            // Allow corporate/external privacy links based on path keywords
+                            const corpKeywords = ['company/', 'privacy-center', 'privacy-notice', '/legal/'];
+                            if (!corpKeywords.some(k => pathLower.includes(k))) {
+                                return false;
+                            }
                         }
                         
                         // Filter out search engines and unrelated domains
@@ -1454,7 +1496,7 @@ async def yahoo_search_fallback_privacy(domain, page):
                     rights_present = any(term in page_text for term in [
                         'your rights', 'your choices', 'opt out', 'opt-out'
                     ])
-                    
+
                     # Calculate second-stage confidence
                     second_stage_confidence = 0
                     if privacy_title_present:
@@ -1469,7 +1511,7 @@ async def yahoo_search_fallback_privacy(domain, page):
                     if second_stage_confidence >= 50:  # At least two strong markers
                         print(f"✅✅ Complete verification passed (secondary score: {second_stage_confidence}/100)")
                         return final_url
-                    
+
                     print(f"⚠️ Secondary verification failed (score: {second_stage_confidence}/100)")
                 except Exception as e:
                     print(f"Error checking Yahoo search result: {e}")
