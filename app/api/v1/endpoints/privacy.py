@@ -818,6 +818,9 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                     
                     if (isInFooter) score += 20;
                     if (href.includes('/legal/') || href.includes('/policies/')) score += 15;
+                    
+                    // Additional boost for user-specific privacy links
+                    if (text.includes('user') || href.includes('user')) score += 100;
                 
                     return {
                         text: text,
