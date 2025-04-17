@@ -552,7 +552,61 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
 
     try:
         # Shorter wait for page loading
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(800)
+
+        # Quick-check: Look for immediate privacy links without complex evaluation
+        quick_privacy_links = await page.evaluate(
+            """() => {
+                // Try to find obvious privacy links first
+                const quickResults = [];
+                const links = Array.from(document.querySelectorAll('a[href]'));
+                
+                // Prioritize links with clear privacy text and URLs
+                for (const link of links) {
+                    if (!link.href || link.href.startsWith('javascript:') || 
+                        link.href.startsWith('mailto:')) continue;
+                    
+                    const text = link.textContent.trim().toLowerCase();
+                    const href = link.href.toLowerCase();
+                    
+                    // Check for the strongest matches
+                    if ((text === 'privacy policy' || text === 'privacy notice') &&
+                        (href.includes('/privacy') || href.includes('/legal'))) {
+                        // This is a high-confidence match
+                        return [{
+                            href: link.href,
+                            text: link.textContent.trim(),
+                            isHighConfidence: true
+                        }];
+                    }
+                    
+                    // Add strong but not perfect matches
+                    if ((text.includes('privacy policy') || text.includes('privacy notice')) &&
+                        href.includes('/privacy')) {
+                        quickResults.push({
+                            href: link.href,
+                            text: link.textContent.trim(),
+                            isHighConfidence: false
+                        });
+                    }
+                }
+                
+                return quickResults;
+            }"""
+        )
+        
+        if quick_privacy_links and len(quick_privacy_links) > 0:
+            if quick_privacy_links[0].get("isHighConfidence", False):
+                print("✅ Found high-confidence privacy link via quick check")
+                best_link = quick_privacy_links[0]["href"]
+                try:
+                    await page.goto(best_link, timeout=5000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(500)
+                    final_url = page.url  # Get URL after redirects
+                    return final_url, page, final_url
+                except Exception as e:
+                    print(f"Error navigating to quick-found link: {e}")
+                    return best_link, page, best_link
 
         # First check if we're on an anti-bot page
         is_anti_bot = await page.evaluate(
@@ -615,14 +669,14 @@ async def find_all_privacy_links_js(page, context, unverified_result=None):
                         else if (text.includes('data protection')) score += 70;
                         else if (text.includes('personal information')) score += 60;
                         else if (text.includes('cookies')) score += 50;
-
+                        
                         if (href.includes('privacy-policy') || href.includes('privacy_policy')) score += 50;
                         else if (href.includes('privacy') || href.includes('gdpr')) score += 40;
                         else if (href.includes('data-protection') || href.includes('data_protection')) score += 40;
                         else if (href.includes('cookie') || href.includes('personal-information')) score += 30;
                         // Additional boost for user-specific privacy links
                         if (text.includes('user') || href.includes('user')) score += 40;
-
+                        
                         return {
                             text: a.textContent.trim(),
                             href: a.href,
@@ -1037,8 +1091,39 @@ async def verify_is_privacy_page(page):
 
     try:
         # Wait for content to load
-        await page.wait_for_timeout(800)
-
+        await page.wait_for_timeout(400)
+        
+        # Fast check for obvious privacy indicators in URL and title
+        fast_check = await page.evaluate(
+            """() => {
+                const url = window.location.href.toLowerCase();
+                const title = document.title.toLowerCase();
+                
+                // Super clear URL indicators
+                const isPrivacyUrl = 
+                    url.includes('/privacy-policy') || 
+                    url.includes('/privacy/') ||
+                    url.includes('/privacy_policy') ||
+                    (url.includes('/legal/') && url.includes('privacy'));
+                    
+                // Clear title indicators
+                const isPrivacyTitle = 
+                    title.includes('privacy policy') || 
+                    title.includes('privacy notice') ||
+                    title.includes('privacy statement');
+                    
+                return {isPrivacyUrl, isPrivacyTitle};
+            }"""
+        )
+        
+        # Add early return for clear cases to avoid full evaluation
+        if fast_check["isPrivacyUrl"] and fast_check["isPrivacyTitle"]:
+            print("✅ Fast verification passed: Clear privacy URL and title match")
+            return {"isPrivacyPage": True, "confidence": 0.95, "fast_path": True}
+        
+        # Rest of the function remains unchanged
+        # ... existing code ...
+    
         # Extract and analyze key page signals
         page_signals = await page.evaluate(
             """() => {
@@ -1206,7 +1291,7 @@ async def yahoo_search_fallback_privacy(domain, page):
 
         # Navigate to Yahoo search with longer timeout
         await page.goto(yahoo_search_url, timeout=20000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(5000)  # Longer wait for results to load
+        await page.wait_for_timeout(2500)  # Reduced wait for results to load
 
         # Check for captcha or other blocking
         is_blocked = await page.evaluate(
@@ -1227,7 +1312,7 @@ async def yahoo_search_fallback_privacy(domain, page):
             print(f"⚠️ Captcha or blocking detected on Yahoo: {is_blocked['title']}")
             print("Waiting for possible manual intervention...")
             # Wait longer to allow manual captcha solving if headless=False
-            await page.wait_for_timeout(15000)
+            await page.wait_for_timeout(5000)
 
         # Extract search results with multiple selector options for robustness
         search_results = await page.evaluate(
@@ -1423,7 +1508,7 @@ async def yahoo_search_fallback_privacy(domain, page):
                     # Visit the page to verify it's a privacy page
                     print(f"Checking result: {best_result}")
                     await page.goto(best_result, timeout=10000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(2000)  # Increased wait time for full page load
+                    await page.wait_for_timeout(1000)  # Reduced wait time for full page load
                     final_url = page.url  # Get final URL after redirects
 
                     # Check if we hit a captcha or "just a moment" page
@@ -1531,7 +1616,7 @@ async def yahoo_search_fallback_privacy(domain, page):
                         timeout=10000,
                         wait_until="domcontentloaded",
                     )
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(1000)  # Reduced wait time for full page load
 
                     verification = await verify_is_privacy_page(page)
                     if verification.get("confidence", 0) >= 50:  # Higher minimum threshold
@@ -1580,7 +1665,7 @@ async def bing_search_fallback_privacy(domain, page):
 
         # Navigate to Bing search with shorter timeout
         await page.goto(bing_search_url, timeout=15000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(2000)  # Shorter wait for results to load
+        await page.wait_for_timeout(1000)  # Shorter wait for results to load
 
         # Check for captcha or other blocking
         is_blocked = await page.evaluate(
@@ -1601,7 +1686,7 @@ async def bing_search_fallback_privacy(domain, page):
             print(f"⚠️ Captcha or blocking detected on Bing: {is_blocked['title']}")
             print("Waiting for possible manual intervention...")
             await page.wait_for_timeout(
-                2000
+                1000
             )  # Give a small window for manual intervention
 
         # Extract search results with multiple selector options for robustness
@@ -1821,7 +1906,7 @@ async def bing_search_fallback_privacy(domain, page):
                     await page.goto(
                         best_result, timeout=10000, wait_until="domcontentloaded"
                     )
-                    await page.wait_for_timeout(2000)  # Allow time for page to load
+                    await page.wait_for_timeout(1000)  # Allow time for page to load
 
                     # Check if we hit a captcha
                     is_captcha = await page.evaluate(
@@ -1908,7 +1993,7 @@ async def bing_search_fallback_privacy(domain, page):
                         timeout=10000,
                         wait_until="domcontentloaded",
                     )
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(1000)  # Reduced wait time for full page load
 
                     verification = await verify_is_privacy_page(page)
                     if verification["confidence"] >= 50:  # Higher minimum threshold
