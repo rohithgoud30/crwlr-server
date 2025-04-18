@@ -1,5 +1,10 @@
 import random
-from urllib.parse import urlparse
+import time
+import re
+import os
+import asyncio
+import aiohttp
+from urllib.parse import urlparse, urljoin
 
 from fastapi import APIRouter, HTTPException 
 from playwright.async_api import async_playwright
@@ -90,1121 +95,384 @@ def normalize_domain(url):
         ):
             # For non-www domains, add www if it's a standard domain (not subdomains)
             # This only applies to domains that don't already have a subdomain
-            if domain.count(".") == 1:  # Only one dot indicates a likely main domain
+            if domain.count(
+                ".") == 1:  # Only one dot indicates a likely main domain
                 return url.replace(domain, f"www.{domain}")
 
         return url
     except Exception as e:
         print(f"Error normalizing domain: {e}")
         return url  # Return original URL if parsing fails
+
+
+def normalize_privacy_url(url):
+    """Normalize URL for privacy policy detection."""
+    if url:
+        # Remove leading/trailing whitespace
+        url = url.strip()
+
+        # Remove any unnecessary prefixes
+        if url.startswith('url='):
+            url = url[4:]
+        if url.startswith('http%3A//'):
+            url = 'http://' + url[10:]
+        if url.startswith('https%3A//'):
+            url = 'https://' + url[11:]
+        if url.startswith('//'):
+            url = 'https:' + url
+        if url.startswith('/'):
+            url = url[1:]
+
+        # Ensure URL has proper scheme
+        if url and not url.startswith(('http://', 'https://')):
+            url = f"https://{url}"
+
+    return url
+
+
 @router.post("/privacy", response_model=PrivacyResponse)
 async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
-    """Find Privacy Policy page for a given URL."""
+    """Find privacy policy link for a website using intelligent strategies."""
     url = request.url
-
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
-
-    # Normalize the URL domain for consistent processing
-    url = normalize_domain(url)
-
-    # Handle URLs without scheme
-    if not url.startswith(("http://", "https://")):
-        url = f"https://{url}"
-
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc
-
-    browser = None
     playwright = None
-    unverified_result = None  # Initialize unverified_result here
+    potential_privacy_links = []  # Store all potential links with their confidence scores
+    unverified_links = []  # Store unverified links for fallback
+    best_confidence = 0
+    start_time = time.time()
+    bing_result = None
+    ddg_result = None
 
-    # Define search_engines here to make it accessible throughout the function
-    search_engines = [
-        (bing_search_fallback_privacy, "Bing"),
-        (yahoo_search_fallback_privacy, "Yahoo"),
-        (duckduckgo_search_fallback_privacy, "DuckDuckGo"),
-    ]
-
+    # Ensure all execution paths return a valid PrivacyResponse
     try:
-        playwright = await async_playwright().start()
-        browser, context, page, _ = await setup_browser(playwright)
-        success, _, _ = await navigate_with_retry(page, url, max_retries=2)
-        if not success:
-            print("\nMain site navigation had issues, but trying to analyze current page...")
+        # Early URL validation and normalization
+        if not url:
+            raise HTTPException(
+                status_code=400,
+                detail="URL parameter is required")
 
-        all_links = []
-        method_sources = []
-
-        # 1. JavaScript method
-        print("Trying find_all_links_js approach...")
         try:
-            js_result, page, js_unverified = await find_all_privacy_links_js(page, domain)
-            if js_result:
-                all_links.append(js_result)
-                method_sources.append((js_result, "javascript"))
+            url = normalize_privacy_url(url)
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
         except Exception as e:
-            print(f"Error in JavaScript method: {e}")
-            js_unverified = None
-
-        # 2. Scroll method
-        print("Trying smooth_scroll_and_click approach...")
-        try:
-            # Safely pass js_unverified only if it exists
-            js_unverified_safe = js_unverified if 'js_unverified' in locals() and js_unverified is not None else None
-            scroll_result, page, scroll_unverified = await smooth_scroll_and_click_privacy(page, context, js_unverified_safe)
-            if scroll_result:
-                all_links.append(scroll_result)
-                method_sources.append((scroll_result, "scroll"))
-        except Exception as e:
-            print(f"Error in scroll method: {e}")
-
-        # 3. Search engine methods
-        search_engines = [
-            (bing_search_fallback_privacy, "Bing"),
-            (yahoo_search_fallback_privacy, "Yahoo"),
-            (duckduckgo_search_fallback_privacy, "DuckDuckGo"),
-        ]
-        for search_func, engine_name in search_engines:
-            try:
-                print(f"Trying {engine_name} search fallback...")
-                search_result = await search_func(domain, page)
-                if search_result:
-                    all_links.append(search_result)
-                    method_sources.append((search_result, engine_name))
-            except Exception as e:
-                print(f"Error with {engine_name} search: {e}")
-                continue
-
-        # Deduplicate links
-        seen_urls = set()
-        unique_links = []
-        unique_sources = []
-        for link, src in method_sources:
-            # We need to use the URL string as the key for deduplication, not the object
-            if link and isinstance(link, str) and link not in seen_urls:
-                unique_links.append(link)
-                unique_sources.append(src)
-                seen_urls.add(link)
-
-        # Score each link using verify_is_privacy_page
-        scored_links = []
-        for link, src in zip(unique_links, unique_sources):
-            try:
-                print(f"Verifying link: {link} (source: {src})")
-                await page.goto(link, timeout=10000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(1000)
-                verification = await verify_is_privacy_page(page)
-                score = verification.get("confidence", 0)
-                is_privacy = verification.get("isPrivacyPage", False)
-                scored_links.append({
-                    "url": link,
-                    "source": src,
-                    "score": score,
-                    "is_privacy": is_privacy,
-                })
-            except Exception as e:
-                print(f"Error verifying link {link}: {e}")
-                continue
-
-        # Sort by score: prioritize is_privacy True, then internal domain, then confidence
-        plain_domain = domain.replace('www.', '')
-        scored_links.sort(
-            key=lambda x: (
-                x["is_privacy"],
-                urlparse(x["url"]).netloc.replace('www.', '').endswith(plain_domain),
-                x["score"]
-            ),
-            reverse=True
-        )
-
-        if scored_links:
-            # After prioritizing, the first link is the best candidate
-            best = scored_links[0]
-            # Try to follow any corporate-style privacy link on the selected page
-            try:
-                await page.goto(best["url"], timeout=10000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(1000)
-                corp_link = await page.evaluate(f"""
-                    () => {{
-                        const anchors = Array.from(document.querySelectorAll('a[href]'));
-                        const corpKeywords = ['company/', 'privacy-center', 'privacy-notice', '/legal/'];
-                        const currentHost = new URL(window.location.href).hostname.replace('www.', '');
-                        for (const a of anchors) {{
-                            const href = a.href;
-                            try {{
-                                const u = new URL(href);
-                                const host = u.hostname.replace('www.', '');
-                                const path = u.pathname.toLowerCase();
-                                // external host with corporate path segment
-                                if (host !== currentHost && corpKeywords.some(k => path.includes(k))) {{
-                                    return href;
-                                }}
-                            }} catch {{}}
-                        }}
-                        return null;
-                    }}
-                """)
-                final_pp = corp_link or best["url"]
-            except Exception:
-                final_pp = best["url"]
             return PrivacyResponse(
                 url=url,
-                pp_url=final_pp,
-                success=True,
-                message=f"Found Privacy Policy using {best['source']} method (highest confidence)",
-                method_used=best['source'],
+                pp_url=None,
+                success=False,
+                message=f"Invalid URL format: {str(e)}",
+                method_used="validation_error"
             )
 
-        # === Fallback: Dynamically scan all links and footer links for Privacy Policy candidates ===
-        print("\n[Fallback] Scanning all links and footer for Privacy Policy candidates...")
-        # 1. Scan all links on the page
-        all_links = await page.evaluate("""() => {
-            const links = Array.from(document.querySelectorAll('a'));
-            return links.map(link => ({
-                text: link.innerText.trim(),
-                href: link.href,
-                id: link.id,
-                classes: link.className
-            }));
-        }""")
-        
-        # Print all links with "Privacy" in text for debugging
-        for link in all_links:
-            link_text = link['text'].lower() if link['text'] else ''
-            if 'privacy' in link_text:
-                print(f"[Debug] Found link with privacy in text: {link['text']} - {link['href']}")
-                
-        privacy_keywords = ["privacy", "data", "cookies", "gdpr", "ccpa", "personal information", "collection"]
+        # Track potential links for "best effort" response
         potential_privacy_links = []
-        for link in all_links:
-            link_text = link['text'].lower() if link['text'] else ''
-            link_href = link['href'].lower() if link['href'] else ''
-            if any(kw in link_text for kw in privacy_keywords) or any(kw in link_href for kw in privacy_keywords):
-                potential_privacy_links.append(link)
-                
-        # Score footer links higher - give them priority
-        for link in potential_privacy_links:
-            link_text = link['text'].lower() if link['text'] else ''
-            if 'privacy' in link_text and ('notice' in link_text or 'policy' in link_text):
-                print(f"[Footer Priority] Found strong privacy text match: {link['text']} - {link['href']}")
-                # Try this link first as it's the most likely candidate
-                try:
-                    await page.goto(link['href'], timeout=10000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(1000)
-                    final_url = page.url  # Get the final URL after redirects
-                    verification = await verify_is_privacy_page(page)
-                    if verification.get("isPrivacyPage", False) or verification.get("confidence", 0) >= 40:
-                        print(f"[Footer Priority] ✅ Verified Privacy Policy page: {final_url}")
+        unverified_links = []
+
+        # Attempt browser-based detection with fallbacks
+        playwright = None
+        try:
+            playwright = await async_playwright().start()
+            browser, context, page, user_agent = await setup_browser(playwright)
+
+            try:
+                # Try to navigate to the URL
+                success, response, privacy_links_from_errors = await navigate_with_retry(page, url, max_retries=2)
+
+            except Exception as e:
+                print(f"Navigation setup error: {e}")
+                # Save any links found during error handling
+                if 'privacy_links_from_errors' in locals() and privacy_links_from_errors:
+                    unverified_links.extend(privacy_links_from_errors)
+
+                # If navigation failed, try search engines directly
+                return await fallback_to_search_engines(url, domain, page)
+
+            # Check if navigation was successful
+            if not success:
+                # If navigation failed completely, try search fallbacks
+                print(f"Navigation to {url} failed. Trying search fallbacks.")
+
+                # If we have privacy links from anti-bot detection, use them with search result verification
+                if privacy_links_from_errors and len(privacy_links_from_errors) > 0:
+                    # Add these links to unverified_links for potential comparison with search results
+                    unverified_links.extend(privacy_links_from_errors)
+                    
+                    # Get search engine results to verify the links
+                    search_results = await get_search_engine_results(domain, page)
+                    
+                    # Look for matches between error-found links and search results
+                    matches = []
+                    for link in privacy_links_from_errors:
+                        for result in search_results:
+                            # Check for exact match or similar URLs
+                            if link == result or similar_urls(link, result):
+                                print(f"Match found between link from error page and search results: {link}")
+                                matches.append(link)
+                                break
+                    
+                    # If we found matches, return the first one
+                    if matches:
                         return PrivacyResponse(
                             url=url,
-                            pp_url=final_url,
+                            pp_url=matches[0],
                             success=True,
-                            message="Found Privacy Policy using high-priority footer link",
-                            method_used="footer_priority",
+                            message=f"Found privacy link confirmed by both error page and search results: {matches[0]}",
+                            method_used="error_search_match"
                         )
-                except Exception as e:
-                    print(f"[Footer Priority] Error verifying link: {e}")
+                
+                # If we got here, no matches were found. Try search engines as fallback
+                return await fallback_to_search_engines(url, domain, page)
 
-        # Deduplicate by href
-        seen_hrefs = set()
-        deduped_links = []
-        for link in potential_privacy_links:
-            href = link['href']
-            if href and href not in seen_hrefs:
-                seen_hrefs.add(href)
-                deduped_links.append(link)
-        # Try to verify each candidate
-        for link in deduped_links:
-            try:
-                candidate_url = link['href']
-                if not candidate_url:
-                    continue
-                print(f"[Fallback] Verifying candidate: {candidate_url}")
-                await page.goto(candidate_url, timeout=10000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(1000)
-                final_url = page.url  # Get the final URL after redirects
-                verification = await verify_is_privacy_page(page)
-                if verification.get("isPrivacyPage", False):
-                    print(f"[Fallback] ✅ Verified Privacy Policy page: {final_url}")
+            # After successful navigation
+
+            # First attempt: JavaScript-based detection (most reliable)
+            js_result, page, js_unverified = await find_all_privacy_links_js(page, domain)
+
+            # Second attempt: Scroll-based detection (finds footer links)
+            scroll_result, page, scroll_unverified = await smooth_scroll_and_click_privacy(page, context, js_unverified)
+
+            # If we have both JS and scroll results, check if they match
+            if js_result and scroll_result:
+                # Compare JS and scroll results for consistency
+                if js_result == scroll_result or similar_urls(js_result, scroll_result):
+                    print(f"✅ JS and scroll results match, high confidence: {js_result}")
+                    # High confidence result, verify with search as extra check
+                    search_results = await get_search_engine_results(domain, page)
+                    # If also confirmed by search, even higher confidence
+                    if any(similar_urls(js_result, sr) for sr in search_results):
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=js_result,
+                            success=True,
+                            message=f"Found privacy policy confirmed by JS, scroll, and search: {js_result}",
+                            method_used="multi_method_confirmation"
+                        )
+                    else:
+                        # Still good confidence
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=js_result,
+                            success=True,
+                            message=f"Found privacy policy confirmed by both JS and scroll: {js_result}",
+                            method_used="js_scroll_match"
+                        )
+                else:
+                    # We have different results from JS and scroll, check with search engines
+                    search_results = await get_search_engine_results(domain, page)
+                    
+                    # Check if either result is confirmed by search engines
+                    js_confirmed = any(similar_urls(js_result, search_result) for search_result in search_results)
+                    scroll_confirmed = any(similar_urls(scroll_result, search_result) for search_result in search_results)
+                    
+                    if js_confirmed and not scroll_confirmed:
+                        print(f"JS result confirmed by search engines: {js_result}")
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=js_result,
+                            success=True,
+                            message=f"JavaScript result confirmed by search engines: {js_result}",
+                            method_used="js_search_confirmed"
+                        )
+                    elif scroll_confirmed and not js_confirmed:
+                        print(f"Scroll result confirmed by search engines: {scroll_result}")
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=scroll_result,
+                            success=True,
+                            message=f"Scroll result confirmed by search engines: {scroll_result}",
+                            method_used="scroll_search_confirmed"
+                        )
+                    elif js_confirmed and scroll_confirmed:
+                        # Both are confirmed, prioritize JS
+                        print(f"Both JS and scroll results confirmed by search engines, using JS: {js_result}")
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=js_result,
+                            success=True,
+                            message=f"Both methods confirmed by search engines, using JavaScript result: {js_result}",
+                            method_used="js_scroll_search_confirmed"
+                        )
+            elif js_result and not scroll_result:
+                # Only JS result - verify with search engines
+                search_results = await get_search_engine_results(domain, page)
+                if any(similar_urls(js_result, search_result) for search_result in search_results):
+                    print(f"JS result confirmed by search engines: {js_result}")
                     return PrivacyResponse(
                         url=url,
-                        pp_url=final_url,  # Use the final URL after all redirects
+                        pp_url=js_result,
                         success=True,
-                        message="Found Privacy Policy using dynamic footer/link scan fallback",
-                        method_used="dynamic_footer_fallback",
+                        message=f"JavaScript result confirmed by search engines: {js_result}",
+                        method_used="js_search_confirmed"
                     )
-            except Exception as e:
-                print(f"[Fallback] Error verifying candidate: {e}")
-                continue
+                else:
+                    # JS result only, still high confidence
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=js_result,
+                        success=True,
+                        message=f"Found privacy policy via JavaScript detection: {js_result}",
+                        method_used="javascript"
+                    )
+            elif scroll_result and not js_result:
+                # Only scroll result - verify with search engines
+                search_results = await get_search_engine_results(domain, page)
+                if any(similar_urls(scroll_result, search_result) for search_result in search_results):
+                    print(f"Scroll result confirmed by search engines: {scroll_result}")
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=scroll_result,
+                        success=True,
+                        message=f"Scroll result confirmed by search engines: {scroll_result}",
+                        method_used="scroll_search_confirmed"
+                    )
+                else:
+                    # Scroll result only, still good confidence
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=scroll_result,
+                        success=True,
+                        message=f"Found privacy policy via scroll detection: {scroll_result}",
+                        method_used="scroll"
+                    )
+            
+            # If neither JS nor scroll found anything, try search engines
+            return await fallback_to_search_engines(url, domain, page)
 
-        # === Final fallback: HTML-level link extraction ===
-        print("[HTML Fallback] Extracting links from raw HTML...")
-        try:
-            html_content = await page.content()
-            import re
-            anchor_pattern = re.compile(r'<a\\s+[^>]*href=[\'\"]([^\'\"]+)[\'\"][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
-            matches = anchor_pattern.findall(html_content)
-            html_candidates = []
-            for href, text in matches:
-                text_l = text.lower()
-                href_l = href.lower()
-                if any(kw in text_l for kw in privacy_keywords) or any(kw in href_l for kw in privacy_keywords):
-                    html_candidates.append(href)
-            # Deduplicate
-            html_candidates = list(dict.fromkeys(html_candidates))
-            for candidate_url in html_candidates:
-                try:
-                    print(f"[HTML Fallback] Verifying candidate: {candidate_url}")
-                    await page.goto(candidate_url, timeout=10000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(1000)
-                    verification = await verify_is_privacy_page(page)
-                    if verification.get("isPrivacyPage", False):
-                        print(f"[HTML Fallback] ✅ Verified Privacy Policy page: {candidate_url}")
-                        return PrivacyResponse(
-                            url=url,
-                            pp_url=candidate_url,
-                            success=True,
-                            message="Found Privacy Policy using HTML-level fallback",
-                            method_used="html_fallback",
-                        )
-                except Exception as e:
-                    print(f"[HTML Fallback] Error verifying candidate: {e}")
-                    continue
         except Exception as e:
-            print(f"[HTML Fallback] Error extracting links: {e}")
-
-        # If all methods fail, return failure
-        return handle_navigation_failure_privacy(url, None)
-
+            print(f"Error in privacy detection: {e}")
+            # Try to return best effort from collected links if available
+            if potential_privacy_links:
+                best_link = max(potential_privacy_links, key=lambda x: x["confidence"])
+                end_time = time.time()
+                return PrivacyResponse(
+                    url=url, 
+                    pp_url=best_link["url"],
+                    success=True,
+                    message=f"Best effort link with confidence {best_link['confidence']}%",
+                    method_used=f"best_effort_{best_link['source']}"
+                )
+            elif unverified_links:
+                end_time = time.time()
+                return PrivacyResponse(
+                    url=url, 
+                    pp_url=unverified_links[0],
+                    success=True,
+                    message=f"Using unverified link as fallback. No verified links found.",
+                    method_used="unverified_fallback"
+                )
+            else:
+                # Always return a valid PrivacyResponse, never None
+                return await handle_error_privacy(url, None, str(e))
+    
     except Exception as e:
-        print(f"Error during browser automation: {e}")
-        return handle_error_privacy(url, None, str(e))
+        print(f"Critical error in privacy detection: {e}")
+        if potential_privacy_links:
+            best_link = max(potential_privacy_links, key=lambda x: x["confidence"])
+            end_time = time.time()
+            return PrivacyResponse(
+                url=url, 
+                pp_url=best_link["url"],
+                success=True,
+                message=f"Best effort link with confidence {best_link['confidence']}%",
+                method_used=f"best_effort_{best_link['source']}"
+            )
+        elif unverified_links:
+            end_time = time.time()
+            return PrivacyResponse(
+                url=url, 
+                pp_url=unverified_links[0],
+                success=True,
+                message=f"Using unverified link as fallback. No verified links found.",
+                method_used="unverified_fallback"
+            )
+        else:
+            # Always return a valid PrivacyResponse, never None
+            return await handle_error_privacy(url, None, str(e))
+    
     finally:
-        if browser:
-            try:
-                await browser.close()
-            except Exception as e:
-                print(f"Error closing browser: {e}")
+        # Clean up
         if playwright:
             try:
                 await playwright.stop()
             except Exception as e:
                 print(f"Error stopping playwright: {e}")
-async def setup_browser(playwright=None):
-    """
-    Setup browser with optimized configurations for performance.
-    """
-    if not playwright:
-        playwright = await async_playwright().start()
+
+async def handle_navigation_failure_privacy(url: str, unverified_result: str = None) -> PrivacyResponse:
+    """Handle navigation failures by using search engine fallbacks."""
+    # This function is being replaced by fallback_to_search_engines
     try:
-        # Use random user agent
-        user_agent = random.choice(USER_AGENTS)
-
-        # Get headless setting from environment or default to True for performance
-        # Set to False only for debugging when needed
-        headless = True
-
-        print(f"Browser headless mode: {headless}")
-
-        # Launch browser with optimized settings
-        browser = await playwright.chromium.launch(
-            headless=headless,  # Set to True for better performance
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-infobars",
-                "--window-size=1920,1080",  # Reduced resolution for stability
-                "--disable-extensions",
-                "--disable-features=site-per-process",  # For memory optimization
-            ],
-            chromium_sandbox=False,
-            slow_mo=50,  # Reduced delay for better performance
-        )
-
-        # Create context with optimized settings
-        context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080},  # Consistent with browser window
-            user_agent=user_agent,
-            locale="en-US",
-            timezone_id="America/New_York",
-            extra_http_headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-            },
-        )
-
-        # Add minimal stealth script
-        await context.add_init_script(
-            """
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        """
-        )
-
-        # Create a page
-        page = await context.new_page()
-
-        # Random delay function with shorter times for performance
-        async def random_delay(min_ms=200, max_ms=800):
-            delay = random.randint(min_ms, max_ms)
-            await page.wait_for_timeout(delay)
-
-        # Set reasonable timeouts
-        page.set_default_timeout(20000)  # Reduced timeout
-
-        return browser, context, page, random_delay
-
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+        return await fallback_to_search_engines(url, domain, None)
     except Exception as e:
-        if "playwright" in locals():
-            await playwright.stop()
-        print(f"Error setting up browser: {e}")
-        raise
-
-
-async def navigate_with_retry(page, url, max_retries=2):
-    """Navigate to URL with optimized retry logic."""
-    for attempt in range(max_retries):
-        try:
-            # Add shorter random delay between attempts
-            if attempt > 0:
-                delay = random.randint(500, 1000)  # Reduced delay
-                print(f"Waiting {delay/1000}s before retry {attempt+1}...")
-                await page.wait_for_timeout(delay)
-
-            print(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
-
-            # Optimized navigation strategy with shorter timeout
-            response = await page.goto(url, timeout=8000, wait_until="domcontentloaded")
-
-            # Quick check for anti-bot measures
-            is_anti_bot, patterns = await detect_anti_bot_patterns(page)
-            if is_anti_bot:
-                if attempt < max_retries - 1:
-                    print(
-                        f"Detected anti-bot protection, trying alternative approach..."
-                    )
-                    continue
-                else:
-                    print("All navigation attempts blocked by anti-bot protection")
-                    return False, response, patterns
-
-            # Check HTTP status
-            if response.ok:
-                print(f"Navigation successful: HTTP {response.status}")
-                return True, response, []
-            else:
-                print(f"Received HTTP {response.status}")
-        except Exception as e:
-            print(f"Navigation error: {e}")
-
-    print("All navigation attempts failed")
-    return False, None, []
-
-
-async def detect_anti_bot_patterns(page):
-    """
-    Optimized anti-bot detection that runs faster.
-    """
-    try:
-        # Simplified check for common anti-bot patterns
-        anti_bot_patterns = await page.evaluate(
-            """() => {
-        const html = document.documentElement.innerHTML.toLowerCase();
-            
-            // Check for common anti-bot keywords
-            const isCloudflare = html.includes('cloudflare') && 
-                                (html.includes('security check') || 
-                                 html.includes('challenge'));
-            const isRecaptcha = html.includes('recaptcha');
-            const isHcaptcha = html.includes('hcaptcha');
-            const isBotDetection = html.includes('bot detection') || 
-                                  (html.includes('please wait') && 
-                                   html.includes('redirecting'));
-                
-            return {
-                isAntiBot: isCloudflare || isRecaptcha || isHcaptcha || isBotDetection,
-                url: window.location.href,
-                title: document.title
-            };
-    }"""
-        )
-
-        if anti_bot_patterns["isAntiBot"]:
-            print(f"\n⚠️ Detected anti-bot protection: recaptcha")
-            print(f"  URL: {anti_bot_patterns['url']}")
-            print(f"  Title: {anti_bot_patterns['title']}")
-            return True, ["bot_protection"]
-
-        return False, []
-    except Exception as e:
-        print(f"Error detecting anti-bot patterns: {e}")
-        return False, []
-
-async def verify_is_privacy_page(page):
-    """Verify if the current page is a privacy policy page."""
-    try:
-        # Check for privacy indicators in page text
-        privacy_check = await page.evaluate("""() => {
-            const text = document.body.innerText.toLowerCase();
-            
-            // Check for common privacy policy terms (strong indicators)
-            const hasPrivacyPolicy = text.includes('privacy policy') || text.includes('privacy notice');
-            const hasDataCollection = text.includes('data we collect') || text.includes('information we collect');
-            const hasDataUsage = text.includes('use of your information') || text.includes('how we use');
-            const hasCookies = text.includes('cookies') || text.includes('tracking technologies');
-            const hasRights = text.includes('your rights') || text.includes('your choices');
-            const hasGDPR = text.includes('gdpr') || text.includes('ccpa') || text.includes('data protection');
-            
-            // Count occurrences of "privacy" word
-            const privacyCount = (text.match(/privacy/g) || []).length;
-            
-            // Calculate confidence score based on indicators
-            let confidence = 0;
-            
-            if (hasPrivacyPolicy) confidence += 30;
-            if (hasDataCollection) confidence += 20;
-            if (hasDataUsage) confidence += 15;
-            if (hasCookies) confidence += 10;
-            if (hasRights) confidence += 15;
-            if (hasGDPR) confidence += 20;
-            
-            // Add points based on how many times "privacy" appears (up to 30 points)
-            confidence += Math.min(privacyCount * 3, 30);
-            
-            // Page title check - strong indicator
-            const title = document.title.toLowerCase();
-            if (title.includes('privacy policy') || title.includes('privacy notice')) confidence += 30;
-            else if (title.includes('privacy')) confidence += 15;
-            
-            // Check if main heading contains privacy-related terms
-            const h1Elements = document.querySelectorAll('h1, h2');
-            for (const h of h1Elements) {
-                const headingText = h.innerText.toLowerCase();
-                if (headingText.includes('privacy policy') || headingText.includes('privacy notice')) {
-                    confidence += 20;
-                    break;
-                } else if (headingText.includes('privacy') || headingText.includes('data protection')) {
-                    confidence += 10;
-                    break;
-                }
-            }
-            
-            // Cap at 100
-            confidence = Math.min(confidence, 100);
-            
-            return {
-                confidence: confidence,
-                isPrivacyPage: confidence >= 60,
-                hasPrivacyPolicy: hasPrivacyPolicy,
-                hasDataCollection: hasDataCollection,
-                hasDataUsage: hasDataUsage,
-                hasCookies: hasCookies,
-                hasRights: hasRights
-            };
-        }""")
-        
-        return privacy_check
-    except Exception as e:
-        print(f"Error verifying privacy page: {e}")
-        return {"confidence": 0, "isPrivacyPage": False}
-
-async def find_all_privacy_links_js(page, domain):
-    """Find all potential privacy policy links using JavaScript evaluation."""
-    try:
-        # Wait for the page to fully load (reduced wait time)
-        await page.wait_for_timeout(400)  # Reduced from 800ms
-
-        # Quick-check: Look for immediate privacy links first without complex evaluations
-        quick_found = await page.evaluate("""() => {
-            try {
-                // First try direct matches - these are high confidence links
-                const quickMatches = [
-                    // Clear privacy policy text patterns (case insensitive)
-                    ...[...document.querySelectorAll('a')].filter(a => {
-                        const text = a.innerText.toLowerCase().trim();
-                        const href = a.href.toLowerCase();
-                        
-                        // Very clear privacy indicators in text
-                        return (text === 'privacy policy' || 
-                                text === 'privacy notice' || 
-                                text === 'privacy' ||
-                                text === 'data protection policy') &&
-                               // With matching URL patterns
-                               (href.includes('/privacy') || 
-                                href.includes('/policies') ||
-                                href.includes('/legal'));
-                    }),
-                    
-                    // Clear privacy policy URL patterns
-                    ...[...document.querySelectorAll('a[href*="privacy-policy"], a[href*="privacy_policy"]')],
-                    ...[...document.querySelectorAll('a[href*="/privacy"][href*=".html"], a[href*="/privacy"][href*=".php"]')]
-                ];
-                
-                if (quickMatches.length > 0) {
-                    // Sort by priority (text clarity and URL pattern)
-                    const sorted = quickMatches.sort((a, b) => {
-                        const aText = a.innerText.toLowerCase().trim();
-                        const bText = b.innerText.toLowerCase().trim();
-                        const aHref = a.href.toLowerCase();
-                        const bHref = b.href.toLowerCase();
-                        
-                        // Exact matches get highest priority
-                        if (aText === 'privacy policy' && bText !== 'privacy policy') return -1;
-                        if (bText === 'privacy policy' && aText !== 'privacy policy') return 1;
-                        
-                        // Next, prefer links with privacy in both text and URL
-                        const aHasPrivacyBoth = aText.includes('privacy') && aHref.includes('privacy');
-                        const bHasPrivacyBoth = bText.includes('privacy') && bHref.includes('privacy');
-                        if (aHasPrivacyBoth && !bHasPrivacyBoth) return -1;
-                        if (bHasPrivacyBoth && !aHasPrivacyBoth) return 1;
-                        
-                        // Finally prefer shorter URLs
-                        return aHref.length - bHref.length;
-                    });
-                    
-                    // Format results to match expected structure
-                    return sorted.slice(0, 3).map(link => ({
-                        text: link.innerText.trim() || link.textContent.trim() || "No text",
-                        href: link.href,
-                        confidence: 85, // High confidence for direct matches
-                        isExternal: !link.href.includes(window.location.hostname),
-                        targetBlank: link.getAttribute('target') === '_blank',
-                        rel: link.getAttribute('rel') || ''
-                    }));
-                }
-                return null;
-            } catch (e) {
-                console.error("Error in quick privacy link detection:", e);
-                return null;
-            }
-        }""")
-        
-        if quick_found and len(quick_found) > 0:
-            print(f"✅ Found {len(quick_found)} clear privacy links with quick detection!")
-            top_quick_link = quick_found[0]
-            
-            # Skip links that clearly open in new tab/window to avoid timeouts
-            if top_quick_link.get("targetBlank") or "noopener" in top_quick_link.get("rel", ""):
-                print("⚠️ Top link opens in new tab/window, returning without navigation")
-                return top_quick_link["href"], page, quick_found
-                
-            # Try to navigate to the top link to get final URL
-            try:
-                # Use page navigation rather than click_and_wait_for_navigation which might not exist
-                await page.goto(top_quick_link["href"], timeout=4000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(300)
-                return page.url, page, quick_found
-            except Exception as e:
-                print(f"Navigation failed for quick link: {e}")
-                # Return the href without navigation if navigation fails
-                return top_quick_link["href"], page, quick_found
-
-        # Check if we're likely facing anti-bot protection
-        anti_bot_check = await page.evaluate(
-            """() => {
-            const html = document.documentElement.innerHTML.toLowerCase();
-            return {
-                isAntiBot: html.includes('captcha') || 
-                           html.includes('recaptcha') ||
-                           html.includes('cloudflare') ||
-                           html.includes('security check') ||
-                           html.includes('ddos') ||
-                           html.includes('please verify') ||
-                           html.includes('challenge') || 
-                           html.includes('just a moment') ||
-                           document.title.toLowerCase().includes('just a moment') ||
-                           document.title.toLowerCase().includes('please wait'),
-                title: document.title
-            };
-        }"""
-        )
-
-        if anti_bot_check.get("isAntiBot", False):
-            print(f"⚠️ Anti-bot protection detected: {anti_bot_check.get('title', 'Unknown Title')}")
-            print("Trying alternative approach focusing on footer links...")
-
-            # When anti-bot is detected, specifically target footer links
-            footer_links = await page.evaluate(
-                """() => {
-                // Find all potential footers
-                const potentialFooters = [
-                    ...document.querySelectorAll('footer'),
-                    ...document.querySelectorAll('[class*="footer"]'),
-                    ...document.querySelectorAll('[id*="footer"]'),
-                    ...document.querySelectorAll('[role="contentinfo"]'),
-                    ...document.querySelectorAll('.bottom'),
-                    ...document.querySelectorAll('.legal'),
-                    ...document.querySelectorAll('.links')
-                ];
-                
-                if (potentialFooters.length === 0) {
-                    // If no clear footer, check the bottom 20% of the page
-                    const bodyHeight = document.body.offsetHeight;
-                    const bottomThreshold = bodyHeight * 0.8;
-                    
-                    // Get all links in bottom 20% of page
-                    const allLinks = [...document.querySelectorAll('a[href]')];
-                    const bottomLinks = allLinks.filter(link => {
-                        const rect = link.getBoundingClientRect();
-                        const linkYPosition = rect.top + window.scrollY;
-                        return linkYPosition > bottomThreshold;
-                    });
-                    
-                    if (bottomLinks.length > 0) {
-                        // Score and filter links
-                        return getPrivacyLinksWithScores(bottomLinks);
-                    }
-                }
-                
-                // Get all links from potential footers
-                const footerLinks = [];
-                potentialFooters.forEach(footer => {
-                    if (footer) {
-                        const links = footer.querySelectorAll('a[href]');
-                        footerLinks.push(...links);
-                    }
-                });
-                
-                // Score and filter links
-                return getPrivacyLinksWithScores(footerLinks);
-                
-                function getPrivacyLinksWithScores(links) {
-                    const privacyLinks = [];
-                    
-                    links.forEach(link => {
-                        const href = link.href.toLowerCase().trim();
-                        const text = (link.innerText || link.textContent).toLowerCase().trim();
-                        
-                        // Skip if empty text or hash-only link
-                        if (!text || href === '#' || href.startsWith('javascript:')) return;
-                        
-                        // Skip navigation/pagination links
-                        if (text.match(/^(\d+|next|prev|previous|back|forward)$/)) return;
-                        
-                        // Calculate score
-                    let score = 0;
-                        
-                        // Text-based scoring
-                        if (text === 'privacy policy') score += 100;
-                        else if (text === 'privacy notice') score += 95;
-                        else if (text === 'privacy') score += 90;
-                        else if (text === 'privacy statement') score += 90;
-                        else if (text.includes('privacy policy')) score += 85;
-                        else if (text.includes('privacy notice')) score += 80;
-                        else if (text.includes('data protection')) score += 75;
-                        else if (text.includes('data policy')) score += 75;
-                        else if (text.includes('privacy statement')) score += 70;
-                        else if (text.includes('privacy rights')) score += 70;
-                        else if (text === 'privacy & cookies') score += 65;
-                        else if (text.includes('privacy')) score += 60;
-                        else if (text.includes('cookies policy')) score += 55;
-                        else if (text.includes('cookie policy')) score += 55;
-                        else if (text.includes('cookie notice')) score += 50;
-                        else if (text.includes('cookies')) score += 45;
-                        else if (text.includes('terms')) score += 30;
-                        else if (text.includes('legal')) score += 25;
-                    
-                    // URL-based scoring
-                        if (href.includes('privacy-policy')) score += 90;
-                        else if (href.includes('privacy_policy')) score += 90;
-                        else if (href.includes('privacy-notice')) score += 85;
-                        else if (href.includes('privacy_notice')) score += 85;
-                        else if (href.includes('privacy-statement')) score += 80;
-                        else if (href.includes('privacy_statement')) score += 80;
-                        else if (href.includes('data-privacy')) score += 75;
-                        else if (href.includes('data_privacy')) score += 75;
-                        else if (href.includes('data-protection')) score += 75;
-                        else if (href.includes('data_protection')) score += 75;
-                        else if (href.includes('/privacy/')) score += 70;
-                        else if (href.includes('/privacy')) score += 65;
-                        else if (href.includes('/datenschutz')) score += 60; // German
-                        else if (href.includes('cookie-policy')) score += 55;
-                        else if (href.includes('cookie_policy')) score += 55;
-                        else if (href.includes('/cookies')) score += 50;
-                        else if (href.includes('/legal/')) score += 45;
-                        else if (href.includes('/terms/')) score += 40;
-                        
-                        // Additional boost for user-specific privacy links
-                        if (text.includes('user') || href.includes('user')) score += 100;
-                        // Additional boost for customer-specific privacy links
-                        if (text.includes('customer') || href.includes('customer')) score += 100;
-                        
-                        // Penalty for job/career/talent privacy links
-                        if ((text.includes('job') || href.includes('job') || 
-                             text.includes('career') || href.includes('career') ||
-                             text.includes('talent') || href.includes('talent')) && 
-                            (text.includes('privacy') || href.includes('privacy'))) {
-                            score -= 50;
-                        }
-                        
-                        // Penalty for California-specific links
-                        if ((text.includes('california') || href.includes('california') || 
-                             text.includes('ccpa')) && 
-                            (text.includes('privacy') || href.includes('privacy'))) {
-                            score -= 20;
-                        }
-                        
-                        // Only include if score above minimum threshold
-                        if (score >= 25) {
-                            privacyLinks.push({
-                                text: text,
-                                href: href,
-                                confidence: score,
-                                isExternal: !href.includes(window.location.hostname),
-                                targetBlank: link.getAttribute('target') === '_blank',
-                                rel: link.getAttribute('rel') || ''
-                            });
-                        }
-                    });
-                    
-                    // Sort by confidence score (highest first)
-                    privacyLinks.sort((a, b) => b.confidence - a.confidence);
-                    
-                    // Return top 3 links only
-                    return privacyLinks.slice(0, 3);
-                }
-                    }"""
-                    )
-
-            if footer_links and len(footer_links) > 0:
-                best_footer_link = footer_links[0]
-                return best_footer_link['href'], page, footer_links
-            else:
-                print("No privacy links found in footer with anti-bot protection")
-                return None, page, None
-
-        # Original comprehensive evaluation for no anti-bot case
-        privacy_links = await page.evaluate(
-            """() => {
-            // Find all links in the document
-            const allLinks = Array.from(document.querySelectorAll('a[href]'));
-            
-            // Filter and score links based on text content and URL
-            const privacyLinks = allLinks
-                .map(link => {
-                    const text = (link.innerText || link.textContent).toLowerCase().trim();
-                    const href = link.href.toLowerCase();
-                    
-                    // Skip if empty text or hash-only link
-                    if (!text || href === '#' || href.startsWith('javascript:')) {
-                        return null;
-                    }
-                    
-                    // Skip navigation/pagination links
-                    if (text.match(/^(\d+|next|prev|previous|back|forward)$/)) {
-                        return null;
-                    }
-                    
-                    // Calculate confidence score
-                    let score = 0;
-                    
-                    // Text-based scoring
-                    if (text === 'privacy policy') score += 100;
-                    else if (text === 'privacy notice') score += 95;
-                    else if (text === 'privacy') score += 90;
-                    else if (text === 'privacy statement') score += 90;
-                    else if (text.includes('privacy policy')) score += 85;
-                    else if (text.includes('privacy notice')) score += 80;
-                    else if (text.includes('data protection')) score += 75;
-                    else if (text.includes('data policy')) score += 75;
-                    else if (text.includes('privacy statement')) score += 70;
-                    else if (text.includes('privacy rights')) score += 70;
-                    else if (text === 'privacy & cookies') score += 65;
-                    else if (text.includes('privacy')) score += 60;
-                    else if (text.includes('cookies policy')) score += 55;
-                    else if (text.includes('cookie policy')) score += 55;
-                    else if (text.includes('cookie notice')) score += 50;
-                    else if (text.includes('cookies')) score += 45;
-                    else if (text.includes('terms')) score += 30;
-                    else if (text.includes('legal')) score += 25;
-                    
-                    // URL-based scoring
-                    if (href.includes('privacy-policy')) score += 90;
-                    else if (href.includes('privacy_policy')) score += 90;
-                    else if (href.includes('privacy-notice')) score += 85;
-                    else if (href.includes('privacy_notice')) score += 85;
-                    else if (href.includes('privacy-statement')) score += 80;
-                    else if (href.includes('privacy_statement')) score += 80;
-                    else if (href.includes('data-privacy')) score += 75;
-                    else if (href.includes('data_privacy')) score += 75;
-                    else if (href.includes('data-protection')) score += 75;
-                    else if (href.includes('data_protection')) score += 75;
-                    else if (href.includes('/privacy/')) score += 70;
-                    else if (href.includes('/privacy')) score += 65;
-                    else if (href.includes('/datenschutz')) score += 60; // German
-                    else if (href.includes('cookie-policy')) score += 55;
-                    else if (href.includes('cookie_policy')) score += 55;
-                    else if (href.includes('/cookies')) score += 50;
-                    else if (href.includes('/legal/')) score += 45;
-                    else if (href.includes('/terms/')) score += 40;
-                    
-                    // Additional boost for user-specific privacy links
-                    if (text.includes('user') || href.includes('user')) score += 100;
-                    // Additional boost for customer-specific privacy links
-                    if (text.includes('customer') || href.includes('customer')) score += 100;
-                    
-                    // Penalty for job/career/talent privacy links
-                    if ((text.includes('job') || href.includes('job') || 
-                         text.includes('career') || href.includes('career') ||
-                         text.includes('talent') || href.includes('talent')) && 
-                        (text.includes('privacy') || href.includes('privacy'))) {
-                        score -= 50;
-                    }
-                    
-                    // Penalty for California-specific links
-                    if ((text.includes('california') || href.includes('california') || 
-                         text.includes('ccpa')) && 
-                        (text.includes('privacy') || href.includes('privacy'))) {
-                        score -= 20;
-                    }
-                    
-                    // Skip links with very low scores
-                    if (score < 25) {
-                        return null;
-                    }
-                    
-                    // Check if link will likely open in a new tab/window
-                    const targetBlank = link.getAttribute('target') === '_blank';
-                    const rel = link.getAttribute('rel') || '';
-                    
-                    return {
-                        text: text,
-                        href: href,
-                        confidence: score,
-                        isExternal: !href.includes(window.location.hostname),
-                        targetBlank: targetBlank,
-                        rel: rel
-                    };
-                })
-                .filter(Boolean); // Remove nulls
-                
-            // Sort by confidence score (highest first)
-            privacyLinks.sort((a, b) => b.confidence - a.confidence);
-            
-            // Return top 3 links only
-            return privacyLinks.slice(0, 3);
-        }"""
-        )
-
-        if privacy_links and len(privacy_links) > 0:
-            best_link = privacy_links[0]
-            return best_link['href'], page, privacy_links
-
-        return None, page, None
-    
-    except Exception as e:
-        print(f"Error finding privacy links with JavaScript: {e}")
-        return None, page, None
-
-async def duckduckgo_search_fallback_privacy(domain, page):
-    """Search for privacy policy using DuckDuckGo Search."""
-    try:
-        print("Attempting search engine fallback with DuckDuckGo...")
-        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data protection" OR "privacy statement"'
-        ddg_search_url = f"https://duckduckgo.com/?q={search_query}&t=h_&ia=web"
-
-        await page.goto(ddg_search_url, timeout=15000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(3000)
-
-        search_results = await page.evaluate(r"""(domain) => {
-            const selectors = [
-                '.result__a[href^="http"]',
-                'article a[href^="http"]',
-                'a.eVNpHGjtxRBq_gLOfGDr[href^="http"]',
-                '.nrn-react-div a[href^="http"]',
-                '.react-results a[href^="http"]',
-                '.web-result a[href^="http"]',
-                'a[href^="http"]'
-            ];
-            let allLinks = [];
-            for (const selector of selectors) {
-                try {
-                    const links = Array.from(document.querySelectorAll(selector));
-                    if (links.length > 0) {
-                        allLinks = [...allLinks, ...links];
-                    }
-                } catch (e) {}
-            }
-            const results = allLinks
-                .filter(a => {
-                    try {
-                        const urlText = a.href.toLowerCase();
-                        if (!urlText.includes(domain.toLowerCase())) {
-                            return false;
-                        }
-                        if (urlText.includes('duckduckgo.com') ||
-                            urlText.includes('google.com') ||
-                            urlText.includes('bing.com') ||
-                            urlText.includes('yahoo.com')) {
-                            return false;
-                        }
-                        return true;
-                    } catch (e) { return false; }
-                })
-                .map(a => {
-                    let title = a.textContent.trim();
-                    let description = '';
-                    let parentElem = a.parentElement;
-                    for (let i = 0; i < 3; i++) {
-                        if (!parentElem) break;
-                        const descriptionElem = parentElem.querySelector('.result__snippet') || 
-                                              parentElem.querySelector('p') ||
-                                              parentElem.querySelector('div > span');
-                        if (descriptionElem && descriptionElem.textContent) {
-                            description = descriptionElem.textContent.trim();
-                            break;
-                        }
-                        parentElem = parentElem.parentElement;
-                    }
-                    let score = 0;
-                    const titleLower = title.toLowerCase();
-                    const descLower = description.toLowerCase();
-                    const urlLower = a.href.toLowerCase();
-                    if (titleLower.includes('privacy policy')) score += 50;
-                    else if (titleLower.includes('privacy notice')) score += 48;
-                    else if (titleLower.includes('privacy statement')) score += 45;
-                    else if (titleLower.includes('data protection')) score += 40;
-                    else if (titleLower.includes('privacy')) score += 30;
-                    else if (titleLower.includes('gdpr') || titleLower.includes('ccpa')) score += 20;
-                    if (descLower.includes('privacy policy')) score += 20;
-                    else if (descLower.includes('privacy notice')) score += 18;
-                    else if (descLower.includes('data protection')) score += 16;
-                    else if (descLower.includes('privacy') && descLower.includes('data')) score += 15;
-                    if (urlLower.includes('/privacy-policy') || urlLower.includes('/privacy-notice')) score += 60;
-                    else if (urlLower.includes('/data-protection') || urlLower.includes('/gdpr')) score += 55;
-                    else if (urlLower.includes('/privacy/') || urlLower.includes('/privacy')) score += 50;
-                    else if (urlLower.includes('/legal/privacy')) score += 45;
-                    else if (urlLower.includes('/legal/')) score += 30;
-                    return {
-                        url: a.href,
-                        title: title || 'No Title',
-                        description: description || 'No Description',
-                        score: score
-                    };
-                });
-            const uniqueResults = [];
-            const seenUrls = new Set();
-            for (const result of results) {
-                if (!seenUrls.has(result.url)) {
-                    seenUrls.add(result.url);
-                    uniqueResults.push(result);
-                }
-            }
-            return uniqueResults;
-        }""", domain)
-        if search_results and len(search_results) > 0:
-            print(f"Found {len(search_results)} potential results from DuckDuckGo search")
-            search_results.sort(key=lambda x: x['score'], reverse=True)
-            for i in range(min(3, len(search_results))):
-                print(f"Result #{i+1}: {search_results[i]['title']} - {search_results[i]['url']} (Score: {search_results[i]['score']})")
-            for result in search_results[:3]:
-                try:
-                    await page.goto(result['url'], timeout=10000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(2000)
-                    verification = await verify_is_privacy_page(page)
-                    if verification["isPrivacyPage"]:
-                        print(f"✅ Verified privacy page from DuckDuckGo results: {page.url}")
-                        return page.url
-                    else:
-                        print(f"Not a privacy page (score: {verification['confidence']})")
-                except Exception as e:
-                    print(f"Error checking result: {e}")
-            if search_results[0]['score'] >= 60:
-                print(f"Returning unverified high-confidence result: {search_results[0]['url']}")
-                return search_results[0]['url']
-        else:
-            print("No relevant search results found from DuckDuckGo")
-            return None
-    except Exception as e:
-        print(f"Error in DuckDuckGo search fallback: {e}")
-        return None
-
-
-def is_likely_registration_or_login_page(url: str) -> bool:
-    """
-    Check if a URL is likely a registration, login or authentication page.
-
-    Args:
-        url: URL to check
-
-    Returns:
-        bool: True if URL is likely a registration/login page
-    """
-    url_lower = url.lower()
-
-    # Patterns that indicate registration or login pages
-    suspicious_patterns = [
-        "/register",
-        "/signup",
-        "/login",
-        "/signin",
-        "/registration",
-        "/create-account",
-        "/join",
-        "/auth/",
-        "/openid",
-        "/ap/register",
-        "registration",
-        "signup",
-        "create_account",
-        "createaccount",
-        "authentication",
-        "returnto",
-        "redirect",
-        "callback",
-    ]
-
-    # Check if URL contains any suspicious patterns
-    return any(pattern in url_lower for pattern in suspicious_patterns)
-
-
-def handle_navigation_failure_privacy(url: str, unverified_result: str = None) -> PrivacyResponse:
-    """Handle case where navigation to the URL failed for Privacy Policy."""
-    if unverified_result:
+        print(f"Error in navigation failure handler: {e}")
         return PrivacyResponse(
             url=url,
-            pp_url=unverified_result,
-            success=True,
-            message="Found potential Privacy Policy link (unverified)",
-            method_used="dynamic_detection_unverified"
+            pp_url=None,
+            success=False,
+            message=f"Error during navigation: {str(e)}",
+            method_used="navigation_error"
         )
-    return PrivacyResponse(
-        url=url,
-        pp_url=None,
-        success=False,
-        message="Failed to navigate to website and find Privacy Policy page",
-        method_used="none"
-    )
 
-
-def handle_error_privacy(url: str, unverified_result: str, error: str) -> PrivacyResponse:
+# Keeping only one handle_error_privacy function
+async def handle_error_privacy(url: str, unverified_result: str, error: str) -> PrivacyResponse:
     """Simplified error handler for Privacy Policy."""
-    if unverified_result:
+    try:
+        if unverified_result:
+            # Check if this unverified result appears in search engines
+            try:
+                parsed_url = urlparse(url)
+                domain = parsed_url.netloc
+                
+                # Create a dummy page object for search functions
+                class DummyPage:
+                    async def goto(self, *args, **kwargs):
+                        pass
+                    async def evaluate(self, *args, **kwargs):
+                        return []
+                    async def wait_for_timeout(self, *args, **kwargs):
+                        pass
+                
+                search_results = await get_search_engine_results(domain, DummyPage())
+                
+                # Check if unverified result is confirmed by search results
+                if any(similar_urls(unverified_result, result) for result in search_results):
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=unverified_result,
+                        success=True,
+                        message=f"Error in browser detection but found matching URL in search results: {unverified_result}",
+                        method_used="error_search_match"
+                    )
+            except Exception as e:
+                print(f"Error checking search results for verification: {e}")
+        
+        # Try to extract a domain for search
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+            
+            # Try search engines directly
+            return await fallback_to_search_engines(url, domain, None)
+        except Exception as e:
+            print(f"Error in search fallback: {e}")
+        
+        # If all else fails
         return PrivacyResponse(
             url=url,
-            pp_url=unverified_result,
-            success=True,
-            message="Found potential Privacy Policy link (unverified)",
-            method_used="dynamic_detection_unverified"
+            pp_url=None,
+            success=False,
+            message=f"Error during privacy detection: {error}. Could not find privacy policy link via any method.",
+            method_used="error_all_failed"
         )
-    return PrivacyResponse(
-        url=url,
-        pp_url=None,
-        success=False,
-        message=f"Error during browser automation: {error}",
-        method_used="none"
-    )
-
+    except Exception as e:
+        # Ultimate fallback if anything fails
+        return PrivacyResponse(
+            url=url or "unknown_url",
+            pp_url=None,
+            success=False,
+            message=f"Critical error in error handler: {str(e)}",
+            method_used="critical_error_fallback"
+        )
 
 def prefer_main_domain(links, main_domain):
     # main_domain: e.g. "amazon.com"
@@ -1227,6 +495,7 @@ async def find_matching_link_privacy(page, context, unverified_result=None):
             'footer a, .footer a, #footer a, a[href*="privacy"], a[href*="data"], a[href*="legal"]'
         )
 
+        scored_links = []
         for link in links:
             try:
                 text = await link.text_content()
@@ -1237,34 +506,117 @@ async def find_matching_link_privacy(page, context, unverified_result=None):
                 if not href:
                     continue
 
-                # Simplified scoring for speed
+                # Check if link opens in new tab/window
+                target = await link.get_attribute("target")
+                rel = await link.get_attribute("rel") or ""
+                opens_in_new_tab = target == "_blank" or "noopener" in rel or "noreferrer" in rel
+                
+                # Skip links with text indicating they open in a new window/tab
+                if "new window" in text.lower() or "new tab" in text.lower():
+                    print(f"Skipping link with 'new window/tab' in text: {text}")
+                    if href:
+                        # Try direct navigation instead
+                        try:
+                            await page.goto(href, timeout=4000, wait_until="domcontentloaded")
+                            return page.url, page, unverified_result
+                        except Exception as e:
+                            print(f"Direct navigation error for 'new window/tab' link: {e}")
+                    continue
+
+                # Improved scoring to prioritize exact text matches
                 score = 0
-                if "privacy policy" in text or "privacy notice" in text:
-                    score = 100
+                
+                # Text-based scoring - exact matches are highly prioritized
+                if text == "privacy policy":
+                    score = 100  # Exact match for privacy policy
+                elif text == "privacy notice":
+                    score = 95   # Exact match for privacy notice
+                elif text == "privacy":
+                    score = 90   # Just "privacy" is still very good
+                elif "privacy policy" in text:
+                    score = 85   # Contains exact phrase "privacy policy"
+                elif "privacy notice" in text:
+                    score = 80   # Contains exact phrase "privacy notice"
+                elif "privacy" in text and ("statement" in text or "information" in text):
+                    score = 75   # Privacy statement/information
                 elif "privacy" in text:
-                    score = 80
+                    score = 70   # Contains "privacy"
+                elif "data protection" in text:
+                    score = 65   # Data protection reference 
                 elif "data" in text and ("protection" in text or "privacy" in text):
-                    score = 70
+                    score = 60   # Other data privacy references
+                elif "legal" in text and "privacy" in text:
+                    score = 55   # Legal privacy mentions
                 elif "legal" in text:
-                    score = 50
+                    score = 40   # Legal might contain privacy
 
-                # Additional URL scoring
+                # URL-based scoring - adds to text score
                 if "/privacy-policy" in href or "/privacy_policy" in href:
-                    score += 50
-                elif "/privacy" in href or "/data-privacy" in href:
-                    score += 40
-                elif "/legal" in href:
                     score += 30
-
-                if score > 50:  # High confidence match
-                    print(f"Found high confidence privacy link: {text} ({score})")
+                elif "/privacy" in href or "/data-privacy" in href:
+                    score += 25
+                elif "/legal/privacy" in href:
+                    score += 25
+                elif "/data-protection" in href:
+                    score += 20
+                elif "/legal" in href:
+                    score += 15
+                
+                # Location bonuses
+                try:
+                    # Check if link is in footer (more likely to be privacy)
+                    is_footer = await page.evaluate("""(link) => {
+                        const element = link;
+                        const rect = element.getBoundingClientRect();
+                        const windowHeight = window.innerHeight;
+                        return rect.bottom > windowHeight * 0.7; // Bottom 30% of page
+                    }""", link)
+                    
+                    if is_footer:
+                        score += 10
+                except Exception:
+                    pass
+                
+                # Store the link with its score
+                scored_links.append({
+                    "element": link,
+                    "text": text,
+                    "href": href,
+                    "score": score,
+                    "opens_in_new_tab": opens_in_new_tab
+                })
+                
+            except Exception as e:
+                continue
+        
+        # Sort links by score
+        scored_links.sort(key=lambda x: x["score"], reverse=True)
+        
+        # Try high-scoring links
+        for link_data in scored_links:
+            if link_data["score"] > 50:  # Only consider high confidence matches
+                print(f"Found high confidence privacy link: {link_data['text']} (Score: {link_data['score']})")
+                
+                # Handle differently based on whether it opens in new tab
+                if link_data["opens_in_new_tab"]:
+                    print(f"Link opens in new tab/window. Using direct navigation.")
+                    try:
+                        await page.goto(link_data["href"], timeout=4000, wait_until="domcontentloaded")
+                        await page.wait_for_timeout(300)
+                        return page.url, page, unverified_result
+                    except Exception as e:
+                        print(f"Direct navigation error: {e}")
+                        # Return href without navigation if direct navigation fails
+                        return link_data["href"], page, unverified_result
+                else:
+                    # For normal links, use click and navigation
                     success = await click_and_wait_for_navigation(
-                        page, link, timeout=5000
+                        page, link_data["element"], timeout=5000
                     )
                     if success:
                         return page.url, page, unverified_result
-            except Exception as e:
-                continue
+        
+        # If we got here, no suitable links were found
         return None, page, unverified_result
     except Exception as e:
         print(f"Error in find_matching_link_privacy: {e}")
@@ -1272,12 +624,29 @@ async def find_matching_link_privacy(page, context, unverified_result=None):
 
 
 async def click_and_wait_for_navigation(page, element, timeout=5000):
-    """Click a link and wait for navigation with shorter timeout."""
+    """Click a link and wait for navigation with improved handling for new tab links."""
     try:
-        async with page.expect_navigation(
-            timeout=timeout, wait_until="domcontentloaded"
-        ):
-            await element.click()
+        # Check if the link will open in a new tab/window
+        target = await element.get_attribute("target")
+        rel = await element.get_attribute("rel") or ""
+        href = await element.get_attribute("href")
+        
+        # Skip navigation wait if link opens in new tab or has noopener/noreferrer
+        opens_in_new_tab = target == "_blank" or "noopener" in rel or "noreferrer" in rel
+        
+        if opens_in_new_tab and href:
+            print(f"Link opens in new tab. Using direct navigation instead of clicking.")
+            try:
+                await page.goto(href, timeout=timeout, wait_until="domcontentloaded")
+                return True
+            except Exception as e:
+                print(f"Direct navigation error: {e}")
+                return False
+        else:
+            # For normal links, use navigation wait approach
+            async with page.expect_navigation(
+                timeout=timeout, wait_until="domcontentloaded"):
+                await element.click()
         return True
     except Exception as e:
         print(f"Navigation error: {e}")
@@ -1300,18 +669,32 @@ async def smooth_scroll_and_click_privacy(
         return visited_url, current_page, unverified_result
 
     try:
-        # Simplified footer selectors
-        footer_selectors = ["footer", ".footer", "#footer"]
+        # Expanded footer selectors to catch more variations
+        footer_selectors = [
+            "footer", 
+            ".footer", 
+            "#footer", 
+            "[class*='footer']", 
+            "[id*='footer']", 
+            ".bottom", 
+            ".legal", 
+            ".copyright", 
+            ".site-info", 
+            "[role='contentinfo']"
+        ]
 
         # Get page height more efficiently
         page_height = await current_page.evaluate(
             """() => document.documentElement.scrollHeight"""
         )
 
-        # Use fewer positions to check
+        # More comprehensive scroll positions
         positions_to_check = [
-            page_height,
-            page_height * 0.5,
+            page_height * 0.9,  # Bottom of page (likely footer location)
+            page_height * 0.8,  # Near bottom
+            page_height * 0.7,  # Lower part
+            page_height * 0.5,  # Middle of page
+            page_height * 0.3,  # Upper part for sites with privacy links in header/menu
         ]
 
         for scroll_pos in positions_to_check:
@@ -1324,68 +707,268 @@ async def smooth_scroll_and_click_privacy(
             if visited_url:
                 return visited_url, current_page, unverified_result
 
-        # Check footer area with simplified approach
+        # Enhanced corporate privacy link detection with more patterns
+        corporate_privacy_link = await current_page.evaluate("""() => {
+            // Check for corporate-style privacy links with specific patterns
+            const links = Array.from(document.querySelectorAll('a[href]'));
+            
+            // Prioritize and score links
+            const scoredLinks = links.map(link => {
+                const href = link.href.toLowerCase();
+                const text = (link.innerText || link.textContent).toLowerCase().trim();
+                
+                // Skip if empty text or hash-only link
+                if (!text || href === '#' || href.startsWith('javascript:')) {
+                    return { score: -1, link: link, href: href };
+                }
+                
+                let score = 0;
+                
+                // Check for corporate privacy center patterns
+                if (href.includes('privacy-center')) score += 90;
+                else if (href.includes('privacy-notice')) score += 85;
+                else if (href.includes('privacy-policy')) score += 85;
+                else if (href.includes('privacy/policy')) score += 80;
+                else if (href.includes('corporate/privacy')) score += 80;
+                else if (href.includes('legal/privacy')) score += 75;
+                else if (href.includes('data-protection')) score += 75;
+                else if (href.includes('data-privacy')) score += 75;
+                else if (href.includes('personal-data')) score += 70;
+                else if (href.includes('/privacy/')) score += 70;
+                else if (href.includes('/privacy')) score += 65;
+                else if (href.includes('/legal/')) score += 60;
+                
+                // Text scoring
+                if (text === 'privacy policy') score += 100;
+                else if (text === 'privacy notice') score += 95;
+                else if (text === 'privacy statement') score += 90;
+                else if (text === 'privacy') score += 85;
+                else if (text.includes('privacy policy')) score += 80;
+                else if (text.includes('privacy notice')) score += 75;
+                else if (text.includes('data protection')) score += 70;
+                else if (text.includes('privacy') && text.length < 20) score += 65;
+                else if (text.includes('data privacy')) score += 65;
+                else if (text.includes('privacy')) score += 50;
+                
+                // If it specifies it opens in a new tab/window, add boost
+                if (link.getAttribute('target') === '_blank' || 
+                    text.includes('new window') || 
+                    text.includes('new tab')) {
+                    score += 10;
+                }
+                
+                return { score, link, href };
+            })
+            .filter(item => item.score > 0)  // Only keep scored links
+            .sort((a, b) => b.score - a.score);  // Sort by score descending
+            
+            // Return the href of the highest scored link or null if none found
+            return scoredLinks.length > 0 ? scoredLinks[0].href : null;
+        }""")
+        
+        if corporate_privacy_link:
+            print(f"Found corporate privacy link: {corporate_privacy_link}")
+            try:
+                await current_page.goto(corporate_privacy_link, timeout=4000, wait_until="domcontentloaded")
+                await current_page.wait_for_timeout(300)
+                return current_page.url, current_page, unverified_result
+            except Exception as e:
+                print(f"Navigation to corporate privacy link failed: {e}")
+                # Return the link even if navigation failed
+                return corporate_privacy_link, current_page, unverified_result
+
+        # Check footer area with improved approach
         for selector in footer_selectors:
             footer = await current_page.query_selector(selector)
             if footer:
                 print(f"Found footer with selector: {selector}")
                 await footer.scroll_into_view_if_needed()
 
-                # Check for privacy links with faster query
+                # Check for privacy links with enhanced query
                 privacy_links = await current_page.evaluate(
                     """(selector) => {
                     const footer = document.querySelector(selector);
                     if (!footer) return [];
-                    const links = Array.from(footer.querySelectorAll('a'));
-                    return links.filter(link => {
-                        const text = link.textContent.toLowerCase();
+                    
+                    // Get all links in the footer
+                    const links = Array.from(footer.querySelectorAll('a[href]'));
+                    
+                    // Score and filter links
+                    const scoredLinks = links.map(link => {
+                        const text = (link.innerText || link.textContent).toLowerCase().trim();
                         const href = link.href.toLowerCase();
-                        return text.includes('privacy') || 
-                               text.includes('data') || 
-                               href.includes('privacy') || 
-                               href.includes('data-privacy');
-                    }).map(link => ({
-                        text: link.textContent.trim(),
-                        href: link.href
-                    }));
+                        
+                        // Skip empty or javascript links
+                        if (!text || href === '#' || href.startsWith('javascript:')) {
+                            return { score: -1, href, text };
+                        }
+                        
+                        // Calculate score
+                        let score = 0;
+                        
+                        // Text scoring
+                        if (text === 'privacy policy') score += 100;
+                        else if (text === 'privacy notice') score += 95;
+                        else if (text === 'privacy statement') score += 90;
+                        else if (text === 'privacy') score += 85;
+                        else if (text.includes('privacy policy')) score += 80;
+                        else if (text.includes('privacy notice')) score += 75;
+                        else if (text.includes('data protection')) score += 70;
+                        else if (text.includes('privacy') && text.length < 20) score += 65;
+                        else if (text.includes('data privacy')) score += 65;
+                        else if (text.includes('privacy')) score += 50;
+                        else if (text.includes('data policy')) score += 65;
+                        else if (text.includes('personal data')) score += 65;
+                        
+                        // URL scoring
+                        if (href.includes('privacy-policy')) score += 90;
+                        else if (href.includes('privacy_policy')) score += 90;
+                        else if (href.includes('privacy-notice')) score += 85;
+                        else if (href.includes('privacy/policy')) score += 85;
+                        else if (href.includes('data-protection')) score += 80;
+                        else if (href.includes('data-privacy')) score += 80;
+                        else if (href.includes('/privacy/')) score += 75;
+                        else if (href.includes('/privacy')) score += 70;
+                        else if (href.includes('/legal/privacy')) score += 70;
+                        else if (href.includes('/legal/')) score += 50;
+                        
+                        // Only include links with score above threshold
+                        return { 
+                            score: score > 0 ? score : -1, 
+                            href,
+                            text,
+                            target: link.getAttribute('target') || '',
+                            rel: link.getAttribute('rel') || ''
+                        };
+                    })
+                    .filter(item => item.score > 0)
+                    .sort((a, b) => b.score - a.score);
+                    
+                    return scoredLinks.slice(0, 5); // Return top 5 links
                 }""",
                     selector,
                 )
 
                 if privacy_links and len(privacy_links) > 0:
                     print(f"Found {len(privacy_links)} potential privacy links in footer")
-                    # Limit to first 3 links for speed
-                    for link in privacy_links[:3]:
+                    # Process the top 5 links for better coverage
+                    for link in privacy_links[:5]:
                         try:
-                            element = await current_page.query_selector(
-                                f"a[href='{link['href']}']"
-                            )
+                            # For links that open in new tabs, use direct navigation
+                            if link['target'] == '_blank' or 'noopener' in link['rel'] or 'noreferrer' in link['rel']:
+                                print(f"Footer link opens in new tab. Using direct navigation for: {link['text']}")
+                                await current_page.goto(link['href'], timeout=4000, wait_until="domcontentloaded")
+                                await current_page.wait_for_timeout(300)
+                                return current_page.url, current_page, unverified_result
+                            else:
+                                # Try to match the link by different attributes for better reliability
+                                element = await current_page.query_selector(
+                                    f"a[href='{link['href']}'], a[href*='{link['href'].split('/')[-1]}']")
                             if element:
                                 success = await click_and_wait_for_navigation(
-                                    current_page, element, timeout=5000
+                                        current_page, element, timeout=4000
                                 )
                                 if success:
-                                    return (
-                                        current_page.url,
-                                        current_page,
-                                        unverified_result,
-                                    )
+                                        return current_page.url, current_page, unverified_result
                         except Exception as e:
                             print(f"Error clicking footer link: {e}")
+                            continue
 
-        # Skip scrolling back up to save time
-        print("✅ Reached the bottom of the page.")
+        # Last resort: check for common privacy-related link patterns across the entire page
+        try:
+            privacy_anchors = await current_page.query_selector_all(
+                "a[href*='privacy'], a[href*='data-protection'], a[href*='data-privacy'], a[href*='legal/privacy']"
+            )
+            
+            if privacy_anchors and len(privacy_anchors) > 0:
+                print(f"Found {len(privacy_anchors)} potential privacy links across the page")
+                
+                # Score the anchors
+                scored_anchors = []
+                for anchor in privacy_anchors:
+                    try:
+                        text = await anchor.text_content()
+                        href = await anchor.get_attribute("href")
+                        
+                        if not text or not href:
+                            continue
+                            
+                        text = text.lower().strip()
+                        href = href.lower()
+                        
+                        # Skip navigation/pagination links
+                        if text in ["next", "prev", "previous", "back", "forward"]:
+                            continue
+                            
+                        # Score the anchor
+                        score = 0
+                        
+                        # Text-based scoring
+                        if "privacy policy" in text:
+                            score += 100
+                        elif "privacy notice" in text:
+                            score += 95
+                        elif "privacy statement" in text:
+                            score += 90
+                        elif text == "privacy":
+                            score += 85
+                        elif "privacy" in text:
+                            score += 60
+                        
+                        # URL-based scoring
+                        if "privacy-policy" in href:
+                            score += 90
+                        elif "privacy/policy" in href:
+                            score += 85
+                        elif "privacy/notice" in href:
+                            score += 85
+                        elif "/privacy/" in href:
+                            score += 80
+                        elif "/privacy" in href:
+                            score += 75
+                            
+                        if score >= 50:
+                            scored_anchors.append({"anchor": anchor, "score": score, "href": href})
+                    except Exception:
+                        continue
+                
+                # Sort by score (highest first)
+                scored_anchors.sort(key=lambda x: x["score"], reverse=True)
+                
+                # Try the top 3 scored anchors
+                for item in scored_anchors[:3]:
+                    try:
+                        success = await click_and_wait_for_navigation(
+                            current_page, item["anchor"], timeout=4000
+                        )
+                        if success:
+                            return current_page.url, current_page, unverified_result
+                    except Exception as e:
+                        print(f"Error clicking anchor: {e}")
+                        try:
+                            # Try direct navigation as fallback
+                            await current_page.goto(item["href"], timeout=4000, wait_until="domcontentloaded")
+                            await current_page.wait_for_timeout(300)
+                            return current_page.url, current_page, unverified_result
+                        except Exception as nav_e:
+                            print(f"Direct navigation failed: {nav_e}")
+                            continue
+        except Exception as e:
+            print(f"Error in last resort privacy link detection: {e}")
 
+        # If all else failed, return null
+        print("No privacy links found through smooth scroll")
+        return None, current_page, unverified_result
     except Exception as e:
-        print(f"Error in footer/scroll check: {e}")
-
+        print(f"Error in smooth_scroll_and_click_privacy: {e}")
     return None, current_page, unverified_result
 
 async def bing_search_fallback_privacy(domain, page):
     """Search for privacy policy using Bing Search."""
     try:
         print("Attempting search engine fallback with Bing...")
-        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data protection" OR "privacy statement"'
+        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data protection" OR "privacy statement" -hiring -careers -job -recruitment -talent'
+
         bing_search_url = f"https://www.bing.com/search?q={search_query}"
 
         await page.goto(bing_search_url, timeout=15000, wait_until="domcontentloaded")
@@ -1443,6 +1026,36 @@ async def bing_search_fallback_privacy(domain, page):
                     else if (urlLower.includes('/legal/privacy')) score += 45;
                     else if (urlLower.includes('/legal/')) score += 30;
                     
+                    // Penalties for specialized pages
+                    if (urlLower.includes('/hiring') || 
+                        urlLower.includes('/careers') || 
+                        urlLower.includes('/jobs') || 
+                        urlLower.includes('/talent') || 
+                        urlLower.includes('/recruitment') ||
+                        urlLower.includes('/applicants')) {
+                        score -= 70; // Heavy penalty for hiring/careers pages
+                    }
+                    
+                    // Penalties for other specialized privacy policies
+                    if (urlLower.includes('/seller') || 
+                        urlLower.includes('/developer') || 
+                        urlLower.includes('/vendor') ||
+                        urlLower.includes('/partners') ||
+                        urlLower.includes('/suppliers')) {
+                        score -= 40; // Penalty for specialized business relationship policies
+                    }
+                    
+                    // Boost for main privacy policy paths
+                    if (urlLower === domain.toLowerCase() + '/privacy' || 
+                        urlLower === domain.toLowerCase() + '/privacy/' ||
+                        urlLower === 'www.' + domain.toLowerCase() + '/privacy' ||
+                        urlLower === 'www.' + domain.toLowerCase() + '/privacy/' ||
+                        urlLower.includes('/privacy-policy') || 
+                        urlLower.includes('/privacy/policy') ||
+                        urlLower.includes('/privacy-center')) {
+                        score += 40; // Boost for main paths
+                    }
+                    
                     // Corporate/official domains boost
                     const corpKeywords = ['company/', 'privacy-center', 'privacy-notice', '/legal/', '/about/', '/corporate/'];
                     if (corpKeywords.some(kw => urlLower.includes(kw))) {
@@ -1493,28 +1106,28 @@ async def bing_search_fallback_privacy(domain, page):
 
         if search_results and len(search_results) > 0:
             print(f"Found {len(search_results)} potential results from Bing search")
-            
+
             # Sort by score
             search_results.sort(key=lambda x: x["score"], reverse=True)
-            
+
             # Store the best result in case all verifications fail
             best_result_url = search_results[0]["url"]
             best_result_score = search_results[0]["score"]
-            
+
             # Display top results for debugging
             for i, result in enumerate(search_results[:3]):
                 print(f"Result #{i+1}: {result['title']} - {result['url']} (Score: {result['score']})")
-            
+
             # Check the top 5 results
             for result_index in range(min(5, len(search_results))):
                 best_result = search_results[result_index]["url"]
-                
+
                 try:
                     # Visit the page to verify it's a privacy page
                     print(f"Checking result: {best_result}")
                     await page.goto(best_result, timeout=10000, wait_until="domcontentloaded")
                     await page.wait_for_timeout(1000)  # Allow time for page to load
-                    
+
                     # Check if we hit a captcha
                     is_captcha = await page.evaluate("""() => {
                         const html = document.documentElement.innerHTML.toLowerCase();
@@ -1529,42 +1142,81 @@ async def bing_search_fallback_privacy(domain, page):
                             url: window.location.href
                         };
                     }""")
-                    
+
                     # Special handling for high-scoring URLs that hit captchas
                     if is_captcha["isCaptcha"]:
                         print(f"⚠️ Captcha detected when accessing: {is_captcha['url']}")
-                        
+
                         # If the original URL was high-scoring and contains key terms, accept it even with captcha
                         original_url_lower = best_result.lower()
-                        captcha_bypass_domains = [
-                            "facebook.com",
-                            "meta.com",
-                            "instagram.com",
-                            "amazon.com",
-                            "openai.com",
-                            "apple.com",
-                            "google.com",
-                        ]
                         
-                        # Check if it's from a known domain and has privacy policy in URL
-                        is_known_domain = any(domain in original_url_lower for domain in captcha_bypass_domains)
+                        # Instead of hardcoding specific domains, use generic trustworthiness indicators
+                        # to determine if we should accept the URL despite captcha
+                        def evaluate_url_trustworthiness(url_str):
+                            """Evaluate URL trustworthiness without hardcoding specific domains"""
+                            try:
+                                # Check for common patterns in high-quality domains
+                                parsed_url = urlparse(url_str)
+                                hostname = parsed_url.netloc.lower()
+                                
+                                # Score the URL based on generic factors rather than specific domains
+                                trust_score = 0
+                                
+                                # Domain age/popularity indicators (via TLD)
+                                if hostname.endswith(('.com', '.org', '.net', '.edu', '.gov')):
+                                    trust_score += 20
+                                elif hostname.endswith(('.io', '.co', '.me')):
+                                    trust_score += 10
+                                
+                                # Length - very short domains are often well-established
+                                domain_parts = hostname.split('.')
+                                main_domain = domain_parts[0] if len(domain_parts) > 0 else ""
+                                if len(main_domain) <= 8:  # Short domain names often indicate established sites
+                                    trust_score += 15
+                                
+                                # Path quality for privacy pages
+                                path = parsed_url.path.lower()
+                                if "/privacy" in path:
+                                    trust_score += 25
+                                elif "/legal/" in path:
+                                    trust_score += 20
+                                elif "/policies/" in path:
+                                    trust_score += 20
+                                
+                                # Additional trust signals
+                                if "privacy-policy" in path:
+                                    trust_score += 15
+                                elif "privacy-notice" in path:
+                                    trust_score += 15
+                                elif "terms" in path and "privacy" in path:
+                                    trust_score += 10
+                                
+                                return trust_score >= 45  # Threshold for trustworthiness
+                            except Exception:
+                                return False
+                        
+                        # Check if URL has privacy-related path elements
                         has_privacy_path = (
                             "privacy-policy" in original_url_lower or
                             "privacy-notice" in original_url_lower or
                             "data-protection" in original_url_lower or
                             "privacy" in original_url_lower or
-                            "policies" in original_url_lower
+                            "policies" in original_url_lower or
+                            "legal/privacy" in original_url_lower
                         )
                         
-                        if is_known_domain and has_privacy_path and search_results[result_index]["score"] >= 60:
+                        # Use trust evaluation instead of hardcoded domains
+                        is_trustworthy_url = evaluate_url_trustworthiness(best_result)
+                        
+                        if is_trustworthy_url and has_privacy_path and search_results[result_index]["score"] >= 60:
                             print(f"✅ Accepting high-scoring URL from known domain despite captcha: {best_result}")
                             return best_result
                         else:
                             print(f"❌ Not accepting captcha-protected URL as it doesn't meet criteria")
-                    
+
                     # Perform verification
                     verification = await verify_is_privacy_page(page)
-                    
+
                     if verification["isPrivacyPage"] and verification["confidence"] >= 60:
                         print(f"✅ Verified privacy page from Bing results: {page.url}")
                         return page.url
@@ -1572,7 +1224,7 @@ async def bing_search_fallback_privacy(domain, page):
                         print(f"❌ Not a valid Privacy page (verification score: {verification['confidence']})")
                 except Exception as e:
                     print(f"Error checking Bing search result: {e}")
-            
+
             # If we checked all results but none were verified, consider the highest scored result
             # with a minimum score threshold
             if len(search_results) > 0 and search_results[0]["score"] >= 70:
@@ -1580,7 +1232,7 @@ async def bing_search_fallback_privacy(domain, page):
                 try:
                     await page.goto(search_results[0]["url"], timeout=10000, wait_until="domcontentloaded")
                     await page.wait_for_timeout(1000)  # Reduced wait time for full page load
-                    
+
                     verification = await verify_is_privacy_page(page)
                     if verification["confidence"] >= 50:  # Higher minimum threshold
                         print(f"⚠️ Final verification passed with sufficient confidence: {verification['confidence']}")
@@ -1595,177 +1247,245 @@ async def bing_search_fallback_privacy(domain, page):
                     # Return the highest-scored result even if verification fails due to error
                     print(f"⚠️ Verification failed with error, returning highest-scored result: {search_results[0]['url']}")
                     return search_results[0]["url"]
-            
+
             # Return the best result anyway if it has a decent score (60+)
             if best_result_score >= 60:
                 print(f"⚠️ All verification methods failed, returning best unverified result: {best_result_url} (Score: {best_result_score})")
                 return best_result_url
-        
+
         print("No relevant Bing search results found")
         return None
     except Exception as e:
         print(f"Error in Bing search fallback: {e}")
         return None
 
-async def yahoo_search_fallback_privacy(domain, page):
-    """Search for privacy policy using Yahoo Search."""
+async def verify_link_validity(link, original_domain):
+    """Verify if a link is a valid privacy policy by checking accessibility and content."""
     try:
-        print("Attempting search engine fallback with Yahoo...")
-        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data protection" OR "privacy statement"'
-        yahoo_search_url = f"https://search.yahoo.com/search?p={search_query}"
+        # Basic structure analysis
+        score = 0
+        link_lower = link.lower()
+        
+        # URL pattern scoring
+        if "/privacy-policy" in link_lower or "/privacy_policy" in link_lower:
+            score += 30
+        elif "/privacy" in link_lower or "/data-privacy" in link_lower:
+            score += 25
+        elif "/legal/privacy" in link_lower:
+            score += 25
+        elif "/data-protection" in link_lower:
+            score += 20
+        elif "/legal" in link_lower:
+            score += 15
 
-        await page.goto(yahoo_search_url, timeout=15000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(3000)
-
-        search_results = await page.evaluate("""(domain) => {
-            const results = [];
-            // Yahoo search result selectors
-            const resultSelectors = [
-                'div.algo-sr a', // Standard results
-                'div.algo a',     // Alternative result format
-                'h3.title a',     // Another format
-                '#web a.d-ib'     // Another format
-            ];
-            
-            // Try each selector until we find some results
-            let links = [];
-            for (const selector of resultSelectors) {
-                links = Array.from(document.querySelectorAll(selector));
-                if (links.length > 0) break;
-            }
-            
-            for (const link of links) {
-                try {
-                    // Skip if link doesn't have proper URL or doesn't contain domain
-                    const href = link.href.toLowerCase();
-                    if (!href || !href.includes(domain.toLowerCase())) continue;
+        # Check if this is from the same domain
+        try:
+            link_domain = urlparse(link).netloc.replace('www.', '')
+            original_domain = original_domain.replace('www.', '')
+            if link_domain == original_domain:
+                score += 25  # Boost for same domain
+            elif link_domain.endswith(original_domain) or original_domain.endswith(link_domain):
+                score += 15  # Partial match (subdomain)
+        except Exception:
+            pass  # Skip domain matching if there's an error
+        
+        # For links with non-zero score, try to verify with HTTP request
+        if score > 0:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(link, timeout=5, allow_redirects=True) as response:
+                        if response.status == 200:
+                            # Read some content to verify it's a privacy page
+                            content = await response.text(errors='ignore')
+                            content_lower = content.lower()
+                            
+                            # Simple content verification
+                            privacy_terms = ["privacy policy", "privacy notice", "data protection", 
+                                           "data privacy", "personal information", "information we collect"]
+                            
+                            # Count how many privacy terms appear in the content
+                            term_matches = sum(1 for term in privacy_terms if term in content_lower)
+                            
+                            if term_matches >= 2:
+                                score += 40  # Strong boost for verified content
+                            elif term_matches == 1:
+                                score += 20  # Modest boost for partial verification
+                            
+                            # Additional score for privacy in title
+                            if "<title" in content_lower and "privacy" in content_lower.split("<title")[1].split("</title>")[0]:
+                                score += 15
+                        else:
+                            # Penalize inaccessible links
+                            score -= 50
                     
-                    // Skip search engine links
-                    if (href.includes('yahoo.com') || 
-                        href.includes('google.com') || 
-                        href.includes('bing.com') ||
-                        href.includes('duckduckgo.com')) continue;
-                    
-                    // Get title and snippet
-                    const title = link.textContent.trim();
-                    let description = '';
-                    
-                    // Look for description in parent elements
-                    let parentElem = link.closest('div.algo') || link.closest('div.algo-sr');
-                    if (parentElem) {
-                        const descElem = parentElem.querySelector('p.fz-ms') || 
-                                        parentElem.querySelector('p') ||
-                                        parentElem.querySelector('div.compText');
-                        if (descElem) description = descElem.textContent.trim();
-                    }
-                    
-                    // Score the result
-                    let score = 0;
-                    const titleLower = title.toLowerCase();
-                    const descLower = description.toLowerCase();
-                    const urlLower = href.toLowerCase();
-                    
-                    // Title scoring
-                    if (titleLower.includes('privacy policy')) score += 50;
-                    else if (titleLower.includes('privacy notice')) score += 48;
-                    else if (titleLower.includes('privacy statement')) score += 45;
-                    else if (titleLower.includes('data protection')) score += 40;
-                    else if (titleLower.includes('privacy')) score += 30;
-                    else if (titleLower.includes('gdpr') || titleLower.includes('ccpa')) score += 20;
-                    
-                    // Description scoring
-                    if (descLower.includes('privacy policy')) score += 20;
-                    else if (descLower.includes('privacy notice')) score += 18;
-                    else if (descLower.includes('data protection')) score += 16;
-                    else if (descLower.includes('privacy') && descLower.includes('data')) score += 15;
-                    
-                    // URL scoring
-                    if (urlLower.includes('/privacy-policy') || urlLower.includes('/privacy-notice')) score += 60;
-                    else if (urlLower.includes('/data-protection') || urlLower.includes('/gdpr')) score += 55;
-                    else if (urlLower.includes('/privacy/') || urlLower.includes('/privacy')) score += 50;
-                    else if (urlLower.includes('/legal/privacy')) score += 45;
-                    else if (urlLower.includes('/legal/')) score += 30;
-                    
-                    // Corporate/official domains boost
-                    const corpKeywords = ['company/', 'privacy-center', 'privacy-notice', '/legal/', '/about/', '/corporate/'];
-                    if (corpKeywords.some(kw => urlLower.includes(kw))) {
-                        score += 15;
-                    }
-                    
-                    // Filter to include corporate privacy links even if hostname doesn't match
-                    const currentHostname = new URL(href).hostname.replace('www.', '');
-                    const mainDomain = domain.replace('www.', '');
-                    
-                    // Always include if it's the same domain
-                    let shouldInclude = currentHostname.includes(mainDomain) || mainDomain.includes(currentHostname);
-                    
-                    if (!shouldInclude) {
-                        // Include external privacy links with corporate-style paths
-                        const path = new URL(href).pathname.toLowerCase();
-                        shouldInclude = corpKeywords.some(kw => path.includes(kw)) && 
-                                       (urlLower.includes('privacy') || urlLower.includes('data-protection'));
-                    }
-                    
-                    if (shouldInclude) {
-                        results.push({
-                            url: href,
-                            title: title || 'No Title',
-                            description: description || 'No Description',
-                            score: score
-                        });
-                    }
-                } catch (e) {
-                    // Skip problematic links
-                    continue;
-                }
-            }
-            
-            // Deduplicate by URL
-            const uniqueResults = [];
-            const seenUrls = new Set();
-            
-            for (const result of results) {
-                if (!seenUrls.has(result.url)) {
-                    seenUrls.add(result.url);
-                    uniqueResults.push(result);
-                }
-            }
-            
-            return uniqueResults;
-        }""", domain)
-
-        if search_results and len(search_results) > 0:
-            print(f"Found {len(search_results)} potential results from Yahoo search")
-            
-            # Sort by score
-            search_results.sort(key=lambda x: x["score"], reverse=True)
-            
-            # Display top results for debugging
-            for i, result in enumerate(search_results[:3]):
-                print(f"Result #{i+1}: {result['title']} - {result['url']} (Score: {result['score']})")
-            
-            # Check the top 3 results
-            for result in search_results[:3]:
-                try:
-                    await page.goto(result["url"], timeout=10000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(1000)
-                    
-                    verification = await verify_is_privacy_page(page)
-                    if verification["isPrivacyPage"]:
-                        print(f"✅ Verified privacy page from Yahoo results: {page.url}")
-                        return page.url
-                    else:
-                        print(f"Not a privacy page (score: {verification['confidence']})")
-                except Exception as e:
-                    print(f"Error checking Yahoo search result: {e}")
-            
-            # If no verification succeeded but we have high-confidence results, return the best one
-            if search_results[0]["score"] >= 60:
-                print(f"⚠️ Returning unverified high-confidence result: {search_results[0]['url']}")
-                return search_results[0]["url"]
-            
-        print("No relevant Yahoo search results found")
-        return None
+            except Exception as e:
+                # Penalize links that can't be accessed
+                print(f"Error verifying link {link}: {e}")
+                score -= 30
+        
+        return {"url": link, "score": score, "verified": score > 30}
+    
     except Exception as e:
-        print(f"Error in Yahoo search fallback: {e}")
-        return None
+        print(f"Error in verify_link_validity: {e}")
+        return {"url": link, "score": 0, "verified": False}
+
+async def verify_privacy_page_result(page, url, result_url, result_type="scroll"):
+    """Helper function to verify a potential privacy page with proper error handling."""
+    try:
+        # Navigate to the result URL if needed
+        current_url = page.url
+        if current_url != result_url:
+            await page.goto(result_url, timeout=6000, wait_until="domcontentloaded")
+        
+        # Verify if it's a privacy page
+        verification = await verify_is_privacy_page(page)
+        
+        if verification.get('isPrivacyPage', False):
+            print(f"✅ Verified {result_type} result as privacy page with confidence: {verification.get('confidence', 0)}%")
+            return {
+                "verified": True,
+                "confidence": verification.get('confidence', 0),
+                "url": result_url
+            }
+        else:
+            print(f"⚠️ {result_type} result not verified as privacy page. Adding to potential links.")
+            return {
+                "verified": False,
+                "confidence": verification.get('confidence', 0),
+                "url": result_url
+            }
+    except Exception as e:
+        print(f"Error verifying {result_type} result: {e}")
+        # Default fallback confidence based on result type
+        default_confidence = 65 if result_type == "scroll" else 60
+        return {
+            "verified": False,
+            "confidence": default_confidence,
+            "url": result_url,
+            "error": str(e)
+        }
+
+async def fallback_to_search_engines(url, domain, page):
+    """Try to find privacy policy URL using search engines alone."""
+    print("Using search engines as fallback for finding privacy policy")
+    
+    # Try all search engines
+    results = []
+    
+    # Bing search
+    try:
+        bing_result = await bing_search_fallback_privacy(domain, page)
+        if bing_result:
+            results.append({"url": bing_result, "source": "bing"})
+    except Exception as e:
+        print(f"Error with Bing search: {e}")
+    
+    # DuckDuckGo search
+    try:
+        ddg_result = await duckduckgo_search_fallback_privacy(domain, page)
+        if ddg_result:
+            results.append({"url": ddg_result, "source": "duckduckgo"})
+    except Exception as e:
+        print(f"Error with DuckDuckGo search: {e}")
+    
+    # Yahoo search
+    try:
+        yahoo_result = await yahoo_search_fallback_privacy(domain, page)
+        if yahoo_result:
+            results.append({"url": yahoo_result, "source": "yahoo"})
+    except Exception as e:
+        print(f"Error with Yahoo search: {e}")
+    
+    # Look for matches between different search engines
+    if len(results) > 1:
+        for i in range(len(results)):
+            for j in range(i+1, len(results)):
+                if similar_urls(results[i]["url"], results[j]["url"]):
+                    print(f"Match found between {results[i]['source']} and {results[j]['source']}: {results[i]['url']}")
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=results[i]["url"],
+                        success=True,
+                        message=f"Found privacy policy confirmed by multiple search engines: {results[i]['url']}",
+                        method_used="multi_search_match"
+                    )
+    
+    # If no matches but we have results, return the first one
+    if results:
+        return PrivacyResponse(
+            url=url,
+            pp_url=results[0]["url"],
+            success=True,
+            message=f"Found privacy policy from {results[0]['source']}: {results[0]['url']}",
+            method_used=f"{results[0]['source']}_search"
+        )
+    
+    # If no results at all
+    return PrivacyResponse(
+        url=url,
+        pp_url=None,
+        success=False,
+        message=f"Could not find privacy policy for {url} using any method.",
+        method_used="all_methods_failed"
+    )
+
+async def get_search_engine_results(domain, page):
+    """Get privacy policy search results from multiple search engines."""
+    results = []
+    
+    # Bing search
+    try:
+        bing_result = await bing_search_fallback_privacy(domain, page)
+        if bing_result:
+            results.append(bing_result)
+    except Exception as e:
+        print(f"Error with Bing search: {e}")
+    
+    # DuckDuckGo search
+    try:
+        ddg_result = await duckduckgo_search_fallback_privacy(domain, page)
+        if ddg_result:
+            results.append(ddg_result)
+    except Exception as e:
+        print(f"Error with DuckDuckGo search: {e}")
+    
+    # Yahoo search
+    try:
+        yahoo_result = await yahoo_search_fallback_privacy(domain, page)
+        if yahoo_result:
+            results.append(yahoo_result)
+    except Exception as e:
+        print(f"Error with Yahoo search: {e}")
+    
+    return results
+
+def similar_urls(url1, url2):
+    """Check if two URLs are similar (accounting for www, trailing slashes, etc.)"""
+    if not url1 or not url2:
+        return False
+    
+    # Normalize URLs for comparison
+    try:
+        # Remove protocol, trailing slashes, and www
+        u1 = urlparse(url1.lower())
+        u2 = urlparse(url2.lower())
+        
+        netloc1 = u1.netloc.replace('www.', '')
+        netloc2 = u2.netloc.replace('www.', '')
+        
+        path1 = u1.path.rstrip('/')
+        path2 = u2.path.rstrip('/')
+        
+        # Check if domains and paths match
+        if netloc1 == netloc2 and (path1 == path2 or 
+                                  path1 in path2 or 
+                                  path2 in path1):
+            return True
+            
+        # Check for URL paths with same "privacy" component
+        if netloc1 == netloc2 and "privacy" in path1 and "privacy" in path2:
+            return True
+    except Exception:
+        return False
+    
+    return False
