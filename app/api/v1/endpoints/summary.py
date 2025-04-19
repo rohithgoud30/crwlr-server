@@ -1,28 +1,14 @@
 from fastapi import APIRouter, Response, HTTPException
-from pydantic import BaseModel, Field
-from typing import Optional, Literal
 import httpx
 import logging
 import re
 from app.core.config import settings
-
+from app.models.summary import SummaryRequest, SummaryResponse
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-class SummaryRequest(BaseModel):
-    text: str = Field(..., description="Text content to summarize")
-    document_type: Literal["Privacy Policy", "Terms of Service"] = Field(..., 
-                          description="Type of document being summarized")
-
-class SummaryResponse(BaseModel):
-    success: bool
-    document_type: str
-    one_sentence_summary: Optional[str] = None
-    hundred_word_summary: Optional[str] = None
-    message: str
 
 def clean_summary_text(text: str) -> str:
     """
