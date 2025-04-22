@@ -2943,6 +2943,7 @@ async def find_tos_via_privacy_policy(page, context):
     1. Finding privacy policy link
     2. Extracting base domain from privacy policy
     3. Using pattern replacement to find ToS URL
+    4. If pattern replacement fails, navigate to the site and use regular ToS detection
     
     Returns:
         tuple of (tos_url, method_used, page)
@@ -2986,9 +2987,8 @@ async def find_tos_via_privacy_policy(page, context):
         if "google.com" in parsed_url.netloc or "play.google.com" in parsed_url.netloc:
             print("❌ Privacy link is from Google domain, not from app developer")
             return None, None, page
-            
+        
         # Try to guess the ToS URL based on the privacy URL patterns
-        privacy_path = parsed_url.path.lower()
         privacy_url_lower = privacy_link.lower()
         
         # Direct replacement of "privacy" with "terms" in the original URL
@@ -3011,11 +3011,56 @@ async def find_tos_via_privacy_policy(page, context):
                         print(f"✅ Created ToS URL by replacing '{old_pattern}' with '{new_pattern}': {tos_url}")
                         return tos_url, "app_store_privacy_to_tos_pattern_replacement", page
         
-        # If no replacements worked, just return the privacy URL itself
-        # This is better than making up a path that doesn't exist
-        print("⚠️ Could not determine ToS URL through pattern replacement, returning privacy URL as fallback")
-        return privacy_link, "app_store_privacy_to_tos_privacy_fallback", page
-            
+        # If we can't do a simple pattern replacement, we'll navigate to the base domain
+        # and use regular ToS detection methods instead of returning the privacy URL
+        base_domain = parsed_url.netloc
+        base_url = f"{parsed_url.scheme}://{base_domain}"
+        
+        print(f"⚠️ Pattern replacement failed. Navigating to base URL: {base_url}")
+        
+        # Save the current URL so we can return to it if needed
+        current_url = await page.evaluate("() => window.location.href")
+        
+        # Navigate to the base URL and use regular ToS detection
+        success, _, _ = await navigate_with_retry(page, base_url, max_retries=2)
+        if not success:
+            print(f"❌ Failed to navigate to {base_url}")
+            # Try to navigate back to the original page
+            try:
+                await page.goto(current_url, timeout=5000, wait_until="domcontentloaded")
+            except Exception as e:
+                print(f"❌ Error returning to original page: {e}")
+            return None, None, page
+        
+        print("🔍 Looking for ToS on developer website...")
+        
+        # First check for user/customer terms links with high priority
+        user_terms_link = await find_user_customer_terms_links(page)
+        if user_terms_link:
+            print(f"✅ Found user/customer terms link on developer site: {user_terms_link}")
+            return user_terms_link, "app_store_base_domain_user_terms", page
+        
+        # Try JavaScript method
+        js_result, page, js_unverified = await find_all_links_js(page, context, None)
+        if js_result:
+            print(f"✅ Found ToS link via JavaScript method on developer site: {js_result}")
+            return js_result, "app_store_base_domain_js", page
+        
+        # Try scroll method
+        scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
+        if scroll_result:
+            print(f"✅ Found ToS link via scroll method on developer site: {scroll_result}")
+            return scroll_result, "app_store_base_domain_scroll", page
+        
+        # If all else fails, return to the app store page
+        print("❌ Could not find ToS on developer website")
+        try:
+            await page.goto(current_url, timeout=5000, wait_until="domcontentloaded")
+        except Exception as e:
+            print(f"❌ Error returning to original page: {e}")
+        
+        return None, None, page
+        
     except Exception as e:
         print(f"❌ Error finding ToS via privacy policy: {e}")
         return None, None, page
