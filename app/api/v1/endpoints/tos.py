@@ -150,361 +150,6 @@ def normalize_domain(url):
         return url  # Return original URL if parsing fails
 
 
-@router.post("/tos", response_model=ToSResponse)
-async def find_tos(request: ToSRequest) -> ToSResponse:
-    """Find Terms of Service page for a given URL."""
-    original_url = request.url
-
-    if not original_url:
-        raise HTTPException(status_code=400, detail="URL is required")
-
-    # First sanitize the URL to handle malformed URLs
-    url = sanitize_url(original_url)
-    
-    if not url:
-        print(f"Invalid URL detected: {original_url}")
-        return ToSResponse(
-            url=original_url,
-            tos_url=None,
-            success=False,
-            message="Invalid URL format. The URL appears to be malformed or non-existent.",
-            method_used="url_validation_failed"
-        )
-
-    # Normalize the URL domain for consistent processing
-    url = normalize_domain(url)
-
-    # Handle URLs without scheme is now unnecessary as sanitize_url adds it
-    # But keep for safety
-    if not url.startswith(("http://", "https://")):
-        url = f"https://{url}"
-
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc
-
-    browser = None
-    playwright = None
-    unverified_result = None  # Initialize unverified_result here
-    high_score_footer_link = None  # Track high-scoring footer links
-
-    try:
-        playwright = await async_playwright().start()
-        browser, context, page, _ = await setup_browser(playwright)
-        success, _, _ = await navigate_with_retry(page, url, max_retries=2)
-        if not success:
-            print("\nMain site navigation had issues, but trying to analyze current page...")
-
-        # First check for user/customer terms links with high priority
-        print("Searching for user/customer terms links with highest priority...")
-        user_terms_link = await find_user_customer_terms_links(page)
-        if user_terms_link:
-            print(f"\n\n⭐⭐⭐ HIGHEST PRIORITY SUCCESS: Found user/customer terms link: {user_terms_link}")
-            # Return immediately with this high priority link
-            return ToSResponse(
-                url=original_url,
-                tos_url=user_terms_link,
-                success=True,
-                message="Found User/Customer Terms of Service (HIGHEST PRIORITY)",
-                method_used="user_customer_supreme_priority"
-            )
-
-        all_links = []
-        method_sources = []
-
-        # 1. JavaScript method - Highest priority
-        print("Trying find_all_links_js approach...")
-        try:
-            js_result, page, js_unverified = await find_all_links_js(page, context, None)
-            if js_result:
-                all_links.append(js_result)
-                method_sources.append((js_result, "javascript"))
-
-                # Track if this is a high-scoring footer link
-                try:
-                    # Check if this looks like ToS from the title
-                    await page.goto(js_result, timeout=3000, wait_until="domcontentloaded")
-                    page_title = await page.title()
-                    title_lower = page_title.lower()
-
-                    # If the title contains key ToS terms, mark it as a
-                    # high-score footer link
-                    if ('terms of service' in title_lower or
-                        'terms of use' in title_lower or
-                        'terms and conditions' in title_lower or
-                        'user agreement' in title_lower):
-                        print(f"✅ Found high-score footer link with ToS-related title: {js_result}")
-                        high_score_footer_link = js_result
-                except Exception as e:
-                    print(f"Error checking footer link title: {e}")
-        except Exception as e:
-            print(f"Error in JavaScript method: {e}")
-
-        # 2. Scroll method - Second highest priority
-        print("Trying smooth_scroll_and_click approach...")
-        try:
-            scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified if 'js_unverified' in locals() else None)
-            if scroll_result:
-                all_links.append(scroll_result)
-                method_sources.append((scroll_result, "scroll"))
-
-                # If no high-score footer link yet, check this one
-                if not high_score_footer_link:
-                    try:
-                        await page.goto(scroll_result, timeout=3000, wait_until="domcontentloaded")
-                        page_title = await page.title()
-                        title_lower = page_title.lower()
-
-                        if ('terms of service' in title_lower or
-                            'terms of use' in title_lower or
-                            'terms and conditions' in title_lower or
-                            'user agreement' in title_lower):
-                            print(f"✅ Found high-score scroll link with ToS-related title: {scroll_result}")
-                            high_score_footer_link = scroll_result
-                    except Exception as e:
-                        print(f"Error checking scroll link title: {e}")
-        except Exception as e:
-            print(f"Error in scroll method: {e}")
-
-        # If we have a high-score footer link with ToS-related title, check if it's a user/customer one first
-        if high_score_footer_link:
-            # Before returning, check if there are any js_unverified or scroll_unverified with user/customer terms
-            user_customer_link = None
-            if 'js_unverified' in locals() and js_unverified and ('user' in js_unverified.lower() or 'customer' in js_unverified.lower()):
-                user_customer_link = js_unverified
-                method = "javascript_user_customer"
-            elif 'scroll_unverified' in locals() and scroll_unverified and ('user' in scroll_unverified.lower() or 'customer' in scroll_unverified.lower()):
-                user_customer_link = scroll_unverified
-                method = "scroll_user_customer"
-                
-            # If we found a user/customer link, prioritize it over the high score footer link
-            if user_customer_link:
-                print(f"🚀🚀🚀 Found user/customer terms in link - PRIORITIZING OVER STANDARD TOS LINK: {user_customer_link}")
-                try:
-                    # Try to navigate to it
-                    await page.goto(user_customer_link, timeout=5000, wait_until="domcontentloaded")
-                    return ToSResponse(
-                        url=original_url,
-                        tos_url=user_customer_link,
-                        success=True,
-                        message="Found User/Customer Terms of Service (highest priority)",
-                        method_used=method
-                    )
-                except Exception as e:
-                    print(f"Error navigating to user/customer link: {e}")
-                    # Still return it even if navigation fails
-                    return ToSResponse(
-                        url=original_url,
-                        tos_url=user_customer_link,
-                        success=True,
-                        message="Found User/Customer Terms of Service (navigation failed but high confidence)",
-                        method_used=method + "_nav_failed"
-                    )
-            
-            # Otherwise proceed with the high score footer link
-            print(f"Prioritizing high-score footer link with ToS-related title: {high_score_footer_link}")
-            return ToSResponse(
-                url=original_url,
-                tos_url=high_score_footer_link,
-                success=True,
-                message="Found Terms of Service using high-priority footer link with ToS title",
-                method_used="footer_title_match"
-            )
-
-        # 3. Search engine methods - Lower priority
-        search_results = []
-        
-        # Try Yahoo search first (often most reliable)
-        try:
-            print("Trying Yahoo search fallback...")
-            yahoo_result = await yahoo_search_fallback(domain, page)
-            if yahoo_result:
-                search_results.append(yahoo_result)
-                all_links.append(yahoo_result)
-                method_sources.append((yahoo_result, "Yahoo"))
-                
-                # If this is a high-confidence result, return it immediately
-                try:
-                    await page.goto(yahoo_result, timeout=5000, wait_until="domcontentloaded")
-                    page_title = await page.title()
-                    title_lower = page_title.lower()
-                    
-                    if ('terms of service' in title_lower or
-                        'terms of use' in title_lower or
-                        'terms and conditions' in title_lower or
-                        'user agreement' in title_lower):
-                        print(f"✅ Found high-confidence Yahoo result with ToS title: {yahoo_result}")
-                        return ToSResponse(
-                            url=original_url,
-                            tos_url=yahoo_result,
-                            success=True,
-                            message="Found Terms of Service using Yahoo method (highest confidence)",
-                            method_used="Yahoo"
-                        )
-                except Exception as e:
-                    print(f"Error verifying Yahoo result title: {e}")
-        except Exception as e:
-            print(f"Error with Yahoo search: {e}")
-
-        # Try Bing search
-        try:
-            print("Trying Bing search fallback...")
-            bing_result = await bing_search_fallback(domain, page)
-            if bing_result:
-                search_results.append(bing_result)
-                all_links.append(bing_result)
-                method_sources.append((bing_result, "Bing"))
-                
-                # Also check if this is a high-confidence result
-                try:
-                    await page.goto(bing_result, timeout=5000, wait_until="domcontentloaded")
-                    page_title = await page.title()
-                    title_lower = page_title.lower()
-                    
-                    if ('terms of service' in title_lower or
-                        'terms of use' in title_lower or
-                        'terms and conditions' in title_lower or
-                        'user agreement' in title_lower):
-                        print(f"✅ Found high-confidence Bing result with ToS title: {bing_result}")
-                        return ToSResponse(
-                            url=original_url,
-                            tos_url=bing_result,
-                            success=True,
-                            message="Found Terms of Service using Bing method (highest confidence)",
-                            method_used="Bing"
-                        )
-                except Exception as e:
-                    print(f"Error verifying Bing result title: {e}")
-        except Exception as e:
-            print(f"Error with Bing search: {e}")
-        
-        # Try DuckDuckGo search
-        try:
-            print("Trying DuckDuckGo search fallback...")
-            ddg_result = await duckduckgo_search_fallback(domain, page)
-            if ddg_result:
-                search_results.append(ddg_result)
-                all_links.append(ddg_result)
-                method_sources.append((ddg_result, "DuckDuckGo"))
-                
-                # Also check if this is a high-confidence result
-                try:
-                    await page.goto(ddg_result, timeout=5000, wait_until="domcontentloaded")
-                    page_title = await page.title()
-                    title_lower = page_title.lower()
-                    
-                    if ('terms of service' in title_lower or
-                        'terms of use' in title_lower or
-                        'terms and conditions' in title_lower or
-                        'user agreement' in title_lower):
-                        print(f"✅ Found high-confidence DuckDuckGo result with ToS title: {ddg_result}")
-                        return ToSResponse(
-                            url=original_url,
-                            tos_url=ddg_result,
-                            success=True,
-                            message="Found Terms of Service using DuckDuckGo method (highest confidence)",
-                            method_used="DuckDuckGo"
-                        )
-                except Exception as e:
-                    print(f"Error verifying DuckDuckGo result title: {e}")
-        except Exception as e:
-            print(f"Error with DuckDuckGo search: {e}")
-
-        # Continue with existing processing for all found links
-        # Deduplicate links
-        seen = set()
-        unique_links = []
-        unique_sources = []
-        for link, src in method_sources:
-            if link and link not in seen:
-                unique_links.append(link)
-                unique_sources.append(src)
-                seen.add(link)
-
-        # Prefer main domain links before scoring
-        main_domain = domain.replace('www.', '')
-        unique_links = prefer_main_domain(unique_links, main_domain)
-        unique_sources = [src for src in unique_sources if any(link in unique_links for link, s in zip(unique_links, unique_sources) if s == src)]
-
-        # Score each link using verify_is_terms_page
-        scored_links = []
-        for link, src in zip(unique_links, unique_sources):
-            try:
-                print(f"Verifying link: {link} (source: {src})")
-                await page.goto(link, timeout=10000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(1000)
-                verification = await verify_is_terms_page(page)
-                score = verification.get("confidence", 0)
-                is_terms = verification.get("isTermsPage", False)
-                scored_links.append({
-                    "link": link,
-                    "source": src,
-                    "score": score,
-                    "is_terms": is_terms,
-                })
-            except Exception as e:
-                print(f"Error verifying link {link}: {e}")
-                continue
-
-        # Sort by score (confidence), prefer is_terms True
-        scored_links.sort(key=lambda x: (x["is_terms"], x["score"]), reverse=True)
-
-        if scored_links:
-            best = scored_links[0]
-            return ToSResponse(
-                url=original_url,
-                tos_url=best["link"],
-                success=True,
-                message=f"Found Terms of Service using {best['source']} method (highest confidence)",
-                method_used=best["source"]
-            )
-
-        # If we reach here, no high-scoring links were found
-        # Fall back to any unverified link found during the process
-        if unverified_result:
-            print(f"No high-scoring links found. Using unverified result: {unverified_result}")
-            return ToSResponse(
-                url=original_url,
-                tos_url=unverified_result,
-                success=True,
-                message="Found unverified Terms of Service URL (lower confidence)",
-                method_used="unverified"
-            )
-        
-        # No links found at all
-        return ToSResponse(
-            url=original_url,
-            tos_url=None,
-            success=False,
-            message="No Terms of Service URL found",
-            method_used="none"
-        )
-
-    except Exception as e:
-        print(f"Error: {e}")
-        # If we have an unverified result despite the error, return it
-        if unverified_result:
-            return handle_error(original_url, unverified_result, str(e))
-        else:
-            return ToSResponse(
-                url=original_url,
-                tos_url=None,
-                success=False,
-                message=f"Error finding Terms of Service: {str(e)}",
-                method_used="error"
-            )
-    finally:
-        if browser:
-            try:
-                await browser.close()
-            except Exception as e:
-                print(f"Error closing browser: {e}")
-        if playwright:
-            try:
-                await playwright.stop()
-            except Exception as e:
-                print(f"Error stopping playwright: {e}")
-
-
 async def setup_browser(playwright=None):
     """
     Setup browser with optimized configurations for performance.
@@ -2742,3 +2387,516 @@ async def find_user_customer_terms_links(page):
     except Exception as e:
         print(f"Error in user/customer terms search: {e}")
         return None
+
+async def find_store_privacy_then_tos(url: str, page, context):
+    """
+    For App Store and Google Play Store links, first find the Privacy Policy,
+    then extract the base URL from it to search for Terms of Service.
+    
+    Args:
+        url: The original URL (App Store or Google Play Store)
+        page: The Playwright page object
+        context: The Playwright context object
+        
+    Returns:
+        Tuple of (tos_url, success_message, method_used)
+    """
+    print("\n=== Starting app store privacy-to-terms search ===")
+    
+    # Only apply this method to App Store and Google Play Store URLs
+    if not (
+        "apps.apple.com" in url.lower() or 
+        "play.google.com" in url.lower() or
+        "itunes.apple.com" in url.lower()
+    ):
+        print("URL is not an App Store or Google Play Store link, skipping this method")
+        return None, None, None
+    
+    print(f"Attempting to find Privacy Policy first for: {url}")
+    
+    try:
+        # Navigate to the store URL
+        success, _, _ = await navigate_with_retry(page, url, max_retries=2)
+        if not success:
+            print("Failed to navigate to store URL")
+            return None, None, None
+        
+        # For Google Play Store
+        if "play.google.com" in url.lower():
+            print("Detected Google Play Store URL")
+            
+            # First try to find the "Developer" section and click it
+            try:
+                # Look for the Developer section
+                developer_section = await page.query_selector('section[aria-label="Developer"]')
+                if developer_section:
+                    print("Found Developer section")
+                    await developer_section.scroll_into_view_if_needed()
+                    await page.wait_for_timeout(500)
+                    
+                    # Find all links in the Developer section
+                    dev_links = await developer_section.query_selector_all('a[href]')
+                    
+                    # Look for Privacy Policy among developer links
+                    privacy_url = None
+                    for link in dev_links:
+                        text = await link.text_content()
+                        href = await link.get_attribute('href')
+                        
+                        if text and href and "privacy" in text.lower():
+                            print(f"Found Privacy Policy link: {href}")
+                            privacy_url = href
+                            break
+                    
+                    # If privacy policy found in developer section, navigate to it
+                    if privacy_url:
+                        try:
+                            print(f"Navigating to privacy policy: {privacy_url}")
+                            await page.goto(privacy_url, timeout=10000, wait_until="domcontentloaded")
+                            
+                            # Extract the base URL from privacy policy
+                            privacy_url_parsed = urlparse(page.url)
+                            privacy_domain = f"{privacy_url_parsed.scheme}://{privacy_url_parsed.netloc}"
+                            
+                            print(f"Extracted base URL from privacy policy: {privacy_domain}")
+                            
+                            # Now try to navigate to the base URL
+                            await page.goto(privacy_domain, timeout=10000, wait_until="domcontentloaded")
+                            
+                            # Try to find ToS using standard methods
+                            js_result, page, js_unverified = await find_all_links_js(page, context, None)
+                            if js_result:
+                                print(f"Found ToS via JavaScript after privacy policy: {js_result}")
+                                return js_result, "Found Terms of Service via developer's privacy policy", "play_store_privacy_to_tos"
+                            
+                            # Try scrolling method if JavaScript method failed
+                            scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified if 'js_unverified' in locals() else None)
+                            if scroll_result:
+                                print(f"Found ToS via scrolling after privacy policy: {scroll_result}")
+                                return scroll_result, "Found Terms of Service via developer's privacy policy", "play_store_privacy_to_tos_scroll"
+                        except Exception as e:
+                            print(f"Error navigating to privacy policy: {e}")
+            except Exception as e:
+                print(f"Error looking for developer section: {e}")
+        
+        # For App Store
+        elif "apps.apple.com" in url.lower() or "itunes.apple.com" in url.lower():
+            print("Detected App Store URL")
+            
+            # Look for developer/publisher info
+            try:
+                # Click on developer name to go to developer page
+                dev_selector = await page.query_selector('a.link[href*="/developer/"]')
+                if dev_selector:
+                    print("Found developer link, clicking it")
+                    dev_href = await dev_selector.get_attribute('href')
+                    await page.goto(dev_href, timeout=10000, wait_until="domcontentloaded")
+                    
+                    # On developer page, look for privacy policy link
+                    privacy_selector = await page.query_selector('a[href*="privacy"]')
+                    if privacy_selector:
+                        privacy_href = await privacy_selector.get_attribute('href')
+                        print(f"Found Privacy Policy link: {privacy_href}")
+                        
+                        # Navigate to privacy policy
+                        await page.goto(privacy_href, timeout=10000, wait_until="domcontentloaded")
+                        
+                        # Extract the base URL
+                        privacy_url_parsed = urlparse(page.url)
+                        privacy_domain = f"{privacy_url_parsed.scheme}://{privacy_url_parsed.netloc}"
+                        
+                        print(f"Extracted base URL from privacy policy: {privacy_domain}")
+                        
+                        # Navigate to the base URL
+                        await page.goto(privacy_domain, timeout=10000, wait_until="domcontentloaded")
+                        
+                        # Try to find ToS using standard methods
+                        js_result, page, js_unverified = await find_all_links_js(page, context, None)
+                        if js_result:
+                            print(f"Found ToS via JavaScript after privacy policy: {js_result}")
+                            return js_result, "Found Terms of Service via developer's privacy policy", "app_store_privacy_to_tos"
+                        
+                        # Try scrolling method if JavaScript method failed
+                        scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified if 'js_unverified' in locals() else None)
+                        if scroll_result:
+                            print(f"Found ToS via scrolling after privacy policy: {scroll_result}")
+                            return scroll_result, "Found Terms of Service via developer's privacy policy", "app_store_privacy_to_tos_scroll"
+            except Exception as e:
+                print(f"Error processing App Store URL: {e}")
+    
+    except Exception as e:
+        print(f"Error in privacy-to-terms method: {e}")
+    
+    print("Could not find ToS via privacy policy method")
+    return None, None, None
+
+@router.post("/tos", response_model=ToSResponse)
+async def find_tos(request: ToSRequest) -> ToSResponse:
+    """Find Terms of Service page for a given URL."""
+    original_url = request.url
+
+    if not original_url:
+        raise HTTPException(status_code=400, detail="URL is required")
+
+    # First sanitize the URL to handle malformed URLs
+    url = sanitize_url(original_url)
+    
+    if not url:
+        print(f"Invalid URL detected: {original_url}")
+        return ToSResponse(
+            url=original_url,
+            tos_url=None,
+            success=False,
+            message="Invalid URL format. The URL appears to be malformed or non-existent.",
+            method_used="url_validation_failed"
+        )
+
+    # Normalize the URL domain for consistent processing
+    url = normalize_domain(url)
+
+    # Handle URLs without scheme is now unnecessary as sanitize_url adds it
+    # But keep for safety
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
+
+    browser = None
+    playwright = None
+    unverified_result = None  # Initialize unverified_result here
+    high_score_footer_link = None  # Track high-scoring footer links
+
+    try:
+        playwright = await async_playwright().start()
+        browser, context, page, _ = await setup_browser(playwright)
+        success, _, _ = await navigate_with_retry(page, url, max_retries=2)
+        if not success:
+            print("\nMain site navigation had issues, but trying to analyze current page...")
+
+        # First check for user/customer terms links with high priority
+        print("Searching for user/customer terms links with highest priority...")
+        user_terms_link = await find_user_customer_terms_links(page)
+        if user_terms_link:
+            print(f"\n\n⭐⭐⭐ HIGHEST PRIORITY SUCCESS: Found user/customer terms link: {user_terms_link}")
+            # Return immediately with this high priority link
+            return ToSResponse(
+                url=original_url,
+                tos_url=user_terms_link,
+                success=True,
+                message="Found User/Customer Terms of Service (HIGHEST PRIORITY)",
+                method_used="user_customer_supreme_priority"
+            )
+        
+        # For App Store and Google Play Store, try the privacy-to-terms method
+        if (
+            "apps.apple.com" in url.lower() or 
+            "play.google.com" in url.lower() or
+            "itunes.apple.com" in url.lower()
+        ):
+            print("Detected app store URL, trying privacy-to-terms method...")
+            tos_url, success_message, method_used = await find_store_privacy_then_tos(url, page, context)
+            if tos_url:
+                return ToSResponse(
+                    url=original_url,
+                    tos_url=tos_url,
+                    success=True,
+                    message=success_message,
+                    method_used=method_used
+                )
+
+        all_links = []
+        method_sources = []
+
+        # 1. JavaScript method - Highest priority
+        print("Trying find_all_links_js approach...")
+        try:
+            js_result, page, js_unverified = await find_all_links_js(page, context, None)
+            if js_result:
+                all_links.append(js_result)
+                method_sources.append((js_result, "javascript"))
+
+                # Track if this is a high-scoring footer link
+                try:
+                    # Check if this looks like ToS from the title
+                    await page.goto(js_result, timeout=3000, wait_until="domcontentloaded")
+                    page_title = await page.title()
+                    title_lower = page_title.lower()
+
+                    # If the title contains key ToS terms, mark it as a
+                    # high-score footer link
+                    if ('terms of service' in title_lower or
+                        'terms of use' in title_lower or
+                        'terms and conditions' in title_lower or
+                        'user agreement' in title_lower):
+                        print(f"✅ Found high-score footer link with ToS-related title: {js_result}")
+                        high_score_footer_link = js_result
+                except Exception as e:
+                    print(f"Error checking footer link title: {e}")
+        except Exception as e:
+            print(f"Error in JavaScript method: {e}")
+
+        # 2. Scroll method - Second highest priority
+        print("Trying smooth_scroll_and_click approach...")
+        try:
+            scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified if 'js_unverified' in locals() else None)
+            if scroll_result:
+                all_links.append(scroll_result)
+                method_sources.append((scroll_result, "scroll"))
+
+                # If no high-score footer link yet, check this one
+                if not high_score_footer_link:
+                    try:
+                        await page.goto(scroll_result, timeout=3000, wait_until="domcontentloaded")
+                        page_title = await page.title()
+                        title_lower = page_title.lower()
+
+                        if ('terms of service' in title_lower or
+                            'terms of use' in title_lower or
+                            'terms and conditions' in title_lower or
+                            'user agreement' in title_lower):
+                            print(f"✅ Found high-score scroll link with ToS-related title: {scroll_result}")
+                            high_score_footer_link = scroll_result
+                    except Exception as e:
+                        print(f"Error checking scroll link title: {e}")
+        except Exception as e:
+            print(f"Error in scroll method: {e}")
+
+        # If we have a high-score footer link with ToS-related title, check if it's a user/customer one first
+        if high_score_footer_link:
+            # Before returning, check if there are any js_unverified or scroll_unverified with user/customer terms
+            user_customer_link = None
+            if 'js_unverified' in locals() and js_unverified and ('user' in js_unverified.lower() or 'customer' in js_unverified.lower()):
+                user_customer_link = js_unverified
+                method = "javascript_user_customer"
+            elif 'scroll_unverified' in locals() and scroll_unverified and ('user' in scroll_unverified.lower() or 'customer' in scroll_unverified.lower()):
+                user_customer_link = scroll_unverified
+                method = "scroll_user_customer"
+                
+            # If we found a user/customer link, prioritize it over the high score footer link
+            if user_customer_link:
+                print(f"🚀🚀🚀 Found user/customer terms in link - PRIORITIZING OVER STANDARD TOS LINK: {user_customer_link}")
+                try:
+                    # Try to navigate to it
+                    await page.goto(user_customer_link, timeout=5000, wait_until="domcontentloaded")
+                    return ToSResponse(
+                        url=original_url,
+                        tos_url=user_customer_link,
+                        success=True,
+                        message="Found User/Customer Terms of Service (highest priority)",
+                        method_used=method
+                    )
+                except Exception as e:
+                    print(f"Error navigating to user/customer link: {e}")
+                    # Still return it even if navigation fails
+                    return ToSResponse(
+                        url=original_url,
+                        tos_url=user_customer_link,
+                        success=True,
+                        message="Found User/Customer Terms of Service (navigation failed but high confidence)",
+                        method_used=method + "_nav_failed"
+                    )
+            
+            # Otherwise proceed with the high score footer link
+            print(f"Prioritizing high-score footer link with ToS-related title: {high_score_footer_link}")
+            return ToSResponse(
+                url=original_url,
+                tos_url=high_score_footer_link,
+                success=True,
+                message="Found Terms of Service using high-priority footer link with ToS title",
+                method_used="footer_title_match"
+            )
+
+        # 3. Search engine methods - Lower priority
+        search_results = []
+        
+        # Try Yahoo search first (often most reliable)
+        try:
+            print("Trying Yahoo search fallback...")
+            yahoo_result = await yahoo_search_fallback(domain, page)
+            if yahoo_result:
+                search_results.append(yahoo_result)
+                all_links.append(yahoo_result)
+                method_sources.append((yahoo_result, "Yahoo"))
+                
+                # If this is a high-confidence result, return it immediately
+                try:
+                    await page.goto(yahoo_result, timeout=5000, wait_until="domcontentloaded")
+                    page_title = await page.title()
+                    title_lower = page_title.lower()
+                    
+                    if ('terms of service' in title_lower or
+                        'terms of use' in title_lower or
+                        'terms and conditions' in title_lower or
+                        'user agreement' in title_lower):
+                        print(f"✅ Found high-confidence Yahoo result with ToS title: {yahoo_result}")
+                        return ToSResponse(
+                            url=original_url,
+                            tos_url=yahoo_result,
+                            success=True,
+                            message="Found Terms of Service using Yahoo method (highest confidence)",
+                            method_used="Yahoo"
+                        )
+                except Exception as e:
+                    print(f"Error verifying Yahoo result title: {e}")
+        except Exception as e:
+            print(f"Error with Yahoo search: {e}")
+
+        # Try Bing search
+        try:
+            print("Trying Bing search fallback...")
+            bing_result = await bing_search_fallback(domain, page)
+            if bing_result:
+                search_results.append(bing_result)
+                all_links.append(bing_result)
+                method_sources.append((bing_result, "Bing"))
+                
+                # Also check if this is a high-confidence result
+                try:
+                    await page.goto(bing_result, timeout=5000, wait_until="domcontentloaded")
+                    page_title = await page.title()
+                    title_lower = page_title.lower()
+                    
+                    if ('terms of service' in title_lower or
+                        'terms of use' in title_lower or
+                        'terms and conditions' in title_lower or
+                        'user agreement' in title_lower):
+                        print(f"✅ Found high-confidence Bing result with ToS title: {bing_result}")
+                        return ToSResponse(
+                            url=original_url,
+                            tos_url=bing_result,
+                            success=True,
+                            message="Found Terms of Service using Bing method (highest confidence)",
+                            method_used="Bing"
+                        )
+                except Exception as e:
+                    print(f"Error verifying Bing result title: {e}")
+        except Exception as e:
+            print(f"Error with Bing search: {e}")
+        
+        # Try DuckDuckGo search
+        try:
+            print("Trying DuckDuckGo search fallback...")
+            ddg_result = await duckduckgo_search_fallback(domain, page)
+            if ddg_result:
+                search_results.append(ddg_result)
+                all_links.append(ddg_result)
+                method_sources.append((ddg_result, "DuckDuckGo"))
+                
+                # Also check if this is a high-confidence result
+                try:
+                    await page.goto(ddg_result, timeout=5000, wait_until="domcontentloaded")
+                    page_title = await page.title()
+                    title_lower = page_title.lower()
+                    
+                    if ('terms of service' in title_lower or
+                        'terms of use' in title_lower or
+                        'terms and conditions' in title_lower or
+                        'user agreement' in title_lower):
+                        print(f"✅ Found high-confidence DuckDuckGo result with ToS title: {ddg_result}")
+                        return ToSResponse(
+                            url=original_url,
+                            tos_url=ddg_result,
+                            success=True,
+                            message="Found Terms of Service using DuckDuckGo method (highest confidence)",
+                            method_used="DuckDuckGo"
+                        )
+                except Exception as e:
+                    print(f"Error verifying DuckDuckGo result title: {e}")
+        except Exception as e:
+            print(f"Error with DuckDuckGo search: {e}")
+
+        # Continue with existing processing for all found links
+        # Deduplicate links
+        seen = set()
+        unique_links = []
+        unique_sources = []
+        for link, src in method_sources:
+            if link and link not in seen:
+                unique_links.append(link)
+                unique_sources.append(src)
+                seen.add(link)
+
+        # Prefer main domain links before scoring
+        main_domain = domain.replace('www.', '')
+        unique_links = prefer_main_domain(unique_links, main_domain)
+        unique_sources = [src for src in unique_sources if any(link in unique_links for link, s in zip(unique_links, unique_sources) if s == src)]
+
+        # Score each link using verify_is_terms_page
+        scored_links = []
+        for link, src in zip(unique_links, unique_sources):
+            try:
+                print(f"Verifying link: {link} (source: {src})")
+                await page.goto(link, timeout=10000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(1000)
+                verification = await verify_is_terms_page(page)
+                score = verification.get("confidence", 0)
+                is_terms = verification.get("isTermsPage", False)
+                scored_links.append({
+                    "link": link,
+                    "source": src,
+                    "score": score,
+                    "is_terms": is_terms,
+                })
+            except Exception as e:
+                print(f"Error verifying link {link}: {e}")
+                continue
+
+        # Sort by score (confidence), prefer is_terms True
+        scored_links.sort(key=lambda x: (x["is_terms"], x["score"]), reverse=True)
+
+        if scored_links:
+            best = scored_links[0]
+            return ToSResponse(
+                url=original_url,
+                tos_url=best["link"],
+                success=True,
+                message=f"Found Terms of Service using {best['source']} method (highest confidence)",
+                method_used=best["source"]
+            )
+
+        # If we reach here, no high-scoring links were found
+        # Fall back to any unverified link found during the process
+        if unverified_result:
+            print(f"No high-scoring links found. Using unverified result: {unverified_result}")
+            return ToSResponse(
+                url=original_url,
+                tos_url=unverified_result,
+                success=True,
+                message="Found unverified Terms of Service URL (lower confidence)",
+                method_used="unverified"
+            )
+        
+        # No links found at all
+        return ToSResponse(
+            url=original_url,
+            tos_url=None,
+            success=False,
+            message="No Terms of Service URL found",
+            method_used="none"
+        )
+
+    except Exception as e:
+        print(f"Error: {e}")
+        # If we have an unverified result despite the error, return it
+        if unverified_result:
+            return handle_error(original_url, unverified_result, str(e))
+        else:
+            return ToSResponse(
+                url=original_url,
+                tos_url=None,
+                success=False,
+                message=f"Error finding Terms of Service: {str(e)}",
+                method_used="error"
+            )
+    finally:
+        if browser:
+            try:
+                await browser.close()
+            except Exception as e:
+                print(f"Error closing browser: {e}")
+        if playwright:
+            try:
+                await playwright.stop()
+            except Exception as e:
+                print(f"Error stopping playwright: {e}")
