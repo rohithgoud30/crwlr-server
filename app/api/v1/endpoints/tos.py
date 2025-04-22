@@ -3032,58 +3032,12 @@ async def find_tos_via_privacy_policy(page, context):
                 print(f"✅ Found ToS link via scroll method on developer site: {scroll_result}")
                 return scroll_result, "app_store_privacy_to_tos_scroll", page
         
-        # If navigation failed or we didn't find ToS links, try common ToS URLs without navigation
-        print("🔍 Using common ToS URL patterns based on privacy policy domain")
-        
-        # Prioritized list of common ToS URL patterns
-        common_tos_patterns = [
-            # Legal section - terms of service
-            f"https://{base_domain}/legal/terms-of-service",
-            f"https://www.{base_domain.replace('www.', '')}/legal/terms-of-service",
-            
-            # Legal section - terms
-            f"https://{base_domain}/legal/terms",
-            f"https://www.{base_domain.replace('www.', '')}/legal/terms",
-            
-            # Root terms of service
-            f"https://{base_domain}/terms-of-service",
-            f"https://www.{base_domain.replace('www.', '')}/terms-of-service",
-            
-            # Root terms
-            f"https://{base_domain}/terms",
-            f"https://www.{base_domain.replace('www.', '')}/terms",
-            
-            # Other common variations
-            f"https://{base_domain}/tos",
-            f"https://www.{base_domain.replace('www.', '')}/tos",
-            f"https://{base_domain}/legal",
-            f"https://www.{base_domain.replace('www.', '')}/legal",
-            f"https://{base_domain}/terms-conditions",
-            f"https://www.{base_domain.replace('www.', '')}/terms-conditions",
-            f"https://{base_domain}/terms-and-conditions",
-            f"https://www.{base_domain.replace('www.', '')}/terms-and-conditions"
-        ]
-        
-        # Try to validate some common patterns by checking if they exist
-        for tos_pattern in common_tos_patterns[:4]:  # Try validating only first few patterns
-            try:
-                print(f"🔍 Checking if URL exists: {tos_pattern}")
-                response = await page.context.request.head(tos_pattern, timeout=2000)
-                if response.ok:
-                    print(f"✅ Validated ToS URL exists: {tos_pattern}")
-                    return tos_pattern, "app_store_privacy_to_tos_validated_pattern", page
-            except Exception as e:
-                print(f"⚠️ Error checking URL {tos_pattern}: {e}")
-        
-        # If validation fails, try the first common pattern anyway
-        if len(common_tos_patterns) > 0:
-            print(f"🔍 Returning likely ToS URL without verification: {common_tos_patterns[0]}")
-            return common_tos_patterns[0], "app_store_privacy_to_tos_common_pattern", page
-        
-        # If everything else fails, return to the app store page and look for direct links
-        print("🔍 Returning to app store page to search for direct ToS links...")
+        # If navigation failed or we couldn't find ToS links, return to the app store page
+        print("🔍 Returning to app store page...")
         try:
             await page.goto(original_url, timeout=5000, wait_until="domcontentloaded")
+            
+            # Look for direct ToS links on the app store page
             direct_tos = await page.evaluate("""
                 () => {
                     // Look for any terms-related links
@@ -3110,11 +3064,12 @@ async def find_tos_via_privacy_policy(page, context):
                 print(f"✅ Found direct ToS link on app store page: {direct_tos}")
                 return direct_tos, "app_store_direct_tos_link", page
         except Exception as e:
-            print(f"⚠️ Error searching for direct ToS link: {e}")
+            print(f"⚠️ Error returning to app store page: {e}")
         
+        # No ToS found through any method
         print("❌ Could not find ToS through any method")
         return None, None, page
-        
+    
     except Exception as e:
         print(f"❌ Error finding ToS via privacy policy: {e}")
         return None, None, page
