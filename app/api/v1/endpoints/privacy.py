@@ -408,6 +408,130 @@ async def extract_app_store_privacy_link(page):
         return None
 
 
+async def extract_play_store_privacy_link(page, url):
+    """
+    Extract privacy policy link from Google Play Store app pages.
+    Transform app URLs to data safety URLs and extract the privacy policy link.
+    """
+    try:
+        print("🤖 Checking if this is a Google Play Store page...")
+        
+        # Check if this is a Play Store page
+        is_play_store = await page.evaluate("""
+            () => {
+                return window.location.href.includes('play.google.com/store/apps') ||
+                       document.querySelector('meta[property="og:url"]')?.content?.includes('play.google.com');
+            }
+        """)
+        
+        if not is_play_store:
+            print("Not a Play Store page, skipping Play Store specific extraction")
+            return None
+            
+        print("✅ Detected Google Play Store page, looking for app ID")
+        
+        # Extract app ID from URL
+        app_id = None
+        try:
+            # Check current page URL for ID
+            app_id = await page.evaluate("""
+                () => {
+                    const url = new URL(window.location.href);
+                    return url.searchParams.get('id');
+                }
+            """)
+            
+            # If no ID in current URL, try from the original URL
+            if not app_id and url:
+                # Extract ID from the original URL
+                match = re.search(r'id=([^&]+)', url)
+                if match:
+                    app_id = match.group(1)
+                    print(f"Extracted app ID from original URL: {app_id}")
+        except Exception as e:
+            print(f"Error extracting app ID: {e}")
+            
+        if not app_id:
+            print("Could not extract app ID from Play Store URL")
+            
+            # Try fallback to find privacy policy directly on current page
+            privacy_link = await page.evaluate("""
+                () => {
+                    // Look for privacy policy link with various patterns
+                    const privacyLinks = Array.from(document.querySelectorAll('a[href]')).filter(a => {
+                        const text = a.textContent.toLowerCase();
+                        const href = a.href.toLowerCase();
+                        return text.includes('privacy') || 
+                              href.includes('privacy') || 
+                              text.includes('data policy');
+                    });
+                    
+                    if (privacyLinks.length > 0) {
+                        return privacyLinks[0].href;
+                    }
+                    return null;
+                }
+            """)
+            
+            if privacy_link:
+                print(f"Found privacy policy link directly on Play Store page: {privacy_link}")
+                return privacy_link
+                
+            return None
+            
+        # Construct the data safety URL
+        data_safety_url = f"https://play.google.com/store/apps/datasafety?id={app_id}&hl=en_US"
+        print(f"Navigating to data safety page: {data_safety_url}")
+        
+        # Navigate to the data safety page
+        try:
+            await page.goto(data_safety_url, wait_until="domcontentloaded", timeout=10000)
+            print("Successfully navigated to data safety page")
+        except Exception as e:
+            print(f"Error navigating to data safety page: {e}")
+            return None
+            
+        # Wait a moment for content to load
+        await page.wait_for_timeout(2000)
+        
+        # Extract the privacy policy link from the data safety page
+        privacy_link = await page.evaluate("""
+            () => {
+                // Look for the div containing privacy policy link
+                const divElements = Array.from(document.querySelectorAll('div'));
+                for (const div of divElements) {
+                    if (div.textContent.includes('privacy policy')) {
+                        const link = div.querySelector('a');
+                        if (link) return link.href;
+                    }
+                }
+                
+                // Fallback: look for any link containing privacy
+                const privacyLinks = Array.from(document.querySelectorAll('a[href]')).filter(a => {
+                    return a.href.includes('privacy') || 
+                           a.textContent.toLowerCase().includes('privacy');
+                });
+                
+                if (privacyLinks.length > 0) {
+                    return privacyLinks[0].href;
+                }
+                
+                return null;
+            }
+        """)
+        
+        if privacy_link:
+            print(f"🤖 Found privacy policy link in Play Store data safety page: {privacy_link}")
+            return privacy_link
+        
+        print("No privacy policy link found in Play Store data safety page")
+        return None
+        
+    except Exception as e:
+        print(f"Error extracting Play Store privacy link: {e}")
+        return None
+
+
 @router.post("/privacy", response_model=PrivacyResponse)
 async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
     """Find Privacy Policy page for a given URL."""
@@ -451,7 +575,19 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         if not success:
             print("\nMain site navigation had issues, but trying to analyze current page...")
 
-        # Check if this is an App Store page first
+        # Check if this is a Google Play Store page first
+        play_store_privacy_link = await extract_play_store_privacy_link(page, url)
+        if play_store_privacy_link:
+            print(f"\n\n🤖 HIGHEST PRIORITY SUCCESS: Found Google Play Store privacy link: {play_store_privacy_link}")
+            return PrivacyResponse(
+                url=original_url,
+                pp_url=play_store_privacy_link,
+                success=True,
+                message="Found privacy policy link in Google Play Store",
+                method_used="play_store_detection"
+            )
+
+        # Check if this is an App Store page
         app_store_privacy_link = await extract_app_store_privacy_link(page)
         if app_store_privacy_link:
             print(f"\n\n🍏 HIGHEST PRIORITY SUCCESS: Found App Store privacy link: {app_store_privacy_link}")
