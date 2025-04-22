@@ -402,7 +402,6 @@ async def extract_app_store_privacy_link(page):
         
         print("No privacy policy link found in App Store page")
         return None
-        
     except Exception as e:
         print(f"Error extracting App Store privacy link: {e}")
         return None
