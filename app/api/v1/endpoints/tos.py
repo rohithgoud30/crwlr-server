@@ -24,33 +24,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
 ]
 
-# Known ToS URLs for major sites with anti-bot protection
-# This helps bypass navigation issues for common sites
-KNOWN_TOS_URLS = {
-    "facebook.com": "https://www.facebook.com/terms.php",
-    "instagram.com": "https://help.instagram.com/581066165581870",
-    "twitter.com": "https://twitter.com/tos",
-    "x.com": "https://twitter.com/tos",
-    "tiktok.com": "https://www.tiktok.com/legal/terms-of-service",
-    "linkedin.com": "https://www.linkedin.com/legal/user-agreement",
-    "microsoft.com": "https://www.microsoft.com/en-us/servicesagreement",
-    "google.com": "https://policies.google.com/terms",
-    "youtube.com": "https://www.youtube.com/t/terms",
-    "amazon.com": "https://www.amazon.com/gp/help/customer/display.html?nodeId=GLSBYFE9MGKKQXXM",
-    "netflix.com": "https://help.netflix.com/legal/termsofuse",
-    "apple.com": "https://www.apple.com/legal/internet-services/terms/site.html",
-    "github.com": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
-    "reddit.com": "https://www.redditinc.com/policies/user-agreement",
-    "pinterest.com": "https://policy.pinterest.com/en/terms-of-service",
-    "quora.com": "https://www.quora.com/about/tos",
-    "whatsapp.com": "https://www.whatsapp.com/legal/terms-of-service",
-    "snapchat.com": "https://snap.com/en-US/terms",
-    "threads.net": "https://help.instagram.com/515230437301944",
-    "twitch.tv": "https://www.twitch.tv/p/en/legal/terms-of-service/",
-    "discord.com": "https://discord.com/terms",
-    "spotify.com": "https://www.spotify.com/us/legal/end-user-agreement/",
-}
-
 # Priorities for exact match terms
 exactMatchPriorities = {
     "terms of service": 100,
@@ -97,19 +70,18 @@ LINK_EVALUATION_WEIGHTS = {
     "position": 0.1,
 }
 
-# Configuration for common Terms of Service paths to check
-TOS_COMMON_PATHS = [
-    "/terms",
-    "/terms-of-service",
-    "/terms-of-use",
-    "/terms-and-conditions",
-    "/tos",
-    "/legal/terms",
-    "/legal",
-    "/legal/terms-of-service",
-    "/legal/terms-of-use",
-    "/about/legal/terms-of-service",
-    "/about/terms"
+# Common URL path patterns for ToS (for pattern matching, not hardcoded paths)
+TOS_PATH_PATTERNS = [
+    r"/terms",
+    r"/terms-of-service",
+    r"/terms-of-use",
+    r"/terms-and-conditions",
+    r"/tos",
+    r"/legal/terms",
+    r"/legal",
+    r"/terms-conditions",
+    r"/user-agreement",
+    r"/eula",
 ]
 
 def sanitize_url(url: str) -> str:
@@ -221,35 +193,6 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
 
         url = normalize_url(url)
         
-        # Check for known ToS URLs (especially for sites with anti-bot protection)
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc.lower()
-        
-        # Handle www prefix
-        if domain.startswith('www.'):
-            clean_domain = domain[4:]  # Remove www. prefix
-        else:
-            clean_domain = domain
-            
-        # Check for TLD variations and subdomains
-        known_domain = None
-        for known_domain_key in KNOWN_TOS_URLS.keys():
-            if clean_domain == known_domain_key or clean_domain.endswith('.' + known_domain_key):
-                known_domain = known_domain_key
-                break
-                
-        if known_domain:
-            tos_url = KNOWN_TOS_URLS[known_domain]
-            logger.info(f"Found ToS URL for {domain} in known URLs: {tos_url}")
-            return ToSResponse(
-                url=url,
-                tos_url=tos_url,
-                success=True,
-                message=f"Terms of Service found via known URL mapping",
-                method_used="known_url"
-            )
-        
-        # Continue with existing logic for sites without known ToS URLs
         # Check if this is an app store URL
         if is_app_store_url(url):
             logger.info(f"Detected App Store URL: {url}")
@@ -262,18 +205,6 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     message="Terms of Service found via App Store",
                     method_used="app_store"
                 )
-            
-        # Try to find ToS via common paths/URLs
-        tos_url = await find_tos_via_common_paths(url)
-        if tos_url:
-            logger.info(f"Found ToS via common paths: {tos_url}")
-            return ToSResponse(
-                url=url,
-                tos_url=tos_url,
-                success=True,
-                message="Terms of Service found via common paths",
-                method_used="common_paths"
-            )
         
         if is_play_store_url(url):
             logger.info(f"Detected Play Store URL: {url}")
@@ -287,6 +218,18 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     method_used="play_store"
                 )
 
+        # Try to find ToS via common paths/URLs
+        tos_url = await find_tos_via_common_paths(url)
+        if tos_url:
+            logger.info(f"Found ToS via common paths: {tos_url}")
+            return ToSResponse(
+                url=url,
+                tos_url=tos_url,
+                success=True,
+                message="Terms of Service found via common paths",
+                method_used="common_paths"
+            )
+        
         # Use direct HTML inspection approach
         playwright = await async_playwright().start()
         browser, browser_context, page, _ = await setup_browser(playwright)
@@ -3031,7 +2974,7 @@ async def find_play_store_tos(url: str) -> str:
     return None
 
 async def find_tos_via_common_paths(url: str) -> str:
-    """Try to find Terms of Service via common URL patterns on the domain."""
+    """Try to find Terms of Service via intelligent URL pattern detection."""
     try:
         # Parse the base URL
         parsed_url = urlparse(url)
@@ -3050,69 +2993,113 @@ async def find_tos_via_common_paths(url: str) -> str:
                 logger.warning(f"Failed to navigate to base URL: {base_url}")
                 return None
                 
-            # Use JavaScript to check for common terms patterns in links
-            tos_link = await page.evaluate("""
+            # Use JavaScript to find link patterns that might be ToS 
+            possible_tos_urls = await page.evaluate("""
                 () => {
-                    // Common terms path patterns to check in URLs
-                    const patterns = [
+                    // Get all links on the page
+                    const allLinks = Array.from(document.querySelectorAll('a[href]'))
+                        .filter(link => link.href && link.href.trim() !== '' && 
+                                !link.href.startsWith('javascript:') &&
+                                !link.href.includes('mailto:') &&
+                                !link.href.includes('tel:'));
+                    
+                    // Strong pattern matching for ToS links
+                    const tosMatches = [];
+                    
+                    const tosTextPatterns = [
+                        'terms of service', 
+                        'terms of use', 
+                        'terms and conditions',
+                        'terms & conditions',
+                        'user agreement', 
+                        'legal terms',
+                        'terms',
+                        'tos',
+                        'user terms',
+                        'legal'
+                    ];
+                    
+                    const tosUrlPatterns = [
                         '/terms',
                         '/tos',
                         '/terms-of-service',
                         '/terms-of-use',
+                        '/terms-and-conditions',
                         '/legal/terms',
-                        '/legal'
+                        '/legal',
+                        '/user-agreement',
+                        '/eula'
                     ];
                     
-                    // Get the base URL
-                    const baseUrl = window.location.origin;
-                    
-                    // Get all links on the page
-                    const links = Array.from(document.querySelectorAll('a[href]'));
-                    const candidates = [];
-                    
-                    // First check for exact matches in href attributes
-                    for (const link of links) {
-                        const href = link.href.toLowerCase();
+                    // Helper function to score links
+                    const scoreLink = (link) => {
                         const text = link.textContent.trim().toLowerCase();
+                        const href = link.href.toLowerCase();
+                        let score = 0;
                         
-                        // Skip non-http links, images, etc.
-                        if (!href.startsWith('http')) continue;
-                        
-                        // Check for pattern matches in URL
-                        for (const pattern of patterns) {
-                            if (href.includes(pattern)) {
-                                candidates.push({
-                                    href: link.href,
-                                    text: text,
-                                    score: 100 + (text.includes('terms') ? 50 : 0)
-                                });
-                                break;
+                        // Text content matching
+                        tosTextPatterns.forEach((pattern, idx) => {
+                            if (text.includes(pattern)) {
+                                // Higher score for exact matches at start of text
+                                if (text.startsWith(pattern)) {
+                                    score += 100 - idx; // Give higher priority to patterns earlier in the array
+                                } else {
+                                    score += 50 - idx;
+                                }
                             }
+                        });
+                        
+                        // URL pattern matching
+                        tosUrlPatterns.forEach((pattern, idx) => {
+                            if (href.includes(pattern)) {
+                                score += 30 - idx;
+                            }
+                        });
+                        
+                        // Boost score for footer links (often where ToS is found)
+                        if (link.closest('footer') || 
+                            link.closest('[id*="foot"]') || 
+                            link.closest('[class*="foot"]')) {
+                            score *= 1.5;
                         }
                         
-                        // Check for text matches
-                        if (text.includes('terms of service') || 
-                            text.includes('terms of use') || 
-                            text.includes('terms and conditions')) {
-                            candidates.push({
-                                href: link.href,
-                                text: text,
-                                score: 150
-                            });
+                        // Boost for links in the footer or legal sections
+                        if (href.includes('/legal') || href.includes('/terms')) {
+                            score += 20;
                         }
-                    }
+                        
+                        return {link: link, href: href, text: text, score: score};
+                    };
                     
-                    // Sort by score and return the best match
-                    if (candidates.length > 0) {
-                        candidates.sort((a, b) => b.score - a.score);
-                        return candidates[0].href;
-                    }
+                    // Score all links
+                    const scoredLinks = allLinks
+                        .map(scoreLink)
+                        .filter(item => item.score > 0); // Only consider links with positive scores
                     
-                    return null;
+                    // Sort by score (highest first)
+                    scoredLinks.sort((a, b) => b.score - a.score);
+                    
+                    // Return top 5 candidates with their scores
+                    return scoredLinks.slice(0, 5).map(item => ({
+                        url: item.href,
+                        text: item.text,
+                        score: item.score
+                    }));
                 }
             """)
             
-            return tos_link
+            # Log the candidates we found
+            if possible_tos_urls and len(possible_tos_urls) > 0:
+                logger.info(f"Found {len(possible_tos_urls)} potential ToS URL candidates:")
+                for idx, candidate in enumerate(possible_tos_urls):
+                    logger.info(f"  Candidate #{idx+1}: {candidate['text']} - {candidate['url']} (Score: {candidate['score']})")
+                
+                # Return the highest-scoring candidate
+                best_candidate = possible_tos_urls[0]['url']
+                logger.info(f"Selected best ToS URL candidate: {best_candidate}")
+                return best_candidate
+            
+            return None
         finally:
             # Clean up browser resources
             await browser_context.close()
@@ -3123,40 +3110,56 @@ async def find_tos_via_common_paths(url: str) -> str:
         logger.error(f"Error in find_tos_via_common_paths: {str(e)}")
         return None
 
-async def find_tos_via_html_inspection(page) -> str:
+async def find_tos_via_html_inspection(url: str) -> str:
     """Try to find Terms of Service via HTML inspection."""
     try:
-        # Use JavaScript to search for ToS links in the HTML content
-        links = await page.evaluate("""
-            () => {
-                const tosTerms = ['terms of service', 'terms of use', 'terms and conditions', 'legal terms'];
-                const links = [];
-                
-                document.querySelectorAll('a[href]').forEach(link => {
-                    const text = link.textContent.trim().toLowerCase();
-                    const href = link.href;
-                    
-                    for (const term of tosTerms) {
-                        if (text.includes(term) || href.toLowerCase().includes(term.replace(/ /g, '-'))) {
-                            links.push({
-                                href: href,
-                                text: text,
-                                match: term
-                            });
-                            break;
-                        }
-                    }
-                });
-                
-                return links;
-            }
-        """)
+        # Set up browser to inspect HTML
+        playwright = await async_playwright().start()
+        browser, browser_context, page, _ = await setup_browser(playwright)
         
-        if links and len(links) > 0:
-            # Return the best matching link
-            return links[0]['href']
+        try:
+            # Navigate to the URL
+            success, _, _ = await navigate_with_retry(page, url)
+            if not success:
+                return None
+                
+            # Use JavaScript to search for ToS links in the HTML content
+            links = await page.evaluate("""
+                () => {
+                    const tosTerms = ['terms of service', 'terms of use', 'terms and conditions', 'legal terms'];
+                    const links = [];
+                    
+                    document.querySelectorAll('a[href]').forEach(link => {
+                        const text = link.textContent.trim().toLowerCase();
+                        const href = link.href;
+                        
+                        for (const term of tosTerms) {
+                            if (text.includes(term) || href.toLowerCase().includes(term.replace(/ /g, '-'))) {
+                                links.push({
+                                    href: href,
+                                    text: text,
+                                    match: term
+                                });
+                                break;
+                            }
+                        }
+                    });
+                    
+                    return links;
+                }
+            """)
             
-        return None
+            if links and len(links) > 0:
+                # Return the best matching link
+                return links[0]['href']
+                
+            return None
+        finally:
+            # Ensure browser resources are cleaned up
+            await browser_context.close()
+            await browser.close()
+            await playwright.stop()
+            
     except Exception as e:
         print(f"Error during HTML inspection: {e}")
         return None
