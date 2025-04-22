@@ -194,15 +194,15 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         if not success:
             print("\nMain site navigation had issues, but trying to analyze current page...")
 
-        # Special handling for App Store and Play Store pages
+        # Special handling for App Store and Play Store - extract ToS via privacy policy link
         app_store_tos, app_store_method, page = await find_tos_via_privacy_policy(page, context)
         if app_store_tos:
-            print(f"\n\n🔍 APP STORE/PLAY STORE SUCCESS: Found direct ToS link: {app_store_tos}")
+            print(f"\n\n🔍 APP STORE/PLAY STORE SUCCESS: Found ToS via privacy policy link: {app_store_tos}")
             return ToSResponse(
                 url=original_url,
                 tos_url=app_store_tos,
                 success=True,
-                message="Found Terms of Service for app directly from store page",
+                message="Found Terms of Service via app's privacy policy link",
                 method_used=app_store_method
             )
 
@@ -2939,8 +2939,8 @@ async def extract_play_store_privacy_link(page):
 
 async def find_tos_via_privacy_policy(page, context):
     """
-    Find ToS for App Store and Play Store links using direct detection on the app store page.
-    This function is kept for compatibility but no longer follows privacy policy URLs.
+    Find ToS directly on App Store and Play Store pages,
+    without navigating away from the store page.
     
     Returns:
         tuple of (tos_url, method_used, page)
@@ -2960,117 +2960,96 @@ async def find_tos_via_privacy_policy(page, context):
         print("Not an App Store or Play Store page, skipping app-specific ToS finder")
         return None, None, page
     
-    print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, looking for app developer ToS")
+    print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, looking for ToS links")
     
-    # Get the app developer name
-    developer_name = await page.evaluate("""
-        () => {
-            try {
-                // For Play Store
-                if (window.location.href.includes('play.google.com')) {
-                    // Look for developer info section
-                    const devElements = Array.from(document.querySelectorAll('a[href*="developer"]'));
-                    for (const el of devElements) {
-                        if (el.textContent && el.textContent.trim().length > 0) {
-                            return el.textContent.trim();
-                        }
-                    }
-                    
-                    // Alternative approach
-                    const metaTags = document.querySelectorAll('meta');
-                    for (const tag of metaTags) {
-                        if (tag.getAttribute('itemprop') === 'author') {
-                            return tag.getAttribute('content');
-                        }
-                    }
-                } 
-                // For App Store
-                else if (window.location.href.includes('apps.apple.com')) {
-                    const devElement = document.querySelector('.app-header__identity');
-                    if (devElement) {
-                        return devElement.textContent.trim();
-                    }
-                    
-                    // Alternative developer link
-                    const devLink = document.querySelector('a.link[href*="/developer/"]');
-                    if (devLink) {
-                        return devLink.textContent.trim();
-                    }
-                }
-                return null;
-            } catch (e) {
-                console.error("Error finding developer name:", e);
-                return null;
-            }
-        }
-    """)
-    
-    if developer_name:
-        print(f"✅ Found app developer: {developer_name}")
-    else:
-        print("❌ Could not identify app developer")
-    
-    # Look for direct links to ToS on the current page
-    direct_tos = await page.evaluate("""
-        () => {
-            try {
-                // Find all links
+    # Look for ToS links directly on the store page - no navigation to other domains
+    try:
+        # Extract all links that might be ToS related
+        tos_links = await page.evaluate("""
+            () => {
+                // Get all links on the page
                 const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                const tosLinks = allLinks.filter(link => {
+                
+                // Find links that look like app-specific ToS (not Google/Apple ToS)
+                const appLinks = allLinks.filter(link => {
                     const text = link.textContent.toLowerCase().trim();
                     const href = link.href.toLowerCase();
                     
-                    // Ignore Google/Apple store links
-                    if (href.includes('google.com/store') || 
-                        href.includes('apple.com/app-store') ||
-                        href.includes('play.google.com') ||
-                        href.includes('apps.apple.com') ||
-                        href.includes('support.google.com') ||
-                        href.includes('support.apple.com') ||
-                        href.includes('myaccount.google.com') ||
-                        href.includes('id.apple.com')) {
-                        return false;
-                    }
+                    // Check if this might be an app-specific ToS link
+                    // We want to exclude Google/Apple own ToS links
+                    const isAppSpecific = 
+                        (text.includes('terms') || 
+                         text.includes('tos') || 
+                         href.includes('terms') || 
+                         href.includes('tos')) && 
+                        // Exclude Google/Apple own terms
+                        !href.includes('google.com/terms') &&
+                        !href.includes('play.google.com/about/play-terms') &&
+                        !href.includes('myaccount.google.com') &&
+                        !href.includes('apple.com/legal') &&
+                        // Make sure the link goes to the app developer's site
+                        !href.includes('play.google.com') &&
+                        !href.includes('apps.apple.com');
                     
-                    // Look for terms-related links
-                    return (text.includes('terms') || 
-                            href.includes('terms') || 
-                            text.includes('conditions') ||
-                            href.includes('tos') ||
-                            text.includes('tos') ||
-                            text.includes('legal'));
+                    return isAppSpecific;
                 });
                 
-                if (tosLinks.length > 0) {
-                    console.log("Found direct ToS link:", tosLinks[0].href);
-                    return tosLinks[0].href;
+                // Return the filtered app-specific links
+                return appLinks.map(link => ({
+                    text: link.textContent.trim(),
+                    href: link.href
+                }));
+            }
+        """)
+        
+        if tos_links and len(tos_links) > 0:
+            # Log all found links
+            print(f"Found {len(tos_links)} potential app-specific ToS links:")
+            for i, link in enumerate(tos_links):
+                print(f"Link #{i+1}: {link['text']} - {link['href']}")
+            
+            # Return the first app-specific ToS link
+            return tos_links[0]['href'], "app_store_direct_app_tos", page
+        
+        print("No app-specific ToS links found, looking for developer info...")
+        
+        # Try to find developer website link and check it
+        developer_site = await page.evaluate("""
+            () => {
+                // On Play Store, look for developer website link
+                let devLink = document.querySelector('a[href*="developer"]');
+                if (!devLink) {
+                    // Look for any developer attribution link
+                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                    devLink = allLinks.find(link => 
+                        link.textContent.toLowerCase().includes('developer') ||
+                        link.textContent.toLowerCase().includes('website')
+                    );
+                }
+                
+                if (devLink) {
+                    return {
+                        text: devLink.textContent.trim(),
+                        href: devLink.href
+                    };
                 }
                 return null;
-            } catch (e) {
-                console.error("Error finding direct ToS link:", e);
-                return null;
             }
-        }
-    """)
-    
-    if direct_tos:
-        print(f"✅ Found direct ToS link on app store page: {direct_tos}")
-        return direct_tos, "app_store_direct_tos", page
-    
-    # If direct link not found, try using our standard methods on the current page
-    print("🔍 No direct ToS link found, using standard detection methods...")
-    
-    # Try JavaScript method first
-    js_result, page, js_unverified = await find_all_links_js(page, context, None)
-    if js_result:
-        print(f"✅ Found ToS link via JavaScript method: {js_result}")
-        return js_result, "app_store_js_detection", page
-    
-    # Try scroll method
-    scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
-    if scroll_result:
-        print(f"✅ Found ToS link via scroll method: {scroll_result}")
-        return scroll_result, "app_store_scroll_detection", page
-    
-    print("❌ Could not find app-specific ToS through any method")
-    return None, None, page
+        """)
+        
+        if developer_site:
+            print(f"Found developer site: {developer_site['text']} - {developer_site['href']}")
+            
+            # Check if this link looks like it might lead to ToS
+            if ('terms' in developer_site['href'].lower() or 
+                'tos' in developer_site['href'].lower() or 
+                'legal' in developer_site['href'].lower()):
+                print(f"Developer link appears to contain ToS reference")
+                return developer_site['href'], "app_store_developer_tos_link", page
+        
+        print("❌ No app-specific ToS links found on store page")
+        return None, None, page
+        
+    except Exception as e:
+        print(f"❌ Error finding ToS on store page: {e}")
+        return None, None, page
