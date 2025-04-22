@@ -6,6 +6,7 @@ import time
 import logging
 from fastapi import APIRouter, HTTPException, status
 from playwright.async_api import async_playwright
+import aiohttp
 
 from app.models.tos import ToSRequest, ToSResponse
 
@@ -229,28 +230,49 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
             )
             
         # Try to find ToS via privacy policy check
-        tos_url = await find_tos_via_privacy_policy(url)
-        if tos_url:
-            logger.info(f"Found ToS via privacy policy check: {tos_url}")
-            return ToSResponse(
-                url=url,
-                tos_url=tos_url,
-                success=True,
-                message="Terms of Service found via privacy policy",
-                method_used="privacy_policy"
-            )
+        # First set up browser for privacy policy checks
+        playwright = await async_playwright().start()
+        browser, browser_context, page, _ = await setup_browser(playwright)
+        context = {}  # Create an empty context dictionary
+        
+        try:
+            tos_url = await find_tos_via_privacy_policy(page, context)
+            if tos_url:
+                logger.info(f"Found ToS via privacy policy check: {tos_url}")
+                return ToSResponse(
+                    url=url,
+                    tos_url=tos_url,
+                    success=True,
+                    message="Terms of Service found via privacy policy",
+                    method_used="privacy_policy"
+                )
+        finally:
+            # Ensure browser resources are cleaned up
+            await browser_context.close()
+            await browser.close()
+            await playwright.stop()
             
         # Try to find user agreement or customer terms links
-        tos_url = await find_user_terms(url)
-        if tos_url:
-            logger.info(f"Found ToS via user/customer terms: {tos_url}")
-            return ToSResponse(
-                url=url,
-                tos_url=tos_url,
-                success=True,
-                message="Terms of Service found via user/customer terms",
-                method_used="user_terms"
-            )
+        playwright = await async_playwright().start()
+        browser, browser_context, page, _ = await setup_browser(playwright)
+        
+        try:
+            await navigate_with_retry(page, url)
+            tos_url = await find_user_terms(page)
+            if tos_url:
+                logger.info(f"Found ToS via user/customer terms: {tos_url}")
+                return ToSResponse(
+                    url=url,
+                    tos_url=tos_url,
+                    success=True,
+                    message="Terms of Service found via user/customer terms",
+                    method_used="user_terms"
+                )
+        finally:
+            # Ensure browser resources are cleaned up
+            await browser_context.close()
+            await browser.close()
+            await playwright.stop()
 
         # If we get here, we couldn't find the ToS
         logger.warning(f"Could not find ToS for URL: {url}")
@@ -2651,7 +2673,7 @@ async def extract_app_store_privacy_link(page):
                     }
                     
                     // If we found any developer links but none are privacy policy,
-                    // return the first one as a fallback
+                    # return the first one as a fallback
                     if (devLinks.length > 0) {
                         return {
                             href: devLinks[0].href,
@@ -2940,18 +2962,132 @@ async def find_play_store_tos(url: str) -> str:
 
 async def find_tos_via_common_paths(url: str) -> str:
     """Try to find Terms of Service via common URL paths."""
-    # Implementation would go here
-    return None
+    try:
+        # Common paths where ToS might be found
+        common_paths = [
+            "/terms",
+            "/terms-of-service",
+            "/terms-of-use",
+            "/terms-and-conditions",
+            "/tos",
+            "/legal/terms",
+            "/legal",
+            "/legal/terms-of-service",
+            "/legal/terms-of-use",
+            "/about/legal/terms-of-service",
+            "/about/terms"
+        ]
+        
+        # Parse the base URL
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        
+        # Try each common path
+        async with aiohttp.ClientSession() as session:
+            for path in common_paths:
+                test_url = f"{base_url}{path}"
+                try:
+                    # Simple HEAD request to check if the URL exists
+                    async with session.head(test_url, timeout=2) as response:
+                        if response.status == 200:
+                            return test_url
+                except:
+                    # Ignore errors and try next path
+                    continue
+                
+        return None
+    except Exception as e:
+        print(f"Error checking common paths: {e}")
+        return None
 
 async def find_tos_via_html_inspection(url: str) -> str:
     """Try to find Terms of Service via HTML inspection."""
-    # Implementation would go here
-    return None
+    try:
+        # Set up browser to inspect HTML
+        playwright = await async_playwright().start()
+        browser, browser_context, page, _ = await setup_browser(playwright)
+        
+        try:
+            # Navigate to the URL
+            success, _, _ = await navigate_with_retry(page, url)
+            if not success:
+                return None
+                
+            # Use JavaScript to search for ToS links in the HTML content
+            links = await page.evaluate("""
+                () => {
+                    const tosTerms = ['terms of service', 'terms of use', 'terms and conditions', 'legal terms'];
+                    const links = [];
+                    
+                    document.querySelectorAll('a[href]').forEach(link => {
+                        const text = link.textContent.trim().toLowerCase();
+                        const href = link.href;
+                        
+                        for (const term of tosTerms) {
+                            if (text.includes(term) || href.toLowerCase().includes(term.replace(/ /g, '-'))) {
+                                links.push({
+                                    href: href,
+                                    text: text,
+                                    match: term
+                                });
+                                break;
+                            }
+                        }
+                    });
+                    
+                    return links;
+                }
+            """)
+            
+            if links and len(links) > 0:
+                # Return the best matching link
+                return links[0]['href']
+                
+            return None
+        finally:
+            # Ensure browser resources are cleaned up
+            await browser_context.close()
+            await browser.close()
+            await playwright.stop()
+            
+    except Exception as e:
+        print(f"Error during HTML inspection: {e}")
+        return None
 
-async def find_user_terms(url: str) -> str:
+async def find_user_terms(page) -> str:
     """Try to find user agreement or customer terms links."""
-    # Implementation would go here
-    return None
+    try:
+        # Implementation would go here - for now just check for user terms links
+        links = await page.evaluate("""
+            () => {
+                const links = [];
+                document.querySelectorAll('a[href]').forEach(link => {
+                    const text = link.textContent.trim().toLowerCase();
+                    const href = link.href;
+                    
+                    if (text.includes('user agreement') || 
+                        text.includes('customer agreement') ||
+                        text.includes('user terms') || 
+                        text.includes('customer terms')) {
+                        
+                        links.push({
+                            href: href,
+                            text: text
+                        });
+                    }
+                });
+                return links;
+            }
+        """)
+        
+        if links and len(links) > 0:
+            # Return the first matching link
+            return links[0]['href']
+        
+        return None
+    except Exception as e:
+        print(f"Error finding user terms: {e}")
+        return None
 
 def normalize_url(url: str) -> str:
     """Normalize URL by adding protocol if missing."""
