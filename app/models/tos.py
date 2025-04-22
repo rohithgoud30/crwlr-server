@@ -3,7 +3,6 @@ from typing import Optional
 
 class ToSRequest(BaseModel):
     url: str
-    headless_mode: Optional[bool] = True
 
 class ToSResponse(BaseModel):
     url: str
