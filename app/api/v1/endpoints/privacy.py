@@ -408,10 +408,10 @@ async def extract_app_store_privacy_link(page):
         return None
 
 
-async def extract_play_store_privacy_link(page, url):
+async def extract_play_store_privacy_link(page):
     """
-    Extract privacy policy link from Google Play Store app pages.
-    Transform app URLs to data safety URLs and extract the privacy policy link.
+    Extract privacy policy link from Google Play Store pages.
+    Converts app detail URLs to data safety URLs and extracts the privacy policy link.
     """
     try:
         print("🤖 Checking if this is a Google Play Store page...")
@@ -419,7 +419,7 @@ async def extract_play_store_privacy_link(page, url):
         # Check if this is a Play Store page
         is_play_store = await page.evaluate("""
             () => {
-                return window.location.href.includes('play.google.com/store/apps') ||
+                return window.location.href.includes('play.google.com/store/apps') || 
                        document.querySelector('meta[property="og:url"]')?.content?.includes('play.google.com');
             }
         """)
@@ -428,103 +428,296 @@ async def extract_play_store_privacy_link(page, url):
             print("Not a Play Store page, skipping Play Store specific extraction")
             return None
             
-        print("✅ Detected Google Play Store page, looking for app ID")
+        print("✅ Detected Google Play Store page, looking for privacy policy link")
         
-        # Extract app ID from URL
-        app_id = None
-        try:
-            # Check current page URL for ID
+        # Check if we're already on a data safety page, otherwise convert URL
+        current_url = await page.evaluate("() => window.location.href")
+        is_data_safety_page = "datasafety" in current_url
+        
+        # If we're on app details page, extract the app ID and navigate to data safety page
+        if not is_data_safety_page:
             app_id = await page.evaluate("""
                 () => {
-                    const url = new URL(window.location.href);
-                    return url.searchParams.get('id');
+                    const urlParams = new URLSearchParams(window.location.search);
+                    return urlParams.get('id');
                 }
             """)
             
-            # If no ID in current URL, try from the original URL
-            if not app_id and url:
-                # Extract ID from the original URL
-                match = re.search(r'id=([^&]+)', url)
-                if match:
-                    app_id = match.group(1)
-                    print(f"Extracted app ID from original URL: {app_id}")
-        except Exception as e:
-            print(f"Error extracting app ID: {e}")
-            
-        if not app_id:
-            print("Could not extract app ID from Play Store URL")
-            
-            # Try fallback to find privacy policy directly on current page
-            privacy_link = await page.evaluate("""
-                () => {
-                    // Look for privacy policy link with various patterns
-                    const privacyLinks = Array.from(document.querySelectorAll('a[href]')).filter(a => {
-                        const text = a.textContent.toLowerCase();
-                        const href = a.href.toLowerCase();
-                        return text.includes('privacy') || 
-                              href.includes('privacy') || 
-                              text.includes('data policy');
-                    });
-                    
-                    if (privacyLinks.length > 0) {
-                        return privacyLinks[0].href;
-                    }
-                    return null;
-                }
-            """)
-            
-            if privacy_link:
-                print(f"Found privacy policy link directly on Play Store page: {privacy_link}")
-                return privacy_link
+            if not app_id:
+                print("❌ Could not extract app ID from Play Store URL")
+                return None
                 
-            return None
+            print(f"📱 Found app ID: {app_id}")
+            data_safety_url = f"https://play.google.com/store/apps/datasafety?id={app_id}&hl=en_US"
+            print(f"🔍 Navigating to data safety page: {data_safety_url}")
             
-        # Construct the data safety URL
-        data_safety_url = f"https://play.google.com/store/apps/datasafety?id={app_id}&hl=en_US"
-        print(f"Navigating to data safety page: {data_safety_url}")
+            # Navigate to the data safety page
+            try:
+                await page.goto(data_safety_url, timeout=5000, wait_until="domcontentloaded")
+                print("✅ Successfully navigated to data safety page")
+            except Exception as e:
+                print(f"❌ Error navigating to data safety page: {e}")
+                return None
         
-        # Navigate to the data safety page
-        try:
-            await page.goto(data_safety_url, wait_until="domcontentloaded", timeout=10000)
-            print("Successfully navigated to data safety page")
-        except Exception as e:
-            print(f"Error navigating to data safety page: {e}")
-            return None
-            
-        # Wait a moment for content to load
-        await page.wait_for_timeout(2000)
-        
-        # Extract the privacy policy link from the data safety page
-        privacy_link = await page.evaluate("""
+        # Get app developer name first - important to distinguish their links
+        developer_name = await page.evaluate("""
             () => {
-                // Look for the div containing privacy policy link
-                const divElements = Array.from(document.querySelectorAll('div'));
-                for (const div of divElements) {
-                    if (div.textContent.includes('privacy policy')) {
-                        const link = div.querySelector('a');
-                        if (link) return link.href;
-                    }
+                // Different ways to find developer name
+                const developerElement = document.querySelector('[href*="developer/"]');
+                if (developerElement) {
+                    return developerElement.textContent.trim();
                 }
                 
-                // Fallback: look for any link containing privacy
-                const privacyLinks = Array.from(document.querySelectorAll('a[href]')).filter(a => {
-                    return a.href.includes('privacy') || 
-                           a.textContent.toLowerCase().includes('privacy');
-                });
-                
-                if (privacyLinks.length > 0) {
-                    return privacyLinks[0].href;
+                // Alternative: look for developer name in meta
+                const metaElement = document.querySelector('meta[name="author"]');
+                if (metaElement) {
+                    return metaElement.getAttribute('content');
                 }
                 
                 return null;
             }
         """)
         
-        if privacy_link:
-            print(f"🤖 Found privacy policy link in Play Store data safety page: {privacy_link}")
-            return privacy_link
+        if developer_name:
+            print(f"📱 App developer: {developer_name}")
         
-        print("No privacy policy link found in Play Store data safety page")
+        # Now extract the privacy policy link from the data safety page
+        privacy_link = await page.evaluate("""
+            (developerName) => {
+                // ======= APPROACH 1: EXACT TARGET =======
+                // Look for the EXACT structure mentioned in the example
+                // <div><span>...developer's...privacy policy<a href="LINK">...</a></span></div>
+                
+                const allDivs = Array.from(document.querySelectorAll('div'));
+                
+                // Find divs with the specific developer policy text pattern
+                for (const div of allDivs) {
+                    const text = div.textContent?.toLowerCase() || '';
+                    const hasDevPattern = text.includes('developer') && 
+                                          text.includes('privacy');
+                                       
+                    if (hasDevPattern) {
+                        // Look for a direct link inside this div
+                        const links = Array.from(div.querySelectorAll('a[href]'));
+                        
+                        // Exclude Google domains completely
+                        const nonGoogleLinks = links.filter(link => {
+                            const href = link.href.toLowerCase();
+                            return !href.includes('google.com') && 
+                                   !href.includes('play.google.com') &&
+                                   !href.includes('support.google.com') &&
+                                   !href.includes('myaccount.google.com');
+                        });
+                        
+                        if (nonGoogleLinks.length > 0) {
+                            console.log("Found developer policy direct match!");
+                            return {
+                                href: nonGoogleLinks[0].href,
+                                text: nonGoogleLinks[0].textContent.trim(),
+                                element: 'exact-pattern-match',
+                                confidence: 'very-high'
+                            };
+                        }
+                    }
+                }
+                
+                // ======= APPROACH 2: LOOK FOR HIGHLIGHTED SECTIONS =======
+                // Look in sections that are likely about data collection/privacy
+                const dataSections = Array.from(document.querySelectorAll('section, div[role="region"], [aria-label*="privacy"], [aria-label*="data"]'));
+                
+                for (const section of dataSections) {
+                    const links = Array.from(section.querySelectorAll('a[href]'));
+                    
+                    // Skip Google links and find privacy related ones
+                    const privacyLinks = links.filter(link => {
+                        const href = link.href.toLowerCase();
+                        const text = link.textContent.toLowerCase();
+                        
+                        if (href.includes('google.com') || 
+                            href.includes('play.google.com') ||
+                            href.includes('myaccount.google.com')) {
+                            return false;
+                        }
+                        
+                        // Look for privacy keywords
+                        return href.includes('privacy') || 
+                               text.includes('privacy') ||
+                               href.includes('policy') ||
+                               text.includes('policy');
+                    });
+                    
+                    if (privacyLinks.length > 0) {
+                        console.log("Found developer privacy link in data section");
+                        return {
+                            href: privacyLinks[0].href,
+                            text: privacyLinks[0].textContent.trim(),
+                            element: 'data-section-privacy-link',
+                            confidence: 'high'
+                        };
+                    }
+                }
+                
+                // ======= APPROACH 3: DEVELOPER WEBSITE HEURISTIC =======
+                // If we know the developer name, look for their domain in links
+                if (developerName) {
+                    const developerLower = developerName.toLowerCase();
+                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                    
+                    // Look for links that might be from the developer's domain
+                    const potentialDevLinks = allLinks.filter(link => {
+                        const href = link.href.toLowerCase();
+                        
+                        // Exclude Google and common platforms
+                        if (href.includes('google.com') || 
+                            href.includes('play.google.com') ||
+                            href.includes('android.com') ||
+                            href.includes('myaccount.google.com')) {
+                            return false;
+                        }
+                        
+                        // Include if URL contains developer name or has privacy
+                        const devNameParts = developerLower.split(' ');
+                        const hasDeveloperName = devNameParts.some(part => {
+                            // Only check for significant parts (3+ chars)
+                            return part.length > 2 && href.includes(part);
+                        });
+                        
+                        return hasDeveloperName || 
+                               href.includes('privacy') || 
+                               href.includes('policy');
+                    });
+                    
+                    if (potentialDevLinks.length > 0) {
+                        // Prioritize privacy links first
+                        const privacyDevLinks = potentialDevLinks.filter(link => 
+                            link.href.toLowerCase().includes('privacy') || 
+                            link.textContent.toLowerCase().includes('privacy')
+                        );
+                        
+                        if (privacyDevLinks.length > 0) {
+                            console.log("Found developer's privacy link by name match");
+                            return {
+                                href: privacyDevLinks[0].href,
+                                text: privacyDevLinks[0].textContent.trim(),
+                                element: 'developer-name-match',
+                                confidence: 'medium'
+                            };
+                        }
+                        
+                        console.log("Found developer link but not privacy specific");
+                        return {
+                            href: potentialDevLinks[0].href, 
+                            text: potentialDevLinks[0].textContent.trim(),
+                            element: 'general-developer-link',
+                            confidence: 'low'
+                        };
+                    }
+                }
+                
+                // ======= APPROACH 4: ANY EXTERNAL PRIVACY LINK =======
+                // Last resort - any non-Google link with privacy in it
+                const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                const externalPrivacyLinks = allLinks.filter(link => {
+                    const href = link.href.toLowerCase();
+                    const text = link.textContent.toLowerCase();
+                    
+                    // Must not be a Google domain
+                    if (href.includes('google.com') || 
+                        href.includes('android.com') ||
+                        href.includes('play.google.com') ||
+                        href.includes('myaccount.google.com')) {
+                        return false;
+                    }
+                    
+                    // Must be privacy related
+                    return href.includes('privacy') || 
+                           text.includes('privacy') ||
+                           (href.includes('policy') && text.includes('policy'));
+                });
+                
+                if (externalPrivacyLinks.length > 0) {
+                    console.log("Found non-Google privacy link as fallback");
+                    return {
+                        href: externalPrivacyLinks[0].href,
+                        text: externalPrivacyLinks[0].textContent.trim(),
+                        element: 'external-privacy-fallback',
+                        confidence: 'low'
+                    };
+                }
+                
+                // Nothing found
+                return null;
+            }
+        """, developer_name)
+        
+        if privacy_link:
+            print(f"🤖 Found developer privacy policy link in Play Store: {privacy_link['text']} - {privacy_link['href']}")
+            print(f"Source element: {privacy_link['element']} (Confidence: {privacy_link['confidence']})")
+            
+            # Final validation to ensure it's not a Google domain
+            if ("google.com" in privacy_link['href'] or 
+                "android.com" in privacy_link['href'] or
+                "myaccount.google.com" in privacy_link['href']):
+                print("⚠️ Rejecting link that appears to be from Google, not the developer")
+                return None
+                
+            return privacy_link['href']
+        
+        # Additional fallback: Go to app details page and look there
+        if is_data_safety_page and app_id:
+            print("🔍 Data safety page didn't have developer privacy link, checking app details page...")
+            app_details_url = f"https://play.google.com/store/apps/details?id={app_id}"
+            
+            try:
+                await page.goto(app_details_url, timeout=5000, wait_until="domcontentloaded")
+                print("✅ Navigated to app details page to look for developer info")
+                
+                # Look for developer site or privacy link
+                dev_link = await page.evaluate("""
+                    () => {
+                        // Look for developer website link
+                        const developerSite = document.querySelector('a[href*="//"][href*="."][aria-label*="Developer"], a[href*="//"][href*="."][aria-label*="website"]');
+                        if (developerSite) {
+                            return {
+                                href: developerSite.href,
+                                text: developerSite.textContent.trim(),
+                                element: 'developer-website',
+                                confidence: 'medium'
+                            };
+                        }
+                        
+                        // Alternative: any external link in the developer section
+                        const developerSection = document.querySelector('[aria-label*="Developer"], [aria-label*="developer"]');
+                        if (developerSection) {
+                            const links = Array.from(developerSection.querySelectorAll('a[href*="//"][href*="."]'))
+                                .filter(link => !link.href.includes('google.com') && 
+                                               !link.href.includes('play.google.com'));
+                            
+                            if (links.length > 0) {
+                                return {
+                                    href: links[0].href,
+                                    text: links[0].textContent.trim(),
+                                    element: 'developer-section-link',
+                                    confidence: 'low'
+                                };
+                            }
+                        }
+                        
+                        return null;
+                    }
+                """)
+                
+                if dev_link:
+                    print(f"📱 Found developer website link: {dev_link['text']} - {dev_link['href']}")
+                    print(f"Source: {dev_link['element']} (Confidence: {dev_link['confidence']})")
+                    
+                    # Don't return this directly as it's not a privacy policy,
+                    # but it could be used for further navigation if needed
+                    # For now, we'll stick with a clearer "not found" result
+            except Exception as e:
+                print(f"❌ Error checking app details page: {e}")
+        
+        print("❌ No developer privacy policy link found in Play Store page")
         return None
         
     except Exception as e:
@@ -576,9 +769,9 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
             print("\nMain site navigation had issues, but trying to analyze current page...")
 
         # Check if this is a Google Play Store page first
-        play_store_privacy_link = await extract_play_store_privacy_link(page, url)
+        play_store_privacy_link = await extract_play_store_privacy_link(page)
         if play_store_privacy_link:
-            print(f"\n\n🤖 HIGHEST PRIORITY SUCCESS: Found Google Play Store privacy link: {play_store_privacy_link}")
+            print(f"\n\n🤖 HIGHEST PRIORITY SUCCESS: Found Play Store privacy link: {play_store_privacy_link}")
             return PrivacyResponse(
                 url=original_url,
                 pp_url=play_store_privacy_link,
@@ -587,7 +780,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 method_used="play_store_detection"
             )
 
-        # Check if this is an App Store page
+        # Check if this is an App Store page next
         app_store_privacy_link = await extract_app_store_privacy_link(page)
         if app_store_privacy_link:
             print(f"\n\n🍏 HIGHEST PRIORITY SUCCESS: Found App Store privacy link: {app_store_privacy_link}")
