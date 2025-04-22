@@ -4,7 +4,6 @@ import re
 import traceback
 import time
 import logging
-import aiohttp
 from fastapi import APIRouter, HTTPException, status
 from playwright.async_api import async_playwright
 
@@ -218,19 +217,20 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     method_used="play_store"
                 )
 
-        # Try to find ToS via common paths/URLs
-        tos_url = await find_tos_via_common_paths(url)
+        # Try HTML inspection approach first - more lightweight
+        logger.info("Attempting to find ToS via HTML inspection...")
+        tos_url = await find_tos_via_html_inspection(url)
         if tos_url:
-            logger.info(f"Found ToS via common paths: {tos_url}")
+            logger.info(f"Found ToS via HTML inspection: {tos_url}")
             return ToSResponse(
                 url=url,
                 tos_url=tos_url,
                 success=True,
-                message="Terms of Service found via common paths",
-                method_used="common_paths"
+                message="Terms of Service found via HTML inspection",
+                method_used="html_inspection"
             )
         
-        # Use direct HTML inspection approach
+        # Use browser approach
         playwright = await async_playwright().start()
         browser, browser_context, page, _ = await setup_browser(playwright)
         
@@ -239,26 +239,82 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
             success, _, _ = await navigate_with_retry(page, url)
             if not success:
                 logger.warning(f"Failed to navigate to URL: {url}")
+                
+                # Try search engine fallbacks
+                domain = normalize_domain(url)
+                logger.info(f"Trying search engine fallbacks for domain: {domain}")
+                
+                # Try DuckDuckGo search
+                try:
+                    logger.info("Trying DuckDuckGo search fallback...")
+                    ddg_result = await duckduckgo_search_fallback(domain, page)
+                    if ddg_result:
+                        logger.info(f"Found ToS via DuckDuckGo search: {ddg_result}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=ddg_result,
+                            success=True,
+                            message="Terms of Service found via DuckDuckGo search",
+                            method_used="duckduckgo_search"
+                        )
+                except Exception as e:
+                    logger.error(f"Error with DuckDuckGo search: {e}")
+                
+                # Try Bing search
+                try:
+                    logger.info("Trying Bing search fallback...")
+                    bing_result = await bing_search_fallback(domain, page)
+                    if bing_result:
+                        logger.info(f"Found ToS via Bing search: {bing_result}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=bing_result,
+                            success=True,
+                            message="Terms of Service found via Bing search",
+                            method_used="bing_search"
+                        )
+                except Exception as e:
+                    logger.error(f"Error with Bing search: {e}")
+                
+                # Try Yahoo search
+                try:
+                    logger.info("Trying Yahoo search fallback...")
+                    yahoo_result = await yahoo_search_fallback(domain, page)
+                    if yahoo_result:
+                        logger.info(f"Found ToS via Yahoo search: {yahoo_result}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=yahoo_result,
+                            success=True,
+                            message="Terms of Service found via Yahoo search",
+                            method_used="yahoo_search"
+                        )
+                except Exception as e:
+                    logger.error(f"Error with Yahoo search: {e}")
+                
+                # If all searches fail, return navigation failed
                 return ToSResponse(
                     url=url,
                     success=False,
                     message="Failed to navigate to URL",
                     method_used="navigation_failed"
                 )
-                
-            # Try to find ToS via HTML inspection
-            tos_url = await find_tos_via_html_inspection(page)
+            
+            # Try to find user agreement or customer terms links FIRST for highest priority
+            logger.info("Attempting to find ToS via user/customer terms (highest priority)...")
+            tos_url = await find_user_customer_terms_links(page)
             if tos_url:
-                logger.info(f"Found ToS via HTML inspection: {tos_url}")
+                logger.info(f"Found ToS via user/customer terms: {tos_url}")
                 return ToSResponse(
                     url=url,
                     tos_url=tos_url,
                     success=True,
-                    message="Terms of Service found via HTML inspection",
-                    method_used="html_inspection"
+                    message="Terms of Service found via user/customer terms",
+                    method_used="user_terms"
                 )
                 
             # Try to find ToS via privacy policy check
+            logger.info("Attempting to find ToS via privacy policy...")
             context = {}  # Create an empty context dictionary
             tos_url = await find_tos_via_privacy_policy(page, context)
             if tos_url:
@@ -269,18 +325,6 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     success=True,
                     message="Terms of Service found via privacy policy",
                     method_used="privacy_policy"
-                )
-                
-            # Try to find user agreement or customer terms links
-            tos_url = await find_user_terms(page)
-            if tos_url:
-                logger.info(f"Found ToS via user/customer terms: {tos_url}")
-                return ToSResponse(
-                    url=url,
-                    tos_url=tos_url,
-                    success=True,
-                    message="Terms of Service found via user/customer terms",
-                    method_used="user_terms"
                 )
                 
             # If we get here, we couldn't find the ToS
@@ -391,37 +435,35 @@ async def navigate_with_retry(page, url, max_retries=2):
         try:
             # Add shorter random delay between attempts
             if attempt > 0:
-                delay = random.randint(300, 500)  # Reduced delay
-                print(f"Waiting {delay/1000}s before retry {attempt+1}...")
+                delay = random.randint(200, 300)  # Reduced delay for better performance
+                logger.info(f"Waiting {delay/1000}s before retry {attempt+1}...")
                 await page.wait_for_timeout(delay)
 
-            print(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
+            logger.info(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
 
             # Optimized navigation strategy with shorter timeout
-            response = await page.goto(url, timeout=5000, wait_until="domcontentloaded")
+            response = await page.goto(url, timeout=3000, wait_until="domcontentloaded")  # Reduced timeout to 3 seconds
 
             # Quick check for anti-bot measures
             is_anti_bot, patterns = await detect_anti_bot_patterns(page)
             if is_anti_bot:
                 if attempt < max_retries - 1:
-                    print(
-                        f"Detected anti-bot protection, trying alternative approach..."
-                    )
+                    logger.warning(f"Detected anti-bot protection, trying alternative approach...")
                     continue
                 else:
-                    print("All navigation attempts blocked by anti-bot protection")
+                    logger.warning("All navigation attempts blocked by anti-bot protection")
                     return False, response, patterns
 
             # Check HTTP status
             if response.ok:
-                print(f"Navigation successful: HTTP {response.status}")
+                logger.info(f"Navigation successful: HTTP {response.status}")
                 return True, response, []
             else:
-                print(f"Received HTTP {response.status}")
+                logger.warning(f"Received HTTP {response.status}")
         except Exception as e:
-            print(f"Navigation error: {e}")
+            logger.error(f"Navigation error: {e}")
 
-    print("All navigation attempts failed")
+    logger.warning("All navigation attempts failed")
     return False, None, []
 
 
@@ -430,38 +472,41 @@ async def detect_anti_bot_patterns(page):
     Optimized anti-bot detection that runs faster.
     """
     try:
-        # Simplified check for common anti-bot patterns
+        # Quick way to check for common anti-bot patterns without complex DOM operations
         anti_bot_patterns = await page.evaluate(
             """() => {
-        const html = document.documentElement.innerHTML.toLowerCase();
-            
-            // Check for common anti-bot keywords
-            const isCloudflare = html.includes('cloudflare') && 
-                                (html.includes('security check') || 
-                                 html.includes('challenge'));
-            const isRecaptcha = html.includes('recaptcha');
-            const isHcaptcha = html.includes('hcaptcha');
-            const isBotDetection = html.includes('bot detection') || 
-                                  (html.includes('please wait') && 
-                                   html.includes('redirecting'));
+                // Optimize: Only check the head and first parts of the body
+                const firstPartOfHtml = document.head.innerHTML + 
+                                      document.body.innerHTML.substring(0, 5000);
+                const html = firstPartOfHtml.toLowerCase();
                 
-            return {
-                isAntiBot: isCloudflare || isRecaptcha || isHcaptcha || isBotDetection,
-                url: window.location.href,
-                title: document.title
-            };
-    }"""
+                // Check for common anti-bot keywords with faster string checks
+                const isCloudflare = html.indexOf('cloudflare') !== -1 && 
+                                  (html.indexOf('security check') !== -1 || 
+                                   html.indexOf('challenge') !== -1);
+                const isRecaptcha = html.indexOf('recaptcha') !== -1;
+                const isHcaptcha = html.indexOf('hcaptcha') !== -1;
+                const isBotDetection = html.indexOf('bot detection') !== -1 || 
+                                    (html.indexOf('please wait') !== -1 && 
+                                     html.indexOf('redirecting') !== -1);
+                    
+                return {
+                    isAntiBot: isCloudflare || isRecaptcha || isHcaptcha || isBotDetection,
+                    url: window.location.href,
+                    title: document.title
+                };
+            }"""
         )
 
         if anti_bot_patterns["isAntiBot"]:
-            print(f"\n⚠️ Detected anti-bot protection: recaptcha")
-            print(f"  URL: {anti_bot_patterns['url']}")
-            print(f"  Title: {anti_bot_patterns['title']}")
+            logger.warning(f"Detected anti-bot protection")
+            logger.info(f"Anti-bot page URL: {anti_bot_patterns['url']}")
+            logger.info(f"Anti-bot page title: {anti_bot_patterns['title']}")
             return True, ["bot_protection"]
 
         return False, []
     except Exception as e:
-        print(f"Error detecting anti-bot patterns: {e}")
+        logger.error(f"Error detecting anti-bot patterns: {e}")
         return False, []
 
 
@@ -470,7 +515,6 @@ async def find_all_links_js(page, context, unverified_result=None):
     Use JavaScript to extract all links from the page that might be ToS links.
     Also detects if there's anti-bot protection.
     """
-    
     try:
         print("\n=== Starting find_all_links_js ===")
         print("Searching for all links using JavaScript...")
@@ -832,7 +876,7 @@ async def find_matching_link(page, context, unverified_result=None):
         return None, page, unverified_result
 
 
-async def click_and_wait_for_navigation(page, element, timeout=3000):
+async def click_and_wait_for_navigation(page, element, timeout=2000):
     """Click a link and wait for navigation with shorter timeout."""
     try:
         async with page.expect_navigation(
@@ -846,14 +890,15 @@ async def click_and_wait_for_navigation(page, element, timeout=3000):
 
 
 async def smooth_scroll_and_click(
-    page, context, unverified_result=None, step=200, delay=50
+    page, context, unverified_result=None, step=200, delay=30
 ):
     """
     Smooth scroll through the page to find ToS links.
     """
+    print("🔃 Starting smooth scroll with strong term matching...")
+    high_score_footer_link = None
+    
     try:
-        print("🔃 Starting smooth scroll with strong term matching...")
-        
         # Get the current URL and domain
         current_url = await page.evaluate("() => window.location.href")
         parsed_url = urlparse(current_url)
@@ -970,6 +1015,8 @@ async def smooth_scroll_and_click(
             if link_score >= 60:
                 print(f"Found high confidence link: {link_text} ({link_score})")
                 filtered_links.append(link)
+                # Track high score link for fallback
+                high_score_footer_link = link_url
         
         # Sort links by score
         filtered_links.sort(key=lambda x: x['score'], reverse=True)
@@ -985,10 +1032,17 @@ async def smooth_scroll_and_click(
         
         print("✅ Reached the bottom of the page.")
 
+        # If we found a high score link but couldn't navigate to it, use it as fallback
+        if high_score_footer_link and not unverified_result:
+            unverified_result = high_score_footer_link
+
         return None, page, unverified_result
 
     except Exception as e:
-        print(f"Error in smooth scroll: {e}")
+        print(f"Error in smooth scroll: {str(e)}")
+        # If we found a high score link before the error, use it as fallback
+        if high_score_footer_link and not unverified_result:
+            unverified_result = high_score_footer_link
         return None, page, unverified_result
 
 
@@ -2477,27 +2531,32 @@ async def find_user_customer_terms_links(page):
     This function is designed to find links specifically related to user or customer terms.
     """
     try:
-        print("Searching for user/customer terms links with HIGHEST PRIORITY...")
+        logger.info("Searching for user/customer terms links with HIGHEST PRIORITY...")
         
         # Evaluate the page for user/customer terms links
         links = await page.evaluate("""() => {
-            // Find all anchor elements
-            const allLinks = Array.from(document.querySelectorAll('a'));
+            // Find all anchor elements with href attributes
+            const allLinks = Array.from(document.querySelectorAll('a[href]')).filter(link => 
+                link.href && link.href.trim() !== '' && 
+                !link.href.startsWith('javascript:') &&
+                !link.href.includes('mailto:') &&
+                !link.href.includes('tel:')
+            );
             
             // Extract relevant info from each link
             return allLinks.map(link => ({
                 element: link,
-                text: link.innerText.trim(),
+                text: link.textContent.trim(),
                 href: link.href,
                 id: link.id || '',
                 classes: link.className || '',
                 // Check if element contains "user" or "customer" and "terms" or "agreement"
                 isUserTerms: (
-                    (link.innerText.toLowerCase().includes('user') || 
-                     link.innerText.toLowerCase().includes('customer')) &&
-                    (link.innerText.toLowerCase().includes('terms') || 
-                     link.innerText.toLowerCase().includes('agreement') ||
-                     link.innerText.toLowerCase().includes('conditions'))
+                    (link.textContent.toLowerCase().includes('user') || 
+                     link.textContent.toLowerCase().includes('customer')) &&
+                    (link.textContent.toLowerCase().includes('terms') || 
+                     link.textContent.toLowerCase().includes('agreement') ||
+                     link.textContent.toLowerCase().includes('conditions'))
                 ),
                 isUserTermsHref: (
                     (link.href.toLowerCase().includes('user') || 
@@ -2518,43 +2577,53 @@ async def find_user_customer_terms_links(page):
             # Assign a score to each link
             score = 0
             
-            # Highest priority combinations in text
-            if 'user terms' in link_text or 'customer terms' in link_text:
-                score += 100
-            elif 'user agreement' in link_text or 'customer agreement' in link_text:
-                score += 95
-            elif 'user conditions' in link_text or 'customer conditions' in link_text:
-                score += 90
-            # Individual terms in text
+            # Highest priority combinations in text - INCREASED VALUES
+            if 'user terms' in link_text:
+                score += 200 # Was 100
+            elif 'customer terms' in link_text:
+                score += 200 # Was 100
+            elif 'user agreement' in link_text:
+                score += 190 # Was 95
+            elif 'customer agreement' in link_text:
+                score += 190 # Was 95
+            elif 'user conditions' in link_text:
+                score += 180 # Was 90
+            elif 'customer conditions' in link_text:
+                score += 180 # Was 90
+            # Individual terms in text - INCREASED VALUES
             elif 'user' in link_text and ('terms' in link_text or 'agreement' in link_text):
-                score += 85
+                score += 170 # Was 85
             elif 'customer' in link_text and ('terms' in link_text or 'agreement' in link_text):
-                score += 80
+                score += 160 # Was 80
             
-            # URL patterns (slightly lower priority than text)
+            # URL patterns - INCREASED VALUES
             if 'user-terms' in link_href or 'customer-terms' in link_href:
-                score += 75
+                score += 150 # Was 75
             elif 'user-agreement' in link_href or 'customer-agreement' in link_href:
-                score += 70
+                score += 140 # Was 70
             elif ('user' in link_href or 'customer' in link_href) and ('terms' in link_href or 'agreement' in link_href):
-                score += 65
+                score += 130 # Was 65
             
-            # Only include links with a minimum score
-            if score >= 65:
+            # Additional score for links in the footer (common location for ToS)
+            if link_info.get('isUserTerms', False) or link_info.get('isUserTermsHref', False):
+                score += 50 # Bonus for matching both conditions
+            
+            # Only include links with a minimum score - REDUCED THRESHOLD
+            if score >= 40: # Was 65
                 try:
                     link = await page.querySelector(f'a[href="{link_info["href"]}"]')
                     if link:
                         user_terms_links.append({"link": link, "text": link_text, "href": link_href, "score": score})
                 except Exception as e:
-                    print(f"Error finding link element: {e}")
+                    logger.error(f"Error finding link element: {e}")
                     continue
         
         # Sort by score
         scored_links = sorted(user_terms_links, key=lambda x: x["score"], reverse=True)
         
-        # Print details about high-scoring links
+        # Log details about high-scoring links
         for link in scored_links:
-            print(f"User/Customer Terms Link: '{link['text']}' - {link['href']} (Score: {link['score']})")
+            logger.info(f"User/Customer Terms Link: '{link['text']}' - {link['href']} (Score: {link['score']})")
         
         # Try the highest scoring links
         for scored_link in scored_links[:3]:  # Try the top 3 links
@@ -2563,25 +2632,56 @@ async def find_user_customer_terms_links(page):
             text = scored_link["text"]
             score = scored_link["score"]
             
-            print(f"⭐⭐⭐ Trying HIGHEST PRIORITY user/customer terms link: {text} - {href} (Score: {score})")
+            logger.info(f"Trying HIGHEST PRIORITY user/customer terms link: {text} - {href} (Score: {score})")
             try:
-                success = await click_and_wait_for_navigation(page, link, timeout=5000)
+                success = await click_and_wait_for_navigation(page, link, timeout=3000) # Reduced timeout
                 if success:
-                    print(f"✓✓✓ Successfully navigated to USER/CUSTOMER terms link: {page.url}")
+                    logger.info(f"Successfully navigated to USER/CUSTOMER terms link: {page.url}")
                     return page.url
             except Exception as e:
-                print(f"Error navigating to user/customer terms link: {e}")
+                logger.error(f"Error navigating to user/customer terms link: {e}")
                 continue
         
         # If navigation failed for all links, return the best URL anyway
         if scored_links:
             best_link = scored_links[0]["href"]
-            print(f"⚠️ Navigation failed, but returning best user/customer terms link: {best_link}")
+            logger.info(f"Navigation failed, but returning best user/customer terms link: {best_link}")
             return best_link
         
+        # Fallback to basic search if no links found with scoring method
+        logger.info("No user/customer terms links found with high scoring, trying basic search...")
+        fallback_links = await page.evaluate("""
+            () => {
+                const userTermsLinks = [];
+                document.querySelectorAll('a[href]').forEach(link => {
+                    const text = link.textContent.trim().toLowerCase();
+                    const href = link.href;
+                    
+                    // Much broader matching for fallback
+                    if ((text.includes('terms') || text.includes('agreement') || text.includes('conditions')) &&
+                        href && href.trim() !== '' && 
+                        !href.startsWith('javascript:') &&
+                        !href.includes('mailto:') &&
+                        !href.includes('tel:')) {
+                        
+                        userTermsLinks.push({
+                            href: href,
+                            text: text
+                        });
+                    }
+                });
+                return userTermsLinks;
+            }
+        """)
+        
+        if fallback_links and len(fallback_links) > 0:
+            logger.info(f"Found basic terms link as fallback: {fallback_links[0]['text']} - {fallback_links[0]['href']}")
+            return fallback_links[0]['href']
+        
+        logger.info("No user/customer terms links found")
         return None
     except Exception as e:
-        print(f"Error in user/customer terms search: {e}")
+        logger.error(f"Error in user/customer terms search: {e}")
         return None
 
 
@@ -2991,6 +3091,39 @@ async def find_tos_via_common_paths(url: str) -> str:
             success, _, _ = await navigate_with_retry(page, base_url)
             if not success:
                 logger.warning(f"Failed to navigate to base URL: {base_url}")
+                
+                # Try search engine fallbacks
+                domain = normalize_domain(base_url)
+                logger.info(f"Trying search engine fallbacks for domain: {domain}")
+                
+                # Try DuckDuckGo search  
+                try:
+                    ddg_result = await duckduckgo_search_fallback(domain, page)
+                    if ddg_result:
+                        logger.info(f"Found ToS via DuckDuckGo search in common paths: {ddg_result}")
+                        return ddg_result
+                except Exception as e:
+                    logger.error(f"Error with DuckDuckGo search in common paths: {e}")
+                
+                # Try other search engines if DuckDuckGo fails
+                try:
+                    bing_result = await bing_search_fallback(domain, page)
+                    if bing_result:
+                        logger.info(f"Found ToS via Bing search in common paths: {bing_result}")
+                        return bing_result
+                except Exception as e:
+                    logger.error(f"Error with Bing search in common paths: {e}")
+                
+                # Try Yahoo search
+                try:
+                    yahoo_result = await yahoo_search_fallback(domain, page)
+                    if yahoo_result:
+                        logger.info(f"Found ToS via Yahoo search in common paths: {yahoo_result}")
+                        return yahoo_result
+                except Exception as e:
+                    logger.error(f"Error with Yahoo search in common paths: {e}")
+                    
+                # Return None if all search engines fail
                 return None
                 
             # Use JavaScript to find link patterns that might be ToS 
@@ -3020,6 +3153,10 @@ async def find_tos_via_common_paths(url: str) -> str:
                     ];
                     
                     const tosUrlPatterns = [
+                        '/user-agreement',
+                        '/customer-agreement',
+                        '/user-terms',
+                        '/customer-terms',
                         '/terms',
                         '/tos',
                         '/terms-of-service',
@@ -3027,8 +3164,9 @@ async def find_tos_via_common_paths(url: str) -> str:
                         '/terms-and-conditions',
                         '/legal/terms',
                         '/legal',
-                        '/user-agreement',
-                        '/eula'
+                        '/eula',
+                        '/policies/terms',
+                        '/policy/terms'
                     ];
                     
                     // Helper function to score links
@@ -3052,9 +3190,18 @@ async def find_tos_via_common_paths(url: str) -> str:
                         // URL pattern matching
                         tosUrlPatterns.forEach((pattern, idx) => {
                             if (href.includes(pattern)) {
-                                score += 30 - idx;
+                                score += 40 - idx;
+                                if (!matchedTerm) matchedTerm = 'url:' + pattern;
                             }
                         });
+                        
+                        // Additional URL pattern boost for user/customer URLs
+                        if (href.includes('user') && (href.includes('agreement') || href.includes('terms'))) {
+                            score += 50;
+                        }
+                        if (href.includes('customer') && (href.includes('agreement') || href.includes('terms'))) {
+                            score += 50;
+                        }
                         
                         // Boost score for footer links (often where ToS is found)
                         if (link.closest('footer') || 
@@ -3098,7 +3245,7 @@ async def find_tos_via_common_paths(url: str) -> str:
                 best_candidate = possible_tos_urls[0]['url']
                 logger.info(f"Selected best ToS URL candidate: {best_candidate}")
                 return best_candidate
-            
+                
             return None
         finally:
             # Clean up browser resources
@@ -3111,48 +3258,170 @@ async def find_tos_via_common_paths(url: str) -> str:
         return None
 
 async def find_tos_via_html_inspection(url: str) -> str:
-    """Try to find Terms of Service via HTML inspection."""
+    """Try to find Terms of Service via HTML inspection with an optimized approach."""
     try:
         # Set up browser to inspect HTML
         playwright = await async_playwright().start()
         browser, browser_context, page, _ = await setup_browser(playwright)
         
         try:
-            # Navigate to the URL
-            success, _, _ = await navigate_with_retry(page, url)
+            # Navigate to the URL with reduced timeout for better performance
+            success, _, _ = await navigate_with_retry(page, url, max_retries=1)
             if not success:
+                logger.warning(f"Failed to navigate to URL in HTML inspection: {url}")
                 return None
                 
-            # Use JavaScript to search for ToS links in the HTML content
+            # Use optimized JavaScript to search for ToS links in the HTML content
+            logger.info("Searching for ToS links with improved pattern matching...")
+            start_time = time.time()
+            
             links = await page.evaluate("""
                 () => {
-                    const tosTerms = ['terms of service', 'terms of use', 'terms and conditions', 'legal terms'];
-                    const links = [];
+                    // More comprehensive terms list for better matching
+                    const tosTerms = [
+                        'user agreement',
+                        'customer agreement',
+                        'user terms', 
+                        'customer terms',
+                        'terms of service', 
+                        'terms of use', 
+                        'terms and conditions',
+                        'terms & conditions', 
+                        'legal terms', 
+                        'legal agreement',
+                        'terms',
+                        'conditions of use',
+                        'legal notices'
+                    ];
                     
-                    document.querySelectorAll('a[href]').forEach(link => {
+                    // URL patterns that commonly indicate ToS pages
+                    const tosUrlPatterns = [
+                        '/terms',
+                        '/tos',
+                        '/terms-of-service',
+                        '/terms-of-use',
+                        '/terms-and-conditions',
+                        '/legal/terms',
+                        '/legal',
+                        '/user-agreement',
+                        '/eula',
+                        '/policies/terms',
+                        '/policy/terms'
+                    ];
+                    
+                    // Use an optimized selector to filter links before processing
+                    const allLinks = document.querySelectorAll(
+                        'a[href]:not([href^="javascript:"]):not([href*="mailto:"]):not([href*="tel:"])'
+                    );
+                    
+                    // Score system for better link matching
+                    const scoredLinks = [];
+                    
+                    for (const link of allLinks) {
                         const text = link.textContent.trim().toLowerCase();
-                        const href = link.href;
+                        const href = link.href.toLowerCase();
                         
-                        for (const term of tosTerms) {
-                            if (text.includes(term) || href.toLowerCase().includes(term.replace(/ /g, '-'))) {
-                                links.push({
-                                    href: href,
-                                    text: text,
-                                    match: term
-                                });
+                        // Skip empty links or irrelevant protocols
+                        if (!href || (!href.startsWith('http') && !href.startsWith('/') && !href.startsWith('./') && !href.startsWith('../'))) {
+                            continue;
+                        }
+                        
+                        let score = 0;
+                        let matchedTerm = '';
+                        
+                        // Text content matching with weighted scoring
+                        for (let i = 0; i < tosTerms.length; i++) {
+                            const term = tosTerms[i];
+                            if (text === term) {
+                                // Exact match gets highest score
+                                score += 100 - (i * 2); 
+                                matchedTerm = term;
                                 break;
+                            } else if (text.includes(term)) {
+                                // Partial match gets lesser score
+                                score += 60 - (i * 2);
+                                matchedTerm = term;
+                                // Don't break, keep checking for exact matches
                             }
                         }
-                    });
+                        
+                        // Highest priority for user/customer terms
+                        if (text.includes('user agreement')) {
+                            score += 200; // Significantly higher priority
+                            if (!matchedTerm) matchedTerm = 'user agreement';
+                        }
+                        if (text.includes('customer agreement')) {
+                            score += 200; // Significantly higher priority
+                            if (!matchedTerm) matchedTerm = 'customer agreement';
+                        }
+                        if (text.includes('user terms')) {
+                            score += 180; // Significantly higher priority
+                            if (!matchedTerm) matchedTerm = 'user terms';
+                        }
+                        if (text.includes('customer terms')) {
+                            score += 180; // Significantly higher priority
+                            if (!matchedTerm) matchedTerm = 'customer terms';
+                        }
+                        
+                        // URL pattern matching with weighted scoring
+                        for (let i = 0; i < tosUrlPatterns.length; i++) {
+                            const pattern = tosUrlPatterns[i];
+                            if (href.includes(pattern)) {
+                                score += 40 - i;
+                                if (!matchedTerm) matchedTerm = 'url:' + pattern;
+                            }
+                        }
+                        
+                        // Additional bonus for having 'terms' in both text and URL
+                        if (text.includes('terms') && href.includes('terms')) {
+                            score += 25;
+                        }
+                        
+                        // Boost score for footer links (often where ToS is found)
+                        if (link.closest('footer, [id*="foot"], [class*="foot"]')) {
+                            score *= 1.2; // 20% boost
+                        }
+                        
+                        // Boost for links that are in containers with legal-related terms
+                        const parentText = link.parentElement ? link.parentElement.textContent.toLowerCase() : '';
+                        if (parentText.includes('legal') || parentText.includes('policy') || parentText.includes('terms')) {
+                            score += 15;
+                        }
+                        
+                        // Only include links with some relevance
+                        if (score > 0) {
+                            scoredLinks.push({
+                                href: href,
+                                text: text,
+                                score: score,
+                                match: matchedTerm
+                            });
+                        }
+                    }
                     
-                    return links;
+                    // Sort by score (highest first)
+                    scoredLinks.sort((a, b) => b.score - a.score);
+                    
+                    // Return the top candidates
+                    return scoredLinks.slice(0, 5);
                 }
             """)
             
+            end_time = time.time()
+            logger.info(f"Link scoring completed in {end_time - start_time:.2f} seconds")
+            
             if links and len(links) > 0:
-                # Return the best matching link
-                return links[0]['href']
+                # Log the found links
+                logger.info(f"Found {len(links)} potential ToS links:")
+                for idx, link in enumerate(links):
+                    logger.info(f"Link #{idx+1}: '{link.get('text', '')}' - {link.get('href', '')} (Score: {link.get('score', 0)})")
                 
+                # Return the best link
+                best_link = links[0]['href']
+                logger.info(f"Selected best ToS link: {best_link}")
+                return best_link
+                
+            logger.info("No potential Terms of Service links found during HTML inspection")
             return None
         finally:
             # Ensure browser resources are cleaned up
@@ -3161,42 +3430,7 @@ async def find_tos_via_html_inspection(url: str) -> str:
             await playwright.stop()
             
     except Exception as e:
-        print(f"Error during HTML inspection: {e}")
-        return None
-
-async def find_user_terms(page) -> str:
-    """Try to find user agreement or customer terms links."""
-    try:
-        # Implementation would go here - for now just check for user terms links
-        links = await page.evaluate("""
-            () => {
-                const links = [];
-                document.querySelectorAll('a[href]').forEach(link => {
-                    const text = link.textContent.trim().toLowerCase();
-                    const href = link.href;
-                    
-                    if (text.includes('user agreement') || 
-                        text.includes('customer agreement') ||
-                        text.includes('user terms') || 
-                        text.includes('customer terms')) {
-                        
-                        links.push({
-                            href: href,
-                            text: text
-                        });
-                    }
-                });
-                return links;
-            }
-        """)
-        
-        if links and len(links) > 0:
-            # Return the first matching link
-            return links[0]['href']
-        
-        return None
-    except Exception as e:
-        print(f"Error finding user terms: {e}")
+        logger.error(f"Error during HTML inspection: {e}")
         return None
 
 def normalize_url(url: str) -> str:
