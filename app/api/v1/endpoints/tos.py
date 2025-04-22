@@ -194,6 +194,18 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         if not success:
             print("\nMain site navigation had issues, but trying to analyze current page...")
 
+        # Special handling for App Store and Play Store - extract ToS via privacy policy link
+        app_store_tos, app_store_method, page = await find_tos_via_privacy_policy(page, context)
+        if app_store_tos:
+            print(f"\n\n🔍 APP STORE/PLAY STORE SUCCESS: Found ToS via privacy policy link: {app_store_tos}")
+            return ToSResponse(
+                url=original_url,
+                tos_url=app_store_tos,
+                success=True,
+                message="Found Terms of Service via app's privacy policy link",
+                method_used=app_store_method
+            )
+
         # First check for user/customer terms links with high priority
         print("Searching for user/customer terms links with highest priority...")
         user_terms_link = await find_user_customer_terms_links(page)
@@ -210,18 +222,6 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
 
         all_links = []
         method_sources = []
-
-        # For app stores, try finding terms via privacy policy first
-        app_store_terms = await find_terms_via_privacy_policy_for_app_stores(page, context, url)
-        if app_store_terms:
-            print(f"\n\n⭐⭐⭐ APP STORE SUCCESS: Found terms via privacy policy: {app_store_terms}")
-            return ToSResponse(
-                url=original_url,
-                tos_url=app_store_terms,
-                success=True,
-                message="Found Terms of Service via Privacy Policy (APP STORE METHOD)",
-                method_used="app_store_privacy_to_terms"
-            )
 
         # 1. JavaScript method - Highest priority
         print("Trying find_all_links_js approach...")
@@ -2756,275 +2756,264 @@ async def find_user_customer_terms_links(page):
         return None
 
 
-async def find_terms_via_privacy_policy_for_app_stores(page, context, url):
+async def extract_app_store_privacy_link(page):
     """
-    For app stores (Google Play Store and App Store), finds the privacy policy link first
-    and then uses its base URL to find Terms of Service.
-    
-    Args:
-        page: The browser page
-        context: Browser context
-        url: The original URL
-    
-    Returns:
-        The ToS URL if found, None otherwise
+    Extract privacy policy link from Apple App Store pages.
+    App Store has a specific HTML structure for privacy policy links.
     """
     try:
-        # Check if the URL is from app stores
-        is_app_store = False
-        is_play_store = False
+        print("🍎 Checking if this is an Apple App Store page...")
         
-        parsed_url = urlparse(url)
-        if "play.google.com" in parsed_url.netloc:
-            is_play_store = True
-            is_app_store = True
-            print("✓ Detected Google Play Store URL")
-        elif "apps.apple.com" in parsed_url.netloc:
-            is_app_store = True
-            print("✓ Detected Apple App Store URL")
-            
+        # Check if this is an App Store page
+        is_app_store = await page.evaluate("""
+            () => {
+                return window.location.href.includes('apps.apple.com') || 
+                       document.querySelector('meta[property="og:site_name"]')?.content?.includes('App Store');
+            }
+        """)
+        
         if not is_app_store:
-            print("✗ Not an app store URL, skipping privacy policy method")
+            print("Not an App Store page, skipping App Store specific extraction")
             return None
             
-        print("\n=== Attempting to find Terms via Privacy Policy link ===")
+        print("✅ Detected Apple App Store page, looking for privacy policy link")
         
-        # First find the privacy policy link
-        print("🔍 Looking for Privacy Policy link...")
-        
-        # Different selectors for different app stores
-        privacy_links = await page.evaluate("""(isPlayStore) => {
-            // Find all links on the page
-            const allLinks = Array.from(document.querySelectorAll('a[href]'));
-            
-            // Different privacy policy patterns for different stores
-            const privacyPatterns = [
-                "privacy policy", 
-                "privacy", 
-                "data policy",
-                "data protection"
-            ];
-            
-            // Score the links
-            const scoredLinks = allLinks
-                .filter(link => {
-                    const href = link.href.toLowerCase();
-                    const text = link.textContent.trim().toLowerCase();
-                    
-                    // Filter out navigation links, empty links, etc.
-                    if (!href || href.startsWith('javascript:') || href.startsWith('#')) return false;
-                    
-                    // Check for privacy-related text or URL
-                    return privacyPatterns.some(pattern => 
-                        text.includes(pattern) || href.includes('privacy'));
-                })
-                .map(link => {
-                    const text = link.textContent.trim().toLowerCase();
-                    const href = link.href;
-                    
-                    // Score the link
-                    let score = 0;
-                    
-                    // Text-based scoring
-                    if (text === "privacy policy") score += 100;
-                    else if (text.includes("privacy policy")) score += 90;
-                    else if (text === "privacy") score += 80;
-                    else if (text.includes("privacy")) score += 70;
-                    else if (text.includes("data protection")) score += 60;
-                    
-                    // URL-based scoring
-                    if (href.includes("privacy-policy")) score += 50;
-                    else if (href.includes("privacy")) score += 40;
-                    
-                    // Play Store specific detection
-                    if (isPlayStore) {
-                        // On Play Store, developer links often have certain patterns
-                        if (href.includes("policies/privacy")) score += 30;
-                    }
-                    
-                    return {
-                        text: text,
-                        href: href,
-                        score: score
+        # Look for the privacy policy link in the app-privacy section
+        privacy_link = await page.evaluate("""
+            () => {
+                // Target the app-privacy section
+                const privacySection = document.querySelector('.app-privacy');
+                if (!privacySection) return null;
+                
+                // Look for direct privacy policy link
+                const directLink = privacySection.querySelector('a[href*="privacy"]');
+                if (directLink && directLink.href) {
+                    return { 
+                        href: directLink.href,
+                        text: directLink.textContent.trim(),
+                        confidence: 'high'
                     };
-                })
-                .sort((a, b) => b.score - a.score);
+                }
                 
-            return scoredLinks;
-        }""", is_play_store)
-        
-        if not privacy_links or len(privacy_links) == 0:
-            print("✗ No privacy policy links found")
-            return None
-            
-        print(f"✓ Found {len(privacy_links)} potential privacy policy links")
-        
-        # Display top privacy policy links
-        for i, link in enumerate(privacy_links[:3]):
-            print(f"  Privacy Link #{i+1}: {link['text']} - {link['href']} (Score: {link['score']})")
-            
-        # Get the top privacy policy link
-        best_privacy_link = privacy_links[0]['href']
-        print(f"✓ Selected top privacy policy link: {best_privacy_link}")
-        
-        # Navigate to the privacy policy page
-        try:
-            print("🔍 Navigating to privacy policy page...")
-            await page.goto(best_privacy_link, timeout=10000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
-            
-            # Extract the base URL from the privacy policy page
-            current_url = page.url
-            parsed_privacy_url = urlparse(current_url)
-            
-            # Extract the base domain and path components
-            base_domain = parsed_privacy_url.netloc
-            
-            # Try to identify the company's main domain from the privacy policy URL
-            main_domain = base_domain
-            if base_domain.startswith("www."):
-                main_domain = base_domain[4:]
+                // Fallback: look for any link in the privacy section
+                const anyLink = privacySection.querySelector('a[href]');
+                if (anyLink && anyLink.href) {
+                    return { 
+                        href: anyLink.href,
+                        text: anyLink.textContent.trim(),
+                        confidence: 'medium'
+                    };
+                }
                 
-            # Special handling for common privacy policy domains
-            if "policies.google.com" in base_domain:
-                main_domain = "google.com"
-            elif "privacy.apple.com" in base_domain:
-                main_domain = "apple.com"
-                
-            print(f"✓ Extracted base domain from privacy policy: {main_domain}")
-            
-            # Look for terms links on the privacy policy page
-            print("🔍 Looking for Terms of Service links on privacy policy page...")
-            
-            terms_links = await page.evaluate("""() => {
-                // Find all links on the page
-                const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                
-                // Terms of service patterns
-                const termsPatterns = [
-                    "terms of service",
-                    "terms of use", 
-                    "terms and conditions",
-                    "user agreement",
-                    "terms",
-                    "conditions",
-                    "legal"
-                ];
-                
-                // Score the links
-                return allLinks
-                    .filter(link => {
-                        const href = link.href.toLowerCase();
-                        const text = link.textContent.trim().toLowerCase();
-                        
-                        // Filter out navigation links, empty links, etc.
-                        if (!href || href.startsWith('javascript:') || href.startsWith('#')) return false;
-                        
-                        // Check for terms-related text or URL
-                        return termsPatterns.some(pattern => 
-                            text.includes(pattern) || 
-                            href.includes('terms') || 
-                            href.includes('tos') ||
-                            href.includes('legal'));
-                    })
-                    .map(link => {
-                        const text = link.textContent.trim().toLowerCase();
-                        const href = link.href;
-                        
-                        // Score the link
-                        let score = 0;
-                        
-                        // Text-based scoring
-                        if (text === "terms of service") score += 100;
-                        else if (text.includes("terms of service")) score += 90;
-                        else if (text === "terms of use") score += 95;
-                        else if (text.includes("terms of use")) score += 85;
-                        else if (text === "terms and conditions") score += 90;
-                        else if (text.includes("terms and conditions")) score += 80;
-                        else if (text === "terms") score += 70;
-                        else if (text.includes("terms")) score += 60;
-                        
-                        // URL-based scoring
-                        if (href.includes("terms-of-service")) score += 50;
-                        else if (href.includes("terms-of-use")) score += 48;
-                        else if (href.includes("terms-and-conditions")) score += 45;
-                        else if (href.includes("terms") || href.includes("tos")) score += 40;
-                        
+                // Second fallback: look for links in developer info section
+                const devInfoSection = document.querySelector('.information-list--app');
+                if (devInfoSection) {
+                    const devLinks = Array.from(devInfoSection.querySelectorAll('a[href]'));
+                    const privacyLink = devLinks.find(link => 
+                        link.textContent.toLowerCase().includes('privacy') || 
+                        link.href.toLowerCase().includes('privacy')
+                    );
+                    
+                    if (privacyLink) {
                         return {
-                            text: text,
-                            href: href,
-                            score: score
+                            href: privacyLink.href,
+                            text: privacyLink.textContent.trim(),
+                            confidence: 'medium'
                         };
-                    })
-                    .sort((a, b) => b.score - a.score);
-            }""")
-            
-            if terms_links and len(terms_links) > 0:
-                print(f"✓ Found {len(terms_links)} potential terms links on privacy policy page")
+                    }
+                }
                 
-                # Display top terms links
-                for i, link in enumerate(terms_links[:3]):
-                    print(f"  Terms Link #{i+1}: {link['text']} - {link['href']} (Score: {link['score']})")
-                
-                # Get the top terms link
-                best_terms_link = terms_links[0]['href']
-                print(f"✓ Selected top terms link from privacy policy: {best_terms_link}")
-                
-                # Verify it's a valid terms page
-                try:
-                    await page.goto(best_terms_link, timeout=10000, wait_until="domcontentloaded")
-                    verification = await verify_is_terms_page(page)
-                    
-                    if verification["isTermsPage"]:
-                        print(f"✅ Verified as Terms of Service page: {page.url} (confidence: {verification['confidence']})")
-                        return page.url
-                    else:
-                        print(f"⚠️ Link doesn't appear to be a Terms page (confidence: {verification['confidence']})")
-                        # Return it anyway if it has a good score and we're confident in the original privacy link
-                        if verification["confidence"] >= 50 and privacy_links[0]['score'] >= 80:
-                            print(f"⚠️ Returning link anyway due to high privacy link confidence: {page.url}")
-                            return page.url
-                except Exception as e:
-                    print(f"Error navigating to terms link: {e}")
-                    # Return the terms link even if navigation failed
-                    if privacy_links[0]['score'] >= 80:
-                        print(f"⚠️ Navigation failed, but returning terms link anyway: {best_terms_link}")
-                        return best_terms_link
-            
-            # If no terms links found on privacy page, try using the main domain to find terms
-            print("🔍 No terms links found on privacy page, attempting to construct terms URL...")
-            
-            # Try common terms URL patterns based on the main domain
-            potential_terms_urls = [
-                f"https://{main_domain}/terms",
-                f"https://{main_domain}/terms-of-service",
-                f"https://{main_domain}/terms-of-use",
-                f"https://{main_domain}/legal/terms",
-                f"https://{main_domain}/tos",
-                f"https://www.{main_domain}/terms",
-                f"https://www.{main_domain}/legal/terms",
-            ]
-            
-            for terms_url in potential_terms_urls:
-                try:
-                    print(f"🔍 Trying potential terms URL: {terms_url}")
-                    await page.goto(terms_url, timeout=8000, wait_until="domcontentloaded")
-                    
-                    verification = await verify_is_terms_page(page)
-                    if verification["isTermsPage"]:
-                        print(f"✅ Verified constructed terms URL: {page.url} (confidence: {verification['confidence']})")
-                        return page.url
-                except Exception as e:
-                    print(f"Error checking constructed URL {terms_url}: {e}")
-                    continue
-            
-            print("✗ Couldn't find terms via privacy policy method")
-            return None
-            
-        except Exception as e:
-            print(f"Error navigating to privacy policy: {e}")
-            return None
-            
-    except Exception as e:
-        print(f"Error in find_terms_via_privacy_policy: {e}")
+                return null;
+            }
+        """)
+        
+        if privacy_link:
+            print(f"🍏 Found privacy policy link in App Store: {privacy_link['text']} - {privacy_link['href']}")
+            print(f"Confidence: {privacy_link['confidence']}")
+            return privacy_link['href']
+        
+        print("No privacy policy link found in App Store page")
         return None
+        
+    except Exception as e:
+        print(f"Error extracting App Store privacy link: {e}")
+        return None
+
+
+async def extract_play_store_privacy_link(page):
+    """
+    Extract privacy policy link from Google Play Store pages.
+    """
+    try:
+        print("🤖 Checking if this is a Google Play Store page...")
+            
+        # Check if this is a Play Store page
+        is_play_store = await page.evaluate("""
+            () => {
+                return window.location.href.includes('play.google.com/store/apps') || 
+                       document.querySelector('meta[property="og:url"]')?.content?.includes('play.google.com');
+            }
+        """)
+        
+        if not is_play_store:
+            print("Not a Play Store page, skipping Play Store specific extraction")
+            return None
+            
+        print("✅ Detected Google Play Store page, looking for privacy policy link")
+        
+        # Now extract the privacy policy link
+        privacy_link = await page.evaluate("""
+            () => {
+                // Get all divs containing text and links
+                const allDivs = Array.from(document.querySelectorAll('div'));
+                
+                // Find divs with the specific developer policy text pattern
+                for (const div of allDivs) {
+                    const text = div.textContent?.toLowerCase() || '';
+                    const hasDevPattern = text.includes('developer') && 
+                                         text.includes('privacy');
+                                       
+                    if (hasDevPattern) {
+                        // Look for a direct link inside this div
+                        const links = Array.from(div.querySelectorAll('a[href]'));
+                        
+                        // Exclude Google domains
+                        const nonGoogleLinks = links.filter(link => {
+                            const href = link.href.toLowerCase();
+                            return !href.includes('google.com') && 
+                                   !href.includes('play.google.com') &&
+                                   !href.includes('support.google.com') &&
+                                   !href.includes('myaccount.google.com');
+                        });
+                        
+                        if (nonGoogleLinks.length > 0) {
+                            return {
+                                href: nonGoogleLinks[0].href,
+                                text: nonGoogleLinks[0].textContent.trim(),
+                                confidence: 'high'
+                            };
+                        }
+                    }
+                }
+                
+                // Second approach: look for elements with "Developer" section that contains "Privacy Policy"
+                const detailsElements = Array.from(document.querySelectorAll('a[href]'));
+                
+                // Extract all links that might be privacy policy
+                const privacyLinks = detailsElements.filter(link => {
+                    const href = link.href.toLowerCase();
+                    const text = link.textContent.toLowerCase();
+                    
+                    // Check if this link is likely a privacy policy link
+                    const isPrivacyLink = (text.includes('privacy') || href.includes('privacy')) &&
+                                         !href.includes('google.com') &&
+                                         !href.includes('play.google.com');
+                                         
+                    return isPrivacyLink;
+                });
+                
+                if (privacyLinks.length > 0) {
+                    return {
+                        href: privacyLinks[0].href,
+                        text: privacyLinks[0].textContent.trim(),
+                        confidence: 'medium'
+                    };
+                }
+                
+                return null;
+            }
+        """)
+        
+        if privacy_link:
+            print(f"🤖 Found developer privacy policy link in Play Store: {privacy_link['text']} - {privacy_link['href']}")
+            print(f"Confidence: {privacy_link['confidence']}")
+            return privacy_link['href']
+        
+        print("❌ No developer privacy policy link found in Play Store page")
+        return None
+        
+    except Exception as e:
+        print(f"Error extracting Play Store privacy link: {e}")
+        return None
+
+
+async def find_tos_via_privacy_policy(page, context):
+    """
+    Find ToS for App Store and Play Store links by:
+    1. Finding privacy policy link
+    2. Extracting base domain from privacy policy
+    3. Using that domain to search for ToS
+    
+    Returns:
+        tuple of (tos_url, method_used, page)
+    """
+    # Check for Play Store or App Store
+    is_app_store = await page.evaluate("""
+        () => window.location.href.includes('apps.apple.com') || 
+              document.querySelector('meta[property="og:site_name"]')?.content?.includes('App Store')
+    """)
+    
+    is_play_store = await page.evaluate("""
+        () => window.location.href.includes('play.google.com/store/apps') || 
+              document.querySelector('meta[property="og:url"]')?.content?.includes('play.google.com')
+    """)
+    
+    if not (is_app_store or is_play_store):
+        print("Not an App Store or Play Store page, skipping app-specific ToS finder")
+        return None, None, page
+    
+    print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, attempting ToS via privacy policy")
+    
+    # Extract privacy policy link based on store type
+    privacy_link = None
+    if is_app_store:
+        privacy_link = await extract_app_store_privacy_link(page)
+    elif is_play_store:
+        privacy_link = await extract_play_store_privacy_link(page)
+    
+    if not privacy_link:
+        print("❌ Could not extract privacy policy link from store page")
+        return None, None, page
+    
+    print(f"✅ Found privacy policy link: {privacy_link}")
+    
+    # Extract base domain from privacy policy URL
+    try:
+        parsed_url = urlparse(privacy_link)
+        base_domain = parsed_url.netloc
+        base_url = f"{parsed_url.scheme}://{base_domain}"
+        
+        print(f"✅ Extracted base URL from privacy policy: {base_url}")
+        
+        # Navigate to the base URL and search for ToS
+        success, _, _ = await navigate_with_retry(page, base_url, max_retries=2)
+        if not success:
+            print("⚠️ Warning: Issues navigating to the base URL, but continuing analysis")
+        
+        # Apply our standard ToS finding methods on this new page
+        print("🔍 Looking for ToS on developer website...")
+        
+        # First check for user/customer terms links with high priority
+        user_terms_link = await find_user_customer_terms_links(page)
+        if user_terms_link:
+            print(f"✅ Found user/customer terms link on developer site: {user_terms_link}")
+            return user_terms_link, "app_store_privacy_to_tos_user_terms", page
+        
+        # Try JavaScript method
+        js_result, page, js_unverified = await find_all_links_js(page, context, None)
+        if js_result:
+            print(f"✅ Found ToS link via JavaScript method on developer site: {js_result}")
+            return js_result, "app_store_privacy_to_tos_js", page
+        
+        # Try scroll method
+        scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
+        if scroll_result:
+            print(f"✅ Found ToS link via scroll method on developer site: {scroll_result}")
+            return scroll_result, "app_store_privacy_to_tos_scroll", page
+        
+        print("❌ Could not find ToS on developer website")
+        return None, None, page
+        
+    except Exception as e:
+        print(f"❌ Error finding ToS via privacy policy: {e}")
+        return None, None, page
