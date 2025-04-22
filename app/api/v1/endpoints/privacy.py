@@ -10,16 +10,29 @@ from playwright.async_api import async_playwright, Page
 
 from app.models.privacy import PrivacyRequest, PrivacyResponse
 
-async def click_and_wait_for_navigation(page, element, timeout=3000):
-    """Click a link and wait for navigation with shorter timeout."""
+async def click_and_wait_for_navigation(page, element, timeout=2000):
+    """Click an element and wait for navigation, with optimized timeout."""
     try:
-        async with page.expect_navigation(
-            timeout=timeout, wait_until="domcontentloaded"
-        ):
-            await element.click()
-        return True
+        # Create a promise to wait for navigation
+        nav_promise = page.wait_for_navigation(timeout=timeout, wait_until="domcontentloaded")
+        
+        # Click the element
+        await element.click()
+        
+        # Wait for navigation to complete or timeout
+        try:
+            await nav_promise
+            return True
+        except Exception as e:
+            print(f"Navigation error: {str(e)}")
+            # Even if navigation times out, still return True if the URL changed
+            new_url = page.url
+            if new_url != getattr(page, "_last_url", None):
+                setattr(page, "_last_url", new_url)
+                return True
+            return False
     except Exception as e:
-        print(f"Navigation error: {e}")
+        print(f"Error in click_and_wait_for_navigation: {str(e)}")
         return False
 
 router = APIRouter()
@@ -803,8 +816,10 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 method_used="user_customer_supreme_priority"
             )
 
+        # Add variable initialization before the JavaScript method section
         all_links = []
         method_sources = []
+        high_score_footer_link = None  # Initialize high_score_footer_link to None
 
         # 1. JavaScript method - Highest priority
         print("Trying find_all_links_js approach...")
@@ -817,7 +832,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 # Track if this is a high-scoring footer link
                 try:
                     # Check if this looks like a privacy notice from the title
-                    await page.goto(js_result, timeout=5000, wait_until="domcontentloaded")
+                    await page.goto(js_result, timeout=3000, wait_until="domcontentloaded")
                     page_title = await page.title()
                     title_lower = page_title.lower()
 
@@ -845,7 +860,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 # If no high-score footer link yet, check this one
                 if not high_score_footer_link:
                     try:
-                        await page.goto(scroll_result, timeout=5000, wait_until="domcontentloaded")
+                        await page.goto(scroll_result, timeout=3000, wait_until="domcontentloaded")
                         page_title = await page.title()
                         title_lower = page_title.lower()
 
@@ -971,7 +986,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         if main_domain_footer:
             print(f"⭐ Prioritizing main domain footer link: {main_domain_footer}")
             try:
-                await page.goto(main_domain_footer, timeout=10000, wait_until="domcontentloaded")
+                await page.goto(main_domain_footer, timeout=3000, wait_until="domcontentloaded")
                 title = await page.title()
                 if 'privacy' in title.lower():
                     print(f"✅ Confirmed main domain footer link has privacy-related title")
@@ -996,7 +1011,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         if best_footer_link:
             try:
                 print(f"Checking best footer link: {best_footer_link}")
-                await page.goto(best_footer_link, timeout=10000, wait_until="domcontentloaded")
+                await page.goto(best_footer_link, timeout=3000, wait_until="domcontentloaded")
 
                 # Check title and URL for privacy terms
                 title = await page.title()
@@ -1123,7 +1138,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
             best_link, method = js_scroll_with_user_terms[0] # Take the first one
             print(f"⭐⭐⭐ Found unverified link with user/customer terms: {best_link}")
             try:
-                await page.goto(best_link, timeout=10000, wait_until="domcontentloaded")
+                await page.goto(best_link, timeout=1000, wait_until="domcontentloaded")
                 # No need to verify content - presence of user/customer in URL is enough
                 return PrivacyResponse(
                     url=original_url,
@@ -1206,7 +1221,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
             link_lower = link.lower()
             if any(term in link_lower for term in user_customer_terms):
                 try:
-                    await page.goto(link, timeout=10000, wait_until="domcontentloaded")
+                    await page.goto(link, timeout=1000, wait_until="domcontentloaded")
                     title = await page.title()
                     title_lower = title.lower()
                     if any(term in title_lower for term in user_customer_terms) or any(term in link_lower for term in user_customer_terms):
@@ -1228,7 +1243,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         for link, src in zip(unique_links, unique_sources):
             try:
                 print(f"Verifying link: {link} (source: {src})")
-                await page.goto(link, timeout=10000, wait_until="domcontentloaded")
+                await page.goto(link, timeout=1000, wait_until="domcontentloaded")
                 await page.wait_for_timeout(1000)
                 verification = await verify_is_privacy_page(page)
                 score = verification.get("confidence", 0)
@@ -1353,7 +1368,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
 
             for link, method in unverified_links:
                 try:
-                    await page.goto(link, timeout=10000, wait_until="domcontentloaded")
+                    await page.goto(link, timeout=1000, wait_until="domcontentloaded")
                     title = await page.title()
                     title_lower = title.lower()
                     
@@ -1600,7 +1615,7 @@ async def setup_browser(playwright=None):
             await page.wait_for_timeout(delay)
 
         # Set reasonable timeouts
-        page.set_default_timeout(10000)  # Significantly reduced timeout
+        page.set_default_timeout(1000)  # Significantly reduced timeout
 
         return browser, context, page, random_delay
 
@@ -2053,12 +2068,13 @@ async def find_privacy_links_js(page, context, unverified_result=None):
 
 
 async def smooth_scroll_and_click_privacy(
-    page, context, unverified_result=None, step=200, delay=50
+    page, context, unverified_result=None, step=200, delay=30
 ):
     """Optimized version of smooth scroll with faster execution time for privacy policy links."""
     print("🔃 Starting smooth scroll with strong privacy term matching...")
     visited_url = None
     current_page = page
+    high_score_footer_link = None
 
     # First check visible links before scrolling
     visited_url, current_page, unverified_result = await find_matching_privacy_link(
@@ -2084,7 +2100,7 @@ async def smooth_scroll_and_click_privacy(
 
         for scroll_pos in positions_to_check:
             await current_page.evaluate(f"window.scrollTo(0, {scroll_pos})")
-            await current_page.wait_for_timeout(150) # Reduced timeout
+            await current_page.wait_for_timeout(500) # Reduced timeout further
 
             visited_url, current_page, unverified_result = await find_matching_privacy_link(
                 current_page, context, unverified_result
@@ -2122,14 +2138,17 @@ async def smooth_scroll_and_click_privacy(
 
                 if privacy_links and len(privacy_links) > 0:
                     print(f"Found {len(privacy_links)} potential privacy links in footer")
-                    # Limit to first 3 links for speed
+                    # Store highest confidence privacy link
                     for link in privacy_links[:3]:
+                        print(f"Found high confidence privacy link: {link['text']} ({100 + len(privacy_links)})")
+                        high_score_footer_link = link['href']
                         try:
                             element = await current_page.query_selector(f"a[href='{link['href']}']")
                             if element:
+                                # Attempt navigation with reduced timeout
                                 try:
                                     success = await click_and_wait_for_navigation(
-                                        current_page, element, timeout=5000)
+                                        current_page, element, timeout=2000)
                                     if success:
                                         return (
                                             current_page.url,
@@ -2137,15 +2156,29 @@ async def smooth_scroll_and_click_privacy(
                                             unverified_result,
                                         )
                                 except Exception as e:
-                                    print(f"Error during navigation: {e}")
+                                    print(f"Navigation error: {str(e)}")
+                                    # Store as unverified result if navigation fails
+                                    if not unverified_result:
+                                        unverified_result = link['href']
                         except Exception as e:
-                            print(f"Error clicking footer link: {e}")
+                            print(f"Error clicking footer link: {str(e)}")
+                            # Still store as unverified result
+                            if not unverified_result:
+                                unverified_result = link['href']
 
         # Skip scrolling back up to save time
         print("✅ Reached the bottom of the page.")
+        
+        # If we found a high score footer link but couldn't navigate to it,
+        # return it as the unverified result
+        if high_score_footer_link and not unverified_result:
+            unverified_result = high_score_footer_link
 
     except Exception as e:
-        print(f"Error in footer/scroll check: {e}")
+        print(f"Error in footer/scroll check: {str(e)}")
+        # If we have a high score footer link, still return it even if other errors occur
+        if high_score_footer_link:
+            unverified_result = high_score_footer_link
 
     return None, current_page, unverified_result
 
@@ -2527,7 +2560,7 @@ async def verify_is_privacy_page(page):
                 // Check length - privacy policies tend to be long
                 // but not too long (to avoid false positives from long pages)
                 const contentLength = text.length;
-                const isPrivacyLength = contentLength >= 2000 && contentLength <= 100000;
+                const isPrivacyLength = contentLength >= 2000 && contentLength <= 10000;
                 
                 return {
                     phraseCount,
@@ -2874,7 +2907,7 @@ async def yahoo_search_fallback(domain, page):
                 try:
                     # Visit the page to verify it's a privacy page
                     print(f"Checking Yahoo result: {best_result}")
-                    await page.goto(best_result, timeout=10000, wait_until="domcontentloaded")
+                    await page.goto(best_result, timeout=2000, wait_until="domcontentloaded")
                     
                     # Get the page title
                     title = await page.title()
@@ -2937,14 +2970,14 @@ async def bing_search_fallback(domain, page):
         search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data policy" OR "privacy"'
         
         # Navigate to Bing
-        await page.goto('https://www.bing.com/', timeout=10000)
+        await page.goto('https://www.bing.com/', timeout=1000)
         
         # Enter search query
         await page.fill('input[name="q"]', search_query)
         await page.press('input[name="q"]', 'Enter')
         
         # Wait for results to load
-        await page.wait_for_selector('.b_algo', timeout=10000)
+        await page.wait_for_selector('.b_algo', timeout=1000)
         
         # Extract search results
         search_results = await page.evaluate(
@@ -3042,7 +3075,7 @@ async def bing_search_fallback(domain, page):
                 try:
                     # Visit the page to verify it's a privacy page
                     print(f"Checking result: {best_result}")
-                    await page.goto(best_result, timeout=10000, wait_until="domcontentloaded")
+                    await page.goto(best_result, timeout=2000, wait_until="domcontentloaded")
                     
                     # Get the page title
                     title = await page.title()
