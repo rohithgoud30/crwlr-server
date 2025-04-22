@@ -4,6 +4,7 @@ import re
 import traceback
 import time
 import logging
+import aiohttp
 from fastapi import APIRouter, HTTPException, status
 from playwright.async_api import async_playwright
 
@@ -22,6 +23,33 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
 ]
+
+# Known ToS URLs for major sites with anti-bot protection
+# This helps bypass navigation issues for common sites
+KNOWN_TOS_URLS = {
+    "facebook.com": "https://www.facebook.com/terms.php",
+    "instagram.com": "https://help.instagram.com/581066165581870",
+    "twitter.com": "https://twitter.com/tos",
+    "x.com": "https://twitter.com/tos",
+    "tiktok.com": "https://www.tiktok.com/legal/terms-of-service",
+    "linkedin.com": "https://www.linkedin.com/legal/user-agreement",
+    "microsoft.com": "https://www.microsoft.com/en-us/servicesagreement",
+    "google.com": "https://policies.google.com/terms",
+    "youtube.com": "https://www.youtube.com/t/terms",
+    "amazon.com": "https://www.amazon.com/gp/help/customer/display.html?nodeId=GLSBYFE9MGKKQXXM",
+    "netflix.com": "https://help.netflix.com/legal/termsofuse",
+    "apple.com": "https://www.apple.com/legal/internet-services/terms/site.html",
+    "github.com": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
+    "reddit.com": "https://www.redditinc.com/policies/user-agreement",
+    "pinterest.com": "https://policy.pinterest.com/en/terms-of-service",
+    "quora.com": "https://www.quora.com/about/tos",
+    "whatsapp.com": "https://www.whatsapp.com/legal/terms-of-service",
+    "snapchat.com": "https://snap.com/en-US/terms",
+    "threads.net": "https://help.instagram.com/515230437301944",
+    "twitch.tv": "https://www.twitch.tv/p/en/legal/terms-of-service/",
+    "discord.com": "https://discord.com/terms",
+    "spotify.com": "https://www.spotify.com/us/legal/end-user-agreement/",
+}
 
 # Priorities for exact match terms
 exactMatchPriorities = {
@@ -193,6 +221,35 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
 
         url = normalize_url(url)
         
+        # Check for known ToS URLs (especially for sites with anti-bot protection)
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc.lower()
+        
+        # Handle www prefix
+        if domain.startswith('www.'):
+            clean_domain = domain[4:]  # Remove www. prefix
+        else:
+            clean_domain = domain
+            
+        # Check for TLD variations and subdomains
+        known_domain = None
+        for known_domain_key in KNOWN_TOS_URLS.keys():
+            if clean_domain == known_domain_key or clean_domain.endswith('.' + known_domain_key):
+                known_domain = known_domain_key
+                break
+                
+        if known_domain:
+            tos_url = KNOWN_TOS_URLS[known_domain]
+            logger.info(f"Found ToS URL for {domain} in known URLs: {tos_url}")
+            return ToSResponse(
+                url=url,
+                tos_url=tos_url,
+                success=True,
+                message=f"Terms of Service found via known URL mapping",
+                method_used="known_url"
+            )
+        
+        # Continue with existing logic for sites without known ToS URLs
         # Check if this is an app store URL
         if is_app_store_url(url):
             logger.info(f"Detected App Store URL: {url}")
