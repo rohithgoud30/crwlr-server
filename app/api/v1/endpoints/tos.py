@@ -153,17 +153,21 @@ def normalize_domain(url):
 
 @router.post("/tos", response_model=ToSResponse)
 async def find_tos(request: ToSRequest) -> ToSResponse:
-    """Find Terms of Service page for a given URL."""
-    original_url = request.url
-
-    if not original_url:
-        raise HTTPException(status_code=400, detail="URL is required")
-
-    # First sanitize the URL to handle malformed URLs
-    url = sanitize_url(original_url)
+    """
+    Find the Terms of Service URL for a given website.
+    """
+    # Extract and validate the URL
+    url = request.url.strip()
+    original_url = url
     
-    if not url:
-        print(f"Invalid URL detected: {original_url}")
+    # Check headless mode
+    headless_mode = request.headless_mode if request.headless_mode is not None else True
+    print(f"Browser headless mode: {headless_mode}")
+    
+    # Validate and sanitize URL
+    try:
+        url = sanitize_url(url)
+    except Exception as e:
         return ToSResponse(
             url=original_url,
             tos_url=None,
@@ -195,31 +199,83 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         if not success:
             print("\nMain site navigation had issues, but trying to analyze current page...")
 
+        # Check if we're on Apple App Store or Google Play Store
+        is_app_store = await page.evaluate("""
+            () => window.location.href.includes('apps.apple.com') || 
+                  document.querySelector('meta[property="og:site_name"]')?.content?.includes('App Store')
+        """)
+        
+        is_play_store = await page.evaluate("""
+            () => window.location.href.includes('play.google.com/store/apps') || 
+                  document.querySelector('meta[property="og:url"]')?.content?.includes('play.google.com')
+        """)
+        
+        # Create a dictionary to track store context
+        store_context = {
+            "came_from_app_store": is_app_store,
+            "came_from_play_store": is_play_store
+        }
+        
         # Special handling for App Store and Play Store - extract ToS via privacy policy link
-        app_store_tos, app_store_method, page = await find_tos_via_privacy_policy(page, context)
+        app_store_tos, app_store_method, page = await find_tos_via_privacy_policy(page, store_context)
         if app_store_tos:
-            print(f"\n\n🔍 APP STORE/PLAY STORE SUCCESS: Found ToS via privacy policy link: {app_store_tos}")
+            # Verify this isn't an Apple/Google domain ToS
+            app_store_tos_domain = urlparse(app_store_tos).netloc
+            
+            if (is_app_store and "apple.com" in app_store_tos_domain) or (is_play_store and ("google.com" in app_store_tos_domain or "play.google.com" in app_store_tos_domain)):
+                print(f"❌ Found ToS link is from {'Apple' if 'apple.com' in app_store_tos_domain else 'Google'}, not from developer")
+                print("❌ Will not use this as a valid ToS URL for app store")
+            else:
+                print(f"\n\n🔍 APP STORE/PLAY STORE SUCCESS: Found ToS via privacy policy link: {app_store_tos}")
+                return ToSResponse(
+                    url=original_url,
+                    tos_url=app_store_tos,
+                    success=True,
+                    message="Found Terms of Service via app's privacy policy link",
+                    method_used=app_store_method
+                )
+        elif is_app_store or is_play_store:
+            # For app/play store URLs with no valid developer ToS found, return not found
+            print("❌ No valid developer Terms of Service found for this app")
             return ToSResponse(
                 url=original_url,
-                tos_url=app_store_tos,
-                success=True,
-                message="Found Terms of Service via app's privacy policy link",
-                method_used=app_store_method
+                tos_url=None,
+                success=False,
+                message=f"Could not find developer Terms of Service for this {'App Store' if is_app_store else 'Play Store'} app",
+                method_used="app_store_not_found"
             )
 
         # First check for user/customer terms links with high priority
         print("Searching for user/customer terms links with highest priority...")
         user_terms_link = await find_user_customer_terms_links(page)
         if user_terms_link:
-            print(f"\n\n⭐⭐⭐ HIGHEST PRIORITY SUCCESS: Found user/customer terms link: {user_terms_link}")
-            # Return immediately with this high priority link
-            return ToSResponse(
-                url=original_url,
-                tos_url=user_terms_link,
-                success=True,
-                message="Found User/Customer Terms of Service (HIGHEST PRIORITY)",
-                method_used="user_customer_supreme_priority"
-            )
+            # For store pages, verify this isn't an Apple/Google link
+            if (is_app_store or is_play_store):
+                user_terms_domain = urlparse(user_terms_link).netloc
+                if (is_app_store and "apple.com" in user_terms_domain) or (is_play_store and ("google.com" in user_terms_domain or "play.google.com" in user_terms_domain)):
+                    print(f"❌ User terms link is from {'Apple' if 'apple.com' in user_terms_domain else 'Google'}, not from developer")
+                    # Skip this and continue with other methods
+                else:
+                    print(f"\n\n⭐⭐⭐ HIGHEST PRIORITY SUCCESS: Found user/customer terms link: {user_terms_link}")
+                    # Return immediately with this high priority link
+                    return ToSResponse(
+                        url=original_url,
+                        tos_url=user_terms_link,
+                        success=True,
+                        message="Found User/Customer Terms of Service (HIGHEST PRIORITY)",
+                        method_used="user_customer_supreme_priority"
+                    )
+            else:
+                # For non-store pages, use the user terms link directly
+                print(f"\n\n⭐⭐⭐ HIGHEST PRIORITY SUCCESS: Found user/customer terms link: {user_terms_link}")
+                # Return immediately with this high priority link
+                return ToSResponse(
+                    url=original_url,
+                    tos_url=user_terms_link,
+                    success=True,
+                    message="Found User/Customer Terms of Service (HIGHEST PRIORITY)",
+                    method_used="user_customer_supreme_priority"
+                )
 
         all_links = []
         method_sources = []
@@ -227,10 +283,20 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         # 1. JavaScript method - Highest priority
         print("Trying find_all_links_js approach...")
         try:
-            js_result, page, js_unverified = await find_all_links_js(page, context, None)
+            js_result, page, js_unverified = await find_all_links_js(page, store_context, None)
             if js_result:
-                all_links.append(js_result)
-                method_sources.append((js_result, "javascript"))
+                # For store pages, verify this isn't an Apple/Google link
+                if (is_app_store or is_play_store):
+                    js_result_domain = urlparse(js_result).netloc
+                    if (is_app_store and "apple.com" in js_result_domain) or (is_play_store and ("google.com" in js_result_domain or "play.google.com" in js_result_domain)):
+                        print(f"❌ JavaScript result is from {'Apple' if 'apple.com' in js_result_domain else 'Google'}, not from developer")
+                        # Skip this and continue with other methods
+                    else:
+                        all_links.append(js_result)
+                        method_sources.append((js_result, "javascript"))
+                else:
+                    all_links.append(js_result)
+                    method_sources.append((js_result, "javascript"))
 
                 # Track if this is a high-scoring footer link
                 try:
@@ -245,8 +311,19 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                         'terms of use' in title_lower or
                         'terms and conditions' in title_lower or
                         'user agreement' in title_lower):
-                        print(f"✅ Found high-score footer link with ToS-related title: {js_result}")
-                        high_score_footer_link = js_result
+                        
+                        # For store pages, verify this isn't an Apple/Google link again
+                        if (is_app_store or is_play_store):
+                            js_result_domain = urlparse(js_result).netloc
+                            if (is_app_store and "apple.com" in js_result_domain) or (is_play_store and ("google.com" in js_result_domain or "play.google.com" in js_result_domain)):
+                                print(f"❌ High-score footer link is from {'Apple' if 'apple.com' in js_result_domain else 'Google'}, not from developer")
+                                # Don't mark as high score
+                            else:
+                                print(f"✅ Found high-score footer link with ToS-related title: {js_result}")
+                                high_score_footer_link = js_result
+                        else:
+                            print(f"✅ Found high-score footer link with ToS-related title: {js_result}")
+                            high_score_footer_link = js_result
                 except Exception as e:
                     print(f"Error checking footer link title: {e}")
         except Exception as e:
@@ -255,10 +332,20 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         # 2. Scroll method - Second highest priority
         print("Trying smooth_scroll_and_click approach...")
         try:
-            scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified if 'js_unverified' in locals() else None)
+            scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, store_context, js_unverified if 'js_unverified' in locals() else None)
             if scroll_result:
-                all_links.append(scroll_result)
-                method_sources.append((scroll_result, "scroll"))
+                # For store pages, verify this isn't an Apple/Google link
+                if (is_app_store or is_play_store):
+                    scroll_result_domain = urlparse(scroll_result).netloc
+                    if (is_app_store and "apple.com" in scroll_result_domain) or (is_play_store and ("google.com" in scroll_result_domain or "play.google.com" in scroll_result_domain)):
+                        print(f"❌ Scroll result is from {'Apple' if 'apple.com' in scroll_result_domain else 'Google'}, not from developer")
+                        # Skip this and continue with other methods
+                    else:
+                        all_links.append(scroll_result)
+                        method_sources.append((scroll_result, "scroll"))
+                else:
+                    all_links.append(scroll_result)
+                    method_sources.append((scroll_result, "scroll"))
 
                 # If no high-score footer link yet, check this one
                 if not high_score_footer_link:
@@ -271,8 +358,19 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                             'terms of use' in title_lower or
                             'terms and conditions' in title_lower or
                             'user agreement' in title_lower):
-                            print(f"✅ Found high-score scroll link with ToS-related title: {scroll_result}")
-                            high_score_footer_link = scroll_result
+                            
+                            # For store pages, verify this isn't an Apple/Google link again
+                            if (is_app_store or is_play_store):
+                                scroll_result_domain = urlparse(scroll_result).netloc
+                                if (is_app_store and "apple.com" in scroll_result_domain) or (is_play_store and ("google.com" in scroll_result_domain or "play.google.com" in scroll_result_domain)):
+                                    print(f"❌ High-score scroll link is from {'Apple' if 'apple.com' in scroll_result_domain else 'Google'}, not from developer")
+                                    # Don't mark as high score
+                                else:
+                                    print(f"✅ Found high-score scroll link with ToS-related title: {scroll_result}")
+                                    high_score_footer_link = scroll_result
+                            else:
+                                print(f"✅ Found high-score scroll link with ToS-related title: {scroll_result}")
+                                high_score_footer_link = scroll_result
                     except Exception as e:
                         print(f"Error checking scroll link title: {e}")
         except Exception as e:
@@ -280,47 +378,96 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
 
         # If we have a high-score footer link with ToS-related title, check if it's a user/customer one first
         if high_score_footer_link:
-            # Before returning, check if there are any js_unverified or scroll_unverified with user/customer terms
-            user_customer_link = None
-            if 'js_unverified' in locals() and js_unverified and ('user' in js_unverified.lower() or 'customer' in js_unverified.lower()):
-                user_customer_link = js_unverified
-                method = "javascript_user_customer"
-            elif 'scroll_unverified' in locals() and scroll_unverified and ('user' in scroll_unverified.lower() or 'customer' in scroll_unverified.lower()):
-                user_customer_link = scroll_unverified
-                method = "scroll_user_customer"
+            # For store pages, verify one last time this isn't an Apple/Google link
+            if (is_app_store or is_play_store):
+                high_score_domain = urlparse(high_score_footer_link).netloc
+                if (is_app_store and "apple.com" in high_score_domain) or (is_play_store and ("google.com" in high_score_domain or "play.google.com" in high_score_domain)):
+                    print(f"❌ High-score footer link is from {'Apple' if 'apple.com' in high_score_domain else 'Google'}, not from developer")
+                    # Don't return this link
+                    high_score_footer_link = None
                 
-            # If we found a user/customer link, prioritize it over the high score footer link
-            if user_customer_link:
-                print(f"🚀🚀🚀 Found user/customer terms in link - PRIORITIZING OVER STANDARD TOS LINK: {user_customer_link}")
-                try:
-                    # Try to navigate to it
-                    await page.goto(user_customer_link, timeout=5000, wait_until="domcontentloaded")
-                    return ToSResponse(
-                        url=original_url,
-                        tos_url=user_customer_link,
-                        success=True,
-                        message="Found User/Customer Terms of Service (highest priority)",
-                        method_used=method
-                    )
-                except Exception as e:
-                    print(f"Error navigating to user/customer link: {e}")
-                    # Still return it even if navigation fails
-                    return ToSResponse(
-                        url=original_url,
-                        tos_url=user_customer_link,
-                        success=True,
-                        message="Found User/Customer Terms of Service (navigation failed but high confidence)",
-                        method_used=method + "_nav_failed"
-                    )
-            
-            # Otherwise proceed with the high score footer link
-            print(f"Prioritizing high-score footer link with ToS-related title: {high_score_footer_link}")
+            if high_score_footer_link:
+                # Before returning, check if there are any js_unverified or scroll_unverified with user/customer terms
+                user_customer_link = None
+                if 'js_unverified' in locals() and js_unverified and ('user' in js_unverified.lower() or 'customer' in js_unverified.lower()):
+                    user_customer_link = js_unverified
+                    method = "javascript_user_customer"
+                elif 'scroll_unverified' in locals() and scroll_unverified and ('user' in scroll_unverified.lower() or 'customer' in scroll_unverified.lower()):
+                    user_customer_link = scroll_unverified
+                    method = "scroll_user_customer"
+                    
+                # If we found a user/customer link, prioritize it over the high score footer link
+                if user_customer_link:
+                    # For store pages, verify this isn't an Apple/Google link
+                    if (is_app_store or is_play_store):
+                        user_customer_domain = urlparse(user_customer_link).netloc
+                        if (is_app_store and "apple.com" in user_customer_domain) or (is_play_store and ("google.com" in user_customer_domain or "play.google.com" in user_customer_domain)):
+                            print(f"❌ User/customer link is from {'Apple' if 'apple.com' in user_customer_domain else 'Google'}, not from developer")
+                            # Skip to using high_score_footer_link instead
+                        else:
+                            print(f"🚀🚀🚀 Found user/customer terms in link - PRIORITIZING OVER STANDARD TOS LINK: {user_customer_link}")
+                            try:
+                                # Try to navigate to it
+                                await page.goto(user_customer_link, timeout=5000, wait_until="domcontentloaded")
+                                return ToSResponse(
+                                    url=original_url,
+                                    tos_url=user_customer_link,
+                                    success=True,
+                                    message="Found User/Customer Terms of Service (highest priority)",
+                                    method_used=method
+                                )
+                            except Exception as e:
+                                print(f"Error navigating to user/customer link: {e}")
+                                # Still return it even if navigation fails
+                                return ToSResponse(
+                                    url=original_url,
+                                    tos_url=user_customer_link,
+                                    success=True,
+                                    message="Found User/Customer Terms of Service (navigation failed but high confidence)",
+                                    method_used=method + "_nav_failed"
+                                )
+                    else:
+                        print(f"🚀🚀🚀 Found user/customer terms in link - PRIORITIZING OVER STANDARD TOS LINK: {user_customer_link}")
+                        try:
+                            # Try to navigate to it
+                            await page.goto(user_customer_link, timeout=5000, wait_until="domcontentloaded")
+                            return ToSResponse(
+                                url=original_url,
+                                tos_url=user_customer_link,
+                                success=True,
+                                message="Found User/Customer Terms of Service (highest priority)",
+                                method_used=method
+                            )
+                        except Exception as e:
+                            print(f"Error navigating to user/customer link: {e}")
+                            # Still return it even if navigation fails
+                            return ToSResponse(
+                                url=original_url,
+                                tos_url=user_customer_link,
+                                success=True,
+                                message="Found User/Customer Terms of Service (navigation failed but high confidence)",
+                                method_used=method + "_nav_failed"
+                            )
+                
+                # Otherwise proceed with the high score footer link
+                print(f"Prioritizing high-score footer link with ToS-related title: {high_score_footer_link}")
+                return ToSResponse(
+                    url=original_url,
+                    tos_url=high_score_footer_link,
+                    success=True,
+                    message="Found Terms of Service using high-priority footer link with ToS title",
+                    method_used="footer_title_match"
+                )
+        
+        # If we're here and this is an app/play store URL, we failed to find a valid developer ToS
+        if is_app_store or is_play_store:
+            print("❌ No valid developer Terms of Service found for this app after trying all methods")
             return ToSResponse(
                 url=original_url,
-                tos_url=high_score_footer_link,
-                success=True,
-                message="Found Terms of Service using high-priority footer link with ToS title",
-                method_used="footer_title_match"
+                tos_url=None,
+                success=False,
+                message=f"Could not find developer Terms of Service for this {'App Store' if is_app_store else 'Play Store'} app",
+                method_used="app_store_not_found"
             )
 
         # 3. Search engine methods - Lower priority
@@ -683,7 +830,7 @@ async def find_all_links_js(page, context, unverified_result=None):
     try:
         print("\n=== Starting find_all_links_js ===")
         print("Searching for all links using JavaScript...")
-        
+
         # Get the base domain for comparison
         current_url = await page.evaluate("() => window.location.href")
         parsed_url = urlparse(current_url)
@@ -700,7 +847,15 @@ async def find_all_links_js(page, context, unverified_result=None):
         # If we're looking at a developer site that was navigated from an App/Play store
         # and we detect anti-bot protection, we should check if the links found are from Apple/Google
         # and filter them out if they are
-        developer_site_from_store = context.get("came_from_app_store") or context.get("came_from_play_store")
+        # Make sure context is a dictionary before trying to access it
+        developer_site_from_store = False
+        came_from_app_store = False
+        came_from_play_store = False
+        
+        if isinstance(context, dict):
+            developer_site_from_store = context.get("came_from_app_store") or context.get("came_from_play_store")
+            came_from_app_store = context.get("came_from_app_store", False)
+            came_from_play_store = context.get("came_from_play_store", False)
         
         # Different approaches based on anti-bot presence
         if anti_bot:
@@ -736,7 +891,7 @@ async def find_all_links_js(page, context, unverified_result=None):
                     return links;
                 }
             """)
-            
+
             if footer_links and len(footer_links) > 0:
                 print(f"Found {len(footer_links)} potential links in footer despite anti-bot protection")
                 
@@ -749,12 +904,20 @@ async def find_all_links_js(page, context, unverified_result=None):
                     # Skip links from Apple/Google domains if we're on a developer site
                     if developer_site_from_store:
                         link_domain = urlparse(link_url).netloc
-                        if (is_apple_domain or "apple.com" in link_domain) and context.get("came_from_app_store"):
+                        if (is_apple_domain or "apple.com" in link_domain) and came_from_app_store:
                             print(f"Skipping Apple domain link: {link_text} - {link_url}")
                             continue
-                        if (is_google_domain or "google.com" in link_domain or "play.google.com" in link_domain) and context.get("came_from_play_store"):
+                        if (is_google_domain or "google.com" in link_domain or "play.google.com" in link_domain) and came_from_play_store:
                             print(f"Skipping Google domain link: {link_text} - {link_url}")
                             continue
+                    
+                    # Always skip Apple/Google domains if we're on their domains
+                    if is_apple_domain and "apple.com" in link_url:
+                        print(f"Skipping Apple domain link (on Apple domain): {link_text} - {link_url}")
+                        continue
+                    if is_google_domain and ("google.com" in link_url or "play.google.com" in link_url):
+                        print(f"Skipping Google domain link (on Google domain): {link_text} - {link_url}")
+                        continue
                     
                     # Calculate a score based on how likely this is a ToS link
                     score = 0
@@ -880,10 +1043,16 @@ async def find_all_links_js(page, context, unverified_result=None):
             # Skip links from Apple/Google domains if we're on a developer site
             if developer_site_from_store:
                 link_domain = urlparse(href).netloc
-                if (is_apple_domain or "apple.com" in link_domain) and context.get("came_from_app_store"):
+                if (is_apple_domain or "apple.com" in link_domain) and came_from_app_store:
                     continue
-                if (is_google_domain or "google.com" in link_domain or "play.google.com" in link_domain) and context.get("came_from_play_store"):
+                if (is_google_domain or "google.com" in link_domain or "play.google.com" in link_domain) and came_from_play_store:
                     continue
+            
+            # Always skip Apple/Google domains if we're on their domains
+            if is_apple_domain and "apple.com" in href:
+                continue
+            if is_google_domain and ("google.com" in href or "play.google.com" in href):
+                continue
             
             # Calculate relevance score
             score = 0
@@ -955,7 +1124,7 @@ async def find_all_links_js(page, context, unverified_result=None):
         
         print("No relevant links found after filtering")
         return None, page, unverified_result
-    
+
     except Exception as e:
         print(f"Error in find_all_links_js: {e}")
         traceback.print_exc()
@@ -1035,171 +1204,148 @@ async def click_and_wait_for_navigation(page, element, timeout=3000):
 async def smooth_scroll_and_click(
     page, context, unverified_result=None, step=200, delay=50
 ):
-    """Optimized version that finds links without mandatory navigation."""
-    print("🔃 Starting smooth scroll with strong term matching...")
-    visited_url = None
-    current_page = page
-
-    # First check visible links before scrolling
-    visited_url, current_page, unverified_result = await find_matching_link(
-        current_page, context, unverified_result
-    )
-    if visited_url:
-        return visited_url, current_page, unverified_result
-
+    """
+    Smooth scroll through the page to find ToS links.
+    """
     try:
-        # Simplified footer selectors
-        footer_selectors = ["footer", ".footer", "#footer"]
-
-        # Get page height more efficiently
-        page_height = await current_page.evaluate(
-            """() => document.documentElement.scrollHeight"""
-        )
-
-        # Use fewer positions to check
-        positions_to_check = [
-            page_height,
-            page_height * 0.5,
-        ]
-
-        for scroll_pos in positions_to_check:
-            await current_page.evaluate(f"window.scrollTo(0, {scroll_pos})")
-            await current_page.wait_for_timeout(200)
-
-            # Extract all links at this scroll position
-            links = await current_page.evaluate("""
-                () => {
-                    return Array.from(document.querySelectorAll('a[href]'))
-                        .filter(a => {
-                            if (!a.href || !a.textContent) return false;
-                            if (a.href.startsWith('javascript:') || a.href.startsWith('mailto:')) return false;
-                            
-                            const text = a.textContent.trim().toLowerCase();
-                            const href = a.href.toLowerCase();
-                            
-                            return text.includes('terms') || 
-                                   text.includes('tos') || 
-                                   text.includes('conditions') ||
-                                   href.includes('terms') || 
-                                   href.includes('tos') ||
-                                   href.includes('conditions');
-                        })
-                        .map(a => ({
-                            text: a.textContent.trim(),
-                            href: a.href
-                        }));
-                }
-            """)
-            
-            if links and len(links) > 0:
-                # Score and sort links
-                scored_links = []
-                for link in links:
-                    score = 0
-                    text = link['text'].lower()
-                    href = link['href'].lower()
+        print("🔃 Starting smooth scroll with strong term matching...")
+        
+        # Get the current URL and domain
+        current_url = await page.evaluate("() => window.location.href")
+        parsed_url = urlparse(current_url)
+        base_domain = parsed_url.netloc
+        
+        # Check if we're on Apple or Google domains
+        is_apple_domain = "apple.com" in base_domain
+        is_google_domain = "google.com" in base_domain or "play.google.com" in base_domain
+        
+        # Set up context flags similar to find_all_links_js
+        developer_site_from_store = False
+        came_from_app_store = False
+        came_from_play_store = False
+        
+        if isinstance(context, dict):
+            developer_site_from_store = context.get("came_from_app_store") or context.get("came_from_play_store")
+            came_from_app_store = context.get("came_from_app_store", False)
+            came_from_play_store = context.get("came_from_play_store", False)
+        
+        # Try to find the footer first as it often contains ToS links
+        footer_selector = await page.evaluate("""
+            () => {
+                const footers = document.querySelectorAll('footer, [id*="foot"], [class*="foot"]');
+                return footers.length > 0 ? 'footer, [id*="foot"], [class*="foot"]' : null;
+            }
+        """)
+        
+        if footer_selector:
+            print(f"Found footer with selector: {footer_selector}")
+            # Just scroll to the footer and look for ToS links there
+            await page.evaluate(f"document.querySelector('{footer_selector}').scrollIntoView()")
+            await page.wait_for_timeout(500)  # Short wait for any animations
+        
+        # Get all links that match ToS patterns
+        links = await page.evaluate("""
+            () => {
+                const links = [];
+                document.querySelectorAll('a[href]').forEach(link => {
+                    const text = link.textContent.trim().toLowerCase();
+                    const href = link.href.toLowerCase();
                     
-                    # Score based on text
-                    if "terms of service" in text: score += 100
-                    elif "terms of use" in text: score += 90
-                    elif "terms and conditions" in text: score += 80
-                    elif "terms" in text: score += 60
-                    elif "tos" in text: score += 50
+                    // Skip javascript, mailto, etc.
+                    if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) {
+                        return;
+                    }
                     
-                    # Score based on URL
-                    if "/terms-of-service" in href: score += 50
-                    elif "/terms" in href: score += 30
-                    elif "/tos" in href: score += 30
+                    let score = 0;
                     
-                    if score > 50:
-                        scored_links.append((href, score, text))
+                    // Score based on text
+                    if (text.includes('user agreement')) score += 150;
+                    if (text.includes('customer agreement')) score += 150;
+                    if (text.includes('user terms')) score += 140;
+                    if (text.includes('customer terms')) score += 140;
+                    if (text.includes('terms of use')) score += 140;
+                    if (text.includes('terms of service')) score += 130;
+                    if (text.includes('terms and conditions')) score += 120;
+                    if (text.includes('terms & conditions')) score += 120;
+                    if (text.includes('conditions of use')) score += 110;
+                    if (text.includes('legal terms')) score += 100;
+                    if (text.includes('terms')) score += 90;
+                    if (text.includes('legal')) score += 80;
+                    if (text.includes('agreement')) score += 70;
+                    if (text.includes('conditions')) score += 60;
+                    
+                    // URL patterns
+                    if (href.includes('terms-of-service') || href.includes('tos')) score += 50;
+                    if (href.includes('terms-of-use') || href.includes('tou')) score += 50;
+                    if (href.includes('terms-and-conditions')) score += 40;
+                    if (href.includes('legal/terms')) score += 40;
+                    if (href.includes('agreement')) score += 30;
+                    
+                    if (score >= 60) {
+                        links.push({
+                            text: text,
+                            href: link.href,
+                            score: score
+                        });
+                    }
+                });
                 
-                # Sort by score
-                scored_links.sort(key=lambda x: x[1], reverse=True)
-                
-                # Return the best link without navigation if score is high enough
-                if scored_links and scored_links[0][1] > 60:
-                    best_link = scored_links[0][0]
-                    print(f"Found high confidence link in scroll: {scored_links[0][2]} ({scored_links[0][1]})")
-                    print(f"Returning link without navigation: {best_link}")
-                    return best_link, current_page, unverified_result
+                return links;
+            }
+        """)
+        
+        # Filter out links from Apple/Google domains
+        filtered_links = []
+        
+        for link in links:
+            link_text = link.get('text', '')
+            link_url = link.get('href', '')
+            link_score = link.get('score', 0)
             
-            # Check with traditional method as fallback
-            visited_url, current_page, unverified_result = await find_matching_link(
-                current_page, context, unverified_result
-            )
-            if visited_url:
-                return visited_url, current_page, unverified_result
-
-        # Check footer area with simplified approach
-        for selector in footer_selectors:
-            footer = await current_page.query_selector(selector)
-            if footer:
-                print(f"Found footer with selector: {selector}")
-                await footer.scroll_into_view_if_needed()
-
-                # Check for terms links with faster query
-                terms_links = await current_page.evaluate(
-                    """(selector) => {
-                    const footer = document.querySelector(selector);
-                    if (!footer) return [];
-                    const links = Array.from(footer.querySelectorAll('a'));
-                    return links.filter(link => {
-                        const text = link.textContent.toLowerCase();
-                        const href = link.href.toLowerCase();
-                        return text.includes('terms') || 
-                               text.includes('tos') || 
-                               href.includes('terms') || 
-                               href.includes('tos');
-                    }).map(link => ({
-                    text: link.textContent.trim(),
-                        href: link.href,
-                        score: (text.includes('terms of service') || text.includes('terms of use')) ? 100 :
-                              text.includes('terms') ? 80 :
-                              text.includes('tos') ? 70 : 
-                              50
-                    }));
-                }""",
-                    selector,
-                )
-
-                if terms_links and len(terms_links) > 0:
-                    print(f"Found {len(terms_links)} potential terms links in footer")
-                    # Sort by score
-                    terms_links.sort(key=lambda x: x.get('score', 0), reverse=True)
-                    
-                    # Return highest scoring link without navigation
-                    if terms_links[0].get('score', 0) > 60:
-                        print(f"Returning highest scoring footer link without navigation: {terms_links[0]['href']}")
-                        return terms_links[0]['href'], current_page, unverified_result
-                    
-                    # Only navigate if absolutely necessary for lower scoring links
-                    # Limit to first 2 links for speed
-                    for link in terms_links[:2]:
-                        try:
-                            element = await current_page.query_selector(
-                                f"a[href='{link['href']}']"
-                            )
-                            if element:
-                                success = await click_and_wait_for_navigation(
-                                    current_page, element, timeout=3000
-                                )
-                                if success:
-                                    return (
-                                        current_page.url,
-                                        current_page,
-                                        unverified_result,
-                                    )
-                        except Exception as e:
-                            print(f"Error clicking footer link: {e}")
-
-        # Skip scrolling back up to save time
+            # Skip Apple/Google domain links based on context
+            link_domain = urlparse(link_url).netloc
+            
+            # Skip links from Apple/Google domains if we're on a developer site
+            if developer_site_from_store:
+                if (is_apple_domain or "apple.com" in link_domain) and came_from_app_store:
+                    print(f"Skipping Apple domain link: {link_text} - {link_url}")
+                    continue
+                if (is_google_domain or "google.com" in link_domain or "play.google.com" in link_domain) and came_from_play_store:
+                    print(f"Skipping Google domain link: {link_text} - {link_url}")
+                    continue
+            
+            # Always skip Apple/Google domains if we're on their domains
+            if is_apple_domain and "apple.com" in link_url:
+                print(f"Skipping Apple domain link (on Apple domain): {link_text} - {link_url}")
+                continue
+            if is_google_domain and ("google.com" in link_url or "play.google.com" in link_url):
+                print(f"Skipping Google domain link (on Google domain): {link_text} - {link_url}")
+                continue
+            
+            # Keep high confidence links
+            if link_score >= 60:
+                print(f"Found high confidence link: {link_text} ({link_score})")
+                filtered_links.append(link)
+        
+        # Sort links by score
+        filtered_links.sort(key=lambda x: x['score'], reverse=True)
+        
+        # If we have links, return the best one without navigating
+        if filtered_links:
+            best_link = filtered_links[0]['href']
+            best_score = filtered_links[0]['score']
+            
+            # Skip full-page scrolling since we already found high-confidence links
+            print(f"Returning best link without navigation: {best_link} (Score: {best_score})")
+            return best_link, page, unverified_result
+        
         print("✅ Reached the bottom of the page.")
-
+        
+        return None, page, unverified_result
+        
     except Exception as e:
-        print(f"Error in footer/scroll check: {e}")
-
-    return None, current_page, unverified_result
+        print(f"Error in smooth scroll: {e}")
+        return None, page, unverified_result
 
 
 def is_likely_registration_or_login_page(url: str) -> bool:
