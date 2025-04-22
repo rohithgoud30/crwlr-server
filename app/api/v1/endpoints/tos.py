@@ -1018,7 +1018,7 @@ async def find_all_links_js(page, context, unverified_result=None):
                         
                         links.push({
                             href: link.href,
-                            text: text,
+                    text: text,
                             isFooter: !!link.closest('footer, [id*="foot"], [class*="foot"]')
                         });
                     }
@@ -1031,7 +1031,7 @@ async def find_all_links_js(page, context, unverified_result=None):
         if not links_data or len(links_data) == 0:
             print("No relevant links found using JavaScript method")
             return None, page, unverified_result
-        
+
         # Extract all links with a relevant name or URL
         relevant_links = []
         
@@ -1249,7 +1249,7 @@ async def smooth_scroll_and_click(
                 const links = [];
                 document.querySelectorAll('a[href]').forEach(link => {
                     const text = link.textContent.trim().toLowerCase();
-                    const href = link.href.toLowerCase();
+                        const href = link.href.toLowerCase();
                     
                     // Skip javascript, mailto, etc.
                     if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) {
@@ -1340,9 +1340,9 @@ async def smooth_scroll_and_click(
             return best_link, page, unverified_result
         
         print("✅ Reached the bottom of the page.")
-        
+
         return None, page, unverified_result
-        
+
     except Exception as e:
         print(f"Error in smooth scroll: {e}")
         return None, page, unverified_result
