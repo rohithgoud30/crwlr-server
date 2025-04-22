@@ -222,7 +222,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 # Track if this is a high-scoring footer link
                 try:
                     # Check if this looks like ToS from the title
-                    await page.goto(js_result, timeout=5000, wait_until="domcontentloaded")
+                    await page.goto(js_result, timeout=3000, wait_until="domcontentloaded")
                     page_title = await page.title()
                     title_lower = page_title.lower()
 
@@ -250,7 +250,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 # If no high-score footer link yet, check this one
                 if not high_score_footer_link:
                     try:
-                        await page.goto(scroll_result, timeout=5000, wait_until="domcontentloaded")
+                        await page.goto(scroll_result, timeout=3000, wait_until="domcontentloaded")
                         page_title = await page.title()
                         title_lower = page_title.lower()
 
@@ -530,31 +530,27 @@ async def setup_browser(playwright=None):
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--disable-infobars",
-                "--window-size=1920,1080",  # Reduced resolution for stability
+                "--window-size=1920,1080",  # Maximum window size for better rendering
                 "--disable-extensions",
                 "--disable-features=site-per-process",  # For memory optimization
             ],
             chromium_sandbox=False,
-            slow_mo=50,  # Reduced delay for better performance
+            slow_mo=20,  # Reduced delay for better performance
         )
 
         # Create context with optimized settings
         context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080},  # Consistent with browser window
+            viewport={"width": 1920, "height": 1080},  # Maximum viewport size
             user_agent=user_agent,
             locale="en-US",
             timezone_id="America/New_York",
             extra_http_headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
                 "DNT": "1",
                 "Connection": "keep-alive",
                 "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
             },
         )
 
@@ -569,12 +565,12 @@ async def setup_browser(playwright=None):
         page = await context.new_page()
 
         # Random delay function with shorter times for performance
-        async def random_delay(min_ms=200, max_ms=800):
+        async def random_delay(min_ms=100, max_ms=300):
             delay = random.randint(min_ms, max_ms)
             await page.wait_for_timeout(delay)
 
         # Set reasonable timeouts
-        page.set_default_timeout(20000)  # Reduced timeout
+        page.set_default_timeout(10000)  # Reduced timeout
 
         return browser, context, page, random_delay
 
@@ -591,14 +587,14 @@ async def navigate_with_retry(page, url, max_retries=2):
         try:
             # Add shorter random delay between attempts
             if attempt > 0:
-                delay = random.randint(500, 1000)  # Reduced delay
+                delay = random.randint(300, 500)  # Reduced delay
                 print(f"Waiting {delay/1000}s before retry {attempt+1}...")
                 await page.wait_for_timeout(delay)
 
             print(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
 
             # Optimized navigation strategy with shorter timeout
-            response = await page.goto(url, timeout=8000, wait_until="domcontentloaded")
+            response = await page.goto(url, timeout=5000, wait_until="domcontentloaded")
 
             # Quick check for anti-bot measures
             is_anti_bot, patterns = await detect_anti_bot_patterns(page)
@@ -672,7 +668,7 @@ async def find_all_links_js(page, context, unverified_result=None):
 
     try:
         # Shorter wait for page loading
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(500)
 
         # First check if we're on an anti-bot page
         is_anti_bot = await page.evaluate(
@@ -759,6 +755,7 @@ async def find_all_links_js(page, context, unverified_result=None):
                     )
 
                 best_link = footer_links[0]["href"]
+                # Just return the link without navigating to verify
                 return best_link, page, best_link
 
         # Get the base domain for validation
@@ -894,37 +891,18 @@ async def find_all_links_js(page, context, unverified_result=None):
             if not unverified_result:
                 unverified_result = best_link
 
-            # Try to navigate to the best link
-            try:
-                print(f"Navigating to best link: {best_link}")
-                await page.goto(best_link, timeout=8000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(1500)
-
-                # Verify this is actually a terms page
-                is_terms_page = await page.evaluate(
-                    """() => {
-                    const text = document.body.innerText.toLowerCase();
-                    const strongTermMatchers = [
-                        'terms of use', 
-                        'terms of service', 
-                        'terms and conditions',
-                        'user agreement',
-                        'legal agreement',
-                        'by using'
-                    ];
-                    return strongTermMatchers.some(term => text.includes(term));
-                            }"""
-                )
-
-                if is_terms_page:
-                    print(f"✅ Verified as terms of service page: {page.url}")
-                    return page.url, page, unverified_result
-                else:
-                    print("⚠️ Link does not appear to be a terms page after inspection")
-                    return None, page, best_link
-            except Exception as e:
-                print(f"Error navigating to best link: {e}")
-                return None, page, best_link
+            # Skip navigation completely for any link with score > 60
+            # This removes mandatory navigation to improve performance
+            if links[0]["score"] > 60:
+                print(f"Found high-scoring link ({links[0]['score']}): {best_link}")
+                print(f"Skipping navigation to save time")
+                return best_link, page, unverified_result
+                
+            # Only try navigation for medium-confidence links (score between 30-60)
+            # For scores below this threshold, just return the best link
+            if links[0]["score"] <= 60:
+                print(f"Medium-confidence link found with score {links[0]['score']}, returning without navigation")
+                return best_link, page, unverified_result
 
         return None, page, unverified_result
 
@@ -934,13 +912,14 @@ async def find_all_links_js(page, context, unverified_result=None):
 
 
 async def find_matching_link(page, context, unverified_result=None):
-    """Find and click on terms-related links with optimized performance."""
+    """Find and extract terms-related links without navigation."""
     try:
         # Use a more targeted selector for performance
         links = await page.query_selector_all(
             'footer a, .footer a, #footer a, a[href*="terms"], a[href*="tos"], a[href*="legal"]'
         )
 
+        scored_links = []
         for link in links:
             try:
                 text = await link.text_content()
@@ -972,20 +951,24 @@ async def find_matching_link(page, context, unverified_result=None):
 
                 if score > 50:  # High confidence match
                     print(f"Found high confidence link: {text} ({score})")
-                    success = await click_and_wait_for_navigation(
-                        page, link, timeout=5000
-                    )
-                    if success:
-                        return page.url, page, unverified_result
+                    scored_links.append((href, score, text))
             except Exception as e:
                 continue
+                
+        # If we found high-confidence links, return the best one without navigation
+        if scored_links:
+            scored_links.sort(key=lambda x: x[1], reverse=True)
+            best_link = scored_links[0][0]
+            print(f"Returning best link without navigation: {best_link} (Score: {scored_links[0][1]})")
+            return best_link, page, unverified_result
+            
         return None, page, unverified_result
     except Exception as e:
         print(f"Error in find_matching_link: {e}")
         return None, page, unverified_result
 
 
-async def click_and_wait_for_navigation(page, element, timeout=5000):
+async def click_and_wait_for_navigation(page, element, timeout=3000):
     """Click a link and wait for navigation with shorter timeout."""
     try:
         async with page.expect_navigation(
@@ -998,13 +981,10 @@ async def click_and_wait_for_navigation(page, element, timeout=5000):
         return False
 
 
-import random
-
-
 async def smooth_scroll_and_click(
-    page, context, unverified_result=None, step=200, delay=100
+    page, context, unverified_result=None, step=200, delay=50
 ):
-    """Optimized version of smooth scroll with faster execution time."""
+    """Optimized version that finds links without mandatory navigation."""
     print("🔃 Starting smooth scroll with strong term matching...")
     visited_url = None
     current_page = page
@@ -1033,8 +1013,67 @@ async def smooth_scroll_and_click(
 
         for scroll_pos in positions_to_check:
             await current_page.evaluate(f"window.scrollTo(0, {scroll_pos})")
-            await current_page.wait_for_timeout(300)
+            await current_page.wait_for_timeout(200)
 
+            # Extract all links at this scroll position
+            links = await current_page.evaluate("""
+                () => {
+                    return Array.from(document.querySelectorAll('a[href]'))
+                        .filter(a => {
+                            if (!a.href || !a.textContent) return false;
+                            if (a.href.startsWith('javascript:') || a.href.startsWith('mailto:')) return false;
+                            
+                            const text = a.textContent.trim().toLowerCase();
+                            const href = a.href.toLowerCase();
+                            
+                            return text.includes('terms') || 
+                                   text.includes('tos') || 
+                                   text.includes('conditions') ||
+                                   href.includes('terms') || 
+                                   href.includes('tos') ||
+                                   href.includes('conditions');
+                        })
+                        .map(a => ({
+                            text: a.textContent.trim(),
+                            href: a.href
+                        }));
+                }
+            """)
+            
+            if links and len(links) > 0:
+                # Score and sort links
+                scored_links = []
+                for link in links:
+                    score = 0
+                    text = link['text'].lower()
+                    href = link['href'].lower()
+                    
+                    # Score based on text
+                    if "terms of service" in text: score += 100
+                    elif "terms of use" in text: score += 90
+                    elif "terms and conditions" in text: score += 80
+                    elif "terms" in text: score += 60
+                    elif "tos" in text: score += 50
+                    
+                    # Score based on URL
+                    if "/terms-of-service" in href: score += 50
+                    elif "/terms" in href: score += 30
+                    elif "/tos" in href: score += 30
+                    
+                    if score > 50:
+                        scored_links.append((href, score, text))
+                
+                # Sort by score
+                scored_links.sort(key=lambda x: x[1], reverse=True)
+                
+                # Return the best link without navigation if score is high enough
+                if scored_links and scored_links[0][1] > 60:
+                    best_link = scored_links[0][0]
+                    print(f"Found high confidence link in scroll: {scored_links[0][2]} ({scored_links[0][1]})")
+                    print(f"Returning link without navigation: {best_link}")
+                    return best_link, current_page, unverified_result
+            
+            # Check with traditional method as fallback
             visited_url, current_page, unverified_result = await find_matching_link(
                 current_page, context, unverified_result
             )
@@ -1063,7 +1102,11 @@ async def smooth_scroll_and_click(
                                href.includes('tos');
                     }).map(link => ({
                     text: link.textContent.trim(),
-                        href: link.href
+                        href: link.href,
+                        score: (text.includes('terms of service') || text.includes('terms of use')) ? 100 :
+                              text.includes('terms') ? 80 :
+                              text.includes('tos') ? 70 : 
+                              50
                     }));
                 }""",
                     selector,
@@ -1071,15 +1114,24 @@ async def smooth_scroll_and_click(
 
                 if terms_links and len(terms_links) > 0:
                     print(f"Found {len(terms_links)} potential terms links in footer")
-                    # Limit to first 3 links for speed
-                    for link in terms_links[:3]:
+                    # Sort by score
+                    terms_links.sort(key=lambda x: x.get('score', 0), reverse=True)
+                    
+                    # Return highest scoring link without navigation
+                    if terms_links[0].get('score', 0) > 60:
+                        print(f"Returning highest scoring footer link without navigation: {terms_links[0]['href']}")
+                        return terms_links[0]['href'], current_page, unverified_result
+                    
+                    # Only navigate if absolutely necessary for lower scoring links
+                    # Limit to first 2 links for speed
+                    for link in terms_links[:2]:
                         try:
                             element = await current_page.query_selector(
                                 f"a[href='{link['href']}']"
                             )
                             if element:
                                 success = await click_and_wait_for_navigation(
-                                    current_page, element, timeout=5000
+                                    current_page, element, timeout=3000
                                 )
                                 if success:
                                     return (

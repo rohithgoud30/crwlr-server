@@ -391,7 +391,7 @@ async def find_user_customer_privacy_links(page):
 async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
     """Find Privacy Policy page for a given URL."""
     original_url = request.url
-    
+
     if not original_url:
         raise HTTPException(status_code=400, detail="URL is required")
     
