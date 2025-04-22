@@ -1,12 +1,17 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 import subprocess
 import os
 import re
+import logging
 
-from app.api.v1.api import api_router
+from app.api.v1.api import api_router, test_router
 from app.core.config import settings
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Get current branch name for API documentation
 def get_branch_name():
@@ -54,6 +59,27 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Add middleware to log requests and headers
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    # Log the request
+    logger.info(f"Request: {request.method} {request.url}")
+    
+    # Log all headers
+    headers_list = []
+    for header_name, header_value in request.headers.items():
+        # Mask API key for security
+        if header_name.lower() == "x-api-key":
+            header_value = "*****" if header_value else "Not provided"
+        headers_list.append(f"{header_name}: {header_value}")
+    
+    if headers_list:
+        logger.info("Headers: \n" + "\n".join(headers_list))
+    
+    # Process the request
+    response = await call_next(request)
+    return response
+
 # Set up CORS middleware with explicit origins
 origins = settings.BACKEND_CORS_ORIGINS  # Use settings from config
 
@@ -92,9 +118,11 @@ else:
         allow_headers=["*"],
     )
 
-# Include API router
+# Include API router with authentication
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
+# Include test router without authentication
+app.include_router(test_router, prefix=settings.API_V1_STR)
 
 @app.get("/", include_in_schema=False)
 def root():
