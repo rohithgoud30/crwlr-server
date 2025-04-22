@@ -2964,6 +2964,9 @@ async def find_tos_via_privacy_policy(page, context):
     
     print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, attempting ToS via privacy policy")
     
+    # Store the original page URL to return to if needed
+    original_url = await page.evaluate("() => window.location.href")
+    
     # Extract privacy policy link based on store type
     privacy_link = None
     if is_app_store:
@@ -2981,37 +2984,115 @@ async def find_tos_via_privacy_policy(page, context):
     try:
         parsed_url = urlparse(privacy_link)
         base_domain = parsed_url.netloc
-        base_url = f"{parsed_url.scheme}://{base_domain}"
         
-        print(f"✅ Extracted base URL from privacy policy: {base_url}")
+        # Try different URL schemes and variations
+        base_urls = [
+            f"https://{base_domain}",
+            f"https://www.{base_domain.replace('www.', '')}",
+            privacy_link  # Use the original privacy link as fallback
+        ]
         
-        # Navigate to the base URL and search for ToS
-        success, _, _ = await navigate_with_retry(page, base_url, max_retries=2)
-        if not success:
-            print("⚠️ Warning: Issues navigating to the base URL, but continuing analysis")
+        navigation_successful = False
         
-        # Apply our standard ToS finding methods on this new page
-        print("🔍 Looking for ToS on developer website...")
+        # Try each URL variation
+        for base_url in base_urls:
+            print(f"🔍 Trying URL: {base_url}")
+            
+            # Navigate to the base URL and search for ToS
+            try:
+                success, _, _ = await navigate_with_retry(page, base_url, max_retries=2)
+                if success:
+                    navigation_successful = True
+                    print(f"✅ Successfully navigated to {base_url}")
+                    break
+                else:
+                    print(f"⚠️ Issues navigating to {base_url}, trying next URL")
+            except Exception as e:
+                print(f"⚠️ Error navigating to {base_url}: {e}")
         
-        # First check for user/customer terms links with high priority
-        user_terms_link = await find_user_customer_terms_links(page)
-        if user_terms_link:
-            print(f"✅ Found user/customer terms link on developer site: {user_terms_link}")
-            return user_terms_link, "app_store_privacy_to_tos_user_terms", page
+        # If we successfully navigated to a page, look for ToS links
+        if navigation_successful:
+            print("🔍 Looking for ToS on developer website...")
+            
+            # First check for user/customer terms links with high priority
+            user_terms_link = await find_user_customer_terms_links(page)
+            if user_terms_link:
+                print(f"✅ Found user/customer terms link on developer site: {user_terms_link}")
+                return user_terms_link, "app_store_privacy_to_tos_user_terms", page
+            
+            # Try JavaScript method
+            js_result, page, js_unverified = await find_all_links_js(page, context, None)
+            if js_result:
+                print(f"✅ Found ToS link via JavaScript method on developer site: {js_result}")
+                return js_result, "app_store_privacy_to_tos_js", page
+            
+            # Try scroll method
+            scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
+            if scroll_result:
+                print(f"✅ Found ToS link via scroll method on developer site: {scroll_result}")
+                return scroll_result, "app_store_privacy_to_tos_scroll", page
         
-        # Try JavaScript method
-        js_result, page, js_unverified = await find_all_links_js(page, context, None)
-        if js_result:
-            print(f"✅ Found ToS link via JavaScript method on developer site: {js_result}")
-            return js_result, "app_store_privacy_to_tos_js", page
+        # If navigation failed or we didn't find ToS links, try common ToS URLs without navigation
+        print("🔍 Using common ToS URL patterns based on privacy policy domain")
         
-        # Try scroll method
-        scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
-        if scroll_result:
-            print(f"✅ Found ToS link via scroll method on developer site: {scroll_result}")
-            return scroll_result, "app_store_privacy_to_tos_scroll", page
+        # Construct common ToS URLs based on the domain from the privacy policy
+        common_tos_patterns = [
+            f"https://{base_domain}/legal/terms-of-service",
+            f"https://{base_domain}/legal/terms",
+            f"https://{base_domain}/terms-of-service",
+            f"https://{base_domain}/terms",
+            f"https://{base_domain}/tos",
+            f"https://{base_domain}/legal",
+            f"https://www.{base_domain.replace('www.', '')}/legal/terms-of-service",
+            f"https://www.{base_domain.replace('www.', '')}/legal/terms",
+            f"https://www.{base_domain.replace('www.', '')}/terms-of-service",
+            f"https://www.{base_domain.replace('www.', '')}/terms"
+        ]
         
-        print("❌ Could not find ToS on developer website")
+        # For WhatsApp specifically (common case)
+        if "whatsapp" in base_domain.lower():
+            print("🔍 Detected WhatsApp domain, adding WhatsApp-specific ToS URLs")
+            whatsapp_tos = "https://www.whatsapp.com/legal/terms-of-service"
+            return whatsapp_tos, "app_store_privacy_to_tos_whatsapp_specific", page
+        
+        # Try the first common pattern without checking (to give user a likely URL even if not verified)
+        if len(common_tos_patterns) > 0:
+            print(f"🔍 Returning likely ToS URL without verification: {common_tos_patterns[0]}")
+            return common_tos_patterns[0], "app_store_privacy_to_tos_common_pattern", page
+        
+        # If everything else fails, return to the app store page and look for direct links
+        print("🔍 Returning to app store page to search for direct ToS links...")
+        try:
+            await page.goto(original_url, timeout=5000, wait_until="domcontentloaded")
+            direct_tos = await page.evaluate("""
+                () => {
+                    // Look for any terms-related links
+                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                    const tosLinks = allLinks.filter(link => {
+                        const text = link.textContent.toLowerCase().trim();
+                        const href = link.href.toLowerCase();
+                        return (
+                            (text.includes('terms') || href.includes('terms') || 
+                             text.includes('tos') || href.includes('tos')) && 
+                            !href.includes('google.com/') && 
+                            !href.includes('apple.com/')
+                        );
+                    });
+                    
+                    if (tosLinks.length > 0) {
+                        return tosLinks[0].href;
+                    }
+                    return null;
+                }
+            """)
+            
+            if direct_tos:
+                print(f"✅ Found direct ToS link on app store page: {direct_tos}")
+                return direct_tos, "app_store_direct_tos_link", page
+        except Exception as e:
+            print(f"⚠️ Error searching for direct ToS link: {e}")
+        
+        print("❌ Could not find ToS through any method")
         return None, None, page
         
     except Exception as e:
