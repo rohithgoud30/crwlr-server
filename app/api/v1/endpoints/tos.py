@@ -2942,7 +2942,7 @@ async def find_tos_via_privacy_policy(page, context):
     Find ToS for App Store and Play Store links by:
     1. Finding privacy policy link
     2. Extracting base domain from privacy policy
-    3. Using that domain to search for ToS
+    3. Using pattern replacement to find ToS URL
     
     Returns:
         tuple of (tos_url, method_used, page)
@@ -2981,46 +2981,40 @@ async def find_tos_via_privacy_policy(page, context):
     try:
         # Parse the privacy link to get the base domain
         parsed_url = urlparse(privacy_link)
-        base_domain = parsed_url.netloc
         
         # Ensure this is not a Google domain
-        if "google.com" in base_domain or "play.google.com" in base_domain:
+        if "google.com" in parsed_url.netloc or "play.google.com" in parsed_url.netloc:
             print("❌ Privacy link is from Google domain, not from app developer")
             return None, None, page
             
-        print(f"✅ Extracted base domain from privacy policy: {base_domain}")
-        
         # Try to guess the ToS URL based on the privacy URL patterns
         privacy_path = parsed_url.path.lower()
+        privacy_url_lower = privacy_link.lower()
         
         # Direct replacement of "privacy" with "terms" in the original URL
-        if "privacy" in privacy_path:
-            tos_url = privacy_link.lower().replace("privacy", "terms")
-            if tos_url != privacy_link:  # Only if it actually changed something
-                print(f"✅ Created ToS URL by replacing 'privacy' with 'terms': {tos_url}")
-                return tos_url, "app_store_privacy_to_tos_direct_pattern", page
-                
-        # Extract the base path (directory) from the privacy URL
-        path_parts = privacy_path.split('/')
-        base_path = '/'.join(path_parts[:-1]) if len(path_parts) > 1 else ''
-        
-        # Look for patterns like /privacy-policy or /privacy/policy that can be transformed
-        if privacy_path.endswith("privacy-policy") or privacy_path.endswith("privacy/policy"):
-            # Try to replace with terms equivalent
-            if privacy_path.endswith("privacy-policy"):
-                tos_path = privacy_path.replace("privacy-policy", "terms-of-service")
-            else:
-                tos_path = base_path + "/terms"
-                
-            tos_url = f"{parsed_url.scheme}://{base_domain}{tos_path}"
-            print(f"✅ Created ToS URL from privacy pattern: {tos_url}")
-            return tos_url, "app_store_privacy_to_tos_pattern_match", page
+        if "privacy" in privacy_url_lower:
+            # Try several possible replacements based on common patterns
+            possible_replacements = [
+                ("privacy", "terms"),
+                ("privacy", "tos"),
+                ("privacy-policy", "terms-of-service"),
+                ("privacy-policy", "terms-of-use"),
+                ("privacy-policy", "terms"),
+                ("privacy/policy", "terms"),
+                ("privacy_policy", "terms_of_service")
+            ]
             
-        # If we can't pattern match, build URL from the base domain
-        # Try legal/terms-of-service or similar path on the same domain
-        tos_url = f"{parsed_url.scheme}://{base_domain}/legal/terms-of-service"
-        print(f"✅ Created ToS URL from base domain: {tos_url}")
-        return tos_url, "app_store_privacy_to_tos_base_domain", page
+            for old_pattern, new_pattern in possible_replacements:
+                if old_pattern in privacy_url_lower:
+                    tos_url = privacy_url_lower.replace(old_pattern, new_pattern)
+                    if tos_url != privacy_url_lower:  # Only if it actually changed something
+                        print(f"✅ Created ToS URL by replacing '{old_pattern}' with '{new_pattern}': {tos_url}")
+                        return tos_url, "app_store_privacy_to_tos_pattern_replacement", page
+        
+        # If no replacements worked, just return the privacy URL itself
+        # This is better than making up a path that doesn't exist
+        print("⚠️ Could not determine ToS URL through pattern replacement, returning privacy URL as fallback")
+        return privacy_link, "app_store_privacy_to_tos_privacy_fallback", page
             
     except Exception as e:
         print(f"❌ Error finding ToS via privacy policy: {e}")
