@@ -1,5 +1,6 @@
 import random
 from urllib.parse import urlparse
+import re
 
 from fastapi import APIRouter, HTTPException 
 from playwright.async_api import async_playwright
@@ -64,6 +65,56 @@ LINK_EVALUATION_WEIGHTS = {
 }
 
 
+def sanitize_url(url: str) -> str:
+    """
+    Sanitize and validate URLs to ensure they are valid.
+    
+    If the URL is severely malformed or clearly invalid, returns an empty string
+    instead of attempting to fix it.
+    """
+    if not url:
+        print("Empty URL provided")
+        return ""
+        
+    # Trim whitespace and control characters
+    url = url.strip().strip('\r\n\t')
+    
+    # Log the original URL for debugging
+    print(f"Validating URL: {url}")
+    
+    try:
+        # Fix only the most common minor issues
+        # Add protocol if missing
+        if not re.match(r'^https?://', url):
+            url = 'https://' + url
+        
+        # Validate the URL structure
+        parsed = urlparse(url)
+        
+        # Check for severely malformed URLs
+        if not parsed.netloc or '.' not in parsed.netloc:
+            print(f"Invalid domain in URL: {url}")
+            return ""
+            
+        # Check for nonsensical URL patterns that indicate a malformed URL
+        if re.match(r'https?://[a-z]+s?://', url):
+            # Invalid patterns like https://ttps://
+            print(f"Malformed URL with invalid protocol pattern: {url}")
+            return ""
+            
+        # Additional validation to ensure domain has a valid TLD
+        domain_parts = parsed.netloc.split('.')
+        if len(domain_parts) < 2 or len(domain_parts[-1]) < 2:
+            print(f"Domain lacks valid TLD: {url}")
+            return ""
+            
+        print(f"URL validated: {url}")
+        return url
+    except Exception as e:
+        print(f"Error validating URL {url}: {str(e)}")
+        return ""
+
+
 def normalize_domain(url):
     """
     Normalize domain variations (with or without www prefix)
@@ -102,15 +153,29 @@ def normalize_domain(url):
 @router.post("/tos", response_model=ToSResponse)
 async def find_tos(request: ToSRequest) -> ToSResponse:
     """Find Terms of Service page for a given URL."""
-    url = request.url
+    original_url = request.url
 
-    if not url:
+    if not original_url:
         raise HTTPException(status_code=400, detail="URL is required")
+
+    # First sanitize the URL to handle malformed URLs
+    url = sanitize_url(original_url)
+    
+    if not url:
+        print(f"Invalid URL detected: {original_url}")
+        return ToSResponse(
+            url=original_url,
+            tos_url=None,
+            success=False,
+            message="Invalid URL format. The URL appears to be malformed or non-existent.",
+            method_used="url_validation_failed"
+        )
 
     # Normalize the URL domain for consistent processing
     url = normalize_domain(url)
 
-    # Handle URLs without scheme
+    # Handle URLs without scheme is now unnecessary as sanitize_url adds it
+    # But keep for safety
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
 
@@ -357,8 +422,18 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         return handle_navigation_failure(url, None)
 
     except Exception as e:
-        print(f"Error during browser automation: {e}")
-        return handle_error(url, None, str(e))
+        print(f"Error: {e}")
+        # If we have an unverified result despite the error, return it
+        if unverified_result:
+            return handle_error(original_url, unverified_result, str(e))
+        else:
+            return ToSResponse(
+                url=original_url,
+                tos_url=None,
+                success=False,
+                message=f"Error finding Terms of Service: {str(e)}",
+                method_used="error"
+            )
     finally:
         if browser:
             try:
@@ -2408,39 +2483,31 @@ async def duckduckgo_search_fallback(domain, page):
 
 
 def handle_navigation_failure(url: str, unverified_result: str = None) -> ToSResponse:
-    """Handle case where navigation to the URL failed for ToS."""
+    """Handle cases where navigation to a terms page failed."""
     if unverified_result:
         return ToSResponse(
             url=url,
             tos_url=unverified_result,
             success=True,
-            message="Found potential ToS link (unverified)",
-            method_used="dynamic_detection_unverified"
+            message="Navigation issues encountered, but found probable Terms of Service URL",
+            method_used="partial_success"
         )
     return ToSResponse(
         url=url,
         tos_url=None,
         success=False,
-        message="Failed to navigate to website and find Terms of Service page",
-        method_used="none"
+        message="Failed to navigate to the site and find Terms of Service",
+        method_used="navigation_failure"
     )
 
 def handle_error(url: str, unverified_result: str, error: str) -> ToSResponse:
-    """Simplified error handler for ToS."""
-    if unverified_result:
-        return ToSResponse(
-            url=url,
-            tos_url=unverified_result,
-            success=True,
-            message="Found potential ToS link (unverified)",
-            method_used="dynamic_detection_unverified"
-        )
+    """Handle errors with a fallback to unverified results if available."""
     return ToSResponse(
         url=url,
-        tos_url=None,
-        success=False,
-        message=f"Error during browser automation: {error}",
-        method_used="none"
+        tos_url=unverified_result,
+        success=True,
+        message=f"Error verifying Terms of Service URL, but found probable link (error: {error})",
+        method_used="error_with_result"
     )
 
 def prefer_main_domain(links, main_domain):

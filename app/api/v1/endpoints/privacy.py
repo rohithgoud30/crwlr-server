@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 import logging
 from typing import List, Optional, Union, Any
 import asyncio
+import re
 
 from fastapi import APIRouter, HTTPException
 from playwright.async_api import async_playwright, Page
@@ -208,6 +209,55 @@ privacy_policy_terms = [
     'privacy practices', 'privacy rights'
 ]
 
+def sanitize_url(url: str) -> str:
+    """
+    Sanitize and validate URLs to ensure they are valid.
+    
+    If the URL is severely malformed or clearly invalid, returns an empty string
+    instead of attempting to fix it.
+    """
+    if not url:
+        print("Empty URL provided")
+        return ""
+        
+    # Trim whitespace and control characters
+    url = url.strip().strip('\r\n\t')
+    
+    # Log the original URL for debugging
+    print(f"Validating URL: {url}")
+    
+    try:
+        # Fix only the most common minor issues
+        # Add protocol if missing
+        if not re.match(r'^https?://', url):
+            url = 'https://' + url
+        
+        # Validate the URL structure
+        parsed = urlparse(url)
+        
+        # Check for severely malformed URLs
+        if not parsed.netloc or '.' not in parsed.netloc:
+            print(f"Invalid domain in URL: {url}")
+            return ""
+            
+        # Check for nonsensical URL patterns that indicate a malformed URL
+        if re.match(r'https?://[a-z]+s?://', url):
+            # Invalid patterns like https://ttps://
+            print(f"Malformed URL with invalid protocol pattern: {url}")
+            return ""
+            
+        # Additional validation to ensure domain has a valid TLD
+        domain_parts = parsed.netloc.split('.')
+        if len(domain_parts) < 2 or len(domain_parts[-1]) < 2:
+            print(f"Domain lacks valid TLD: {url}")
+            return ""
+            
+        print(f"URL validated: {url}")
+        return url
+    except Exception as e:
+        print(f"Error validating URL {url}: {str(e)}")
+        return ""
+
 def normalize_domain(url):
     """
     Normalize domain variations (with or without www prefix)
@@ -340,15 +390,29 @@ async def find_user_customer_privacy_links(page):
 @router.post("/privacy", response_model=PrivacyResponse)
 async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
     """Find Privacy Policy page for a given URL."""
-    url = request.url
-
-    if not url:
+    original_url = request.url
+    
+    if not original_url:
         raise HTTPException(status_code=400, detail="URL is required")
+    
+    # First sanitize the URL to handle malformed URLs
+    url = sanitize_url(original_url)
+    
+    if not url:
+        print(f"Invalid URL detected: {original_url}")
+        return PrivacyResponse(
+            url=original_url,
+            pp_url=None,
+            success=False,
+            message="Invalid URL format. The URL appears to be malformed or non-existent.",
+            method_used="url_validation_failed"
+        )
 
     # Normalize the URL domain for consistent processing
     url = normalize_domain(url)
 
-    # Handle URLs without scheme
+    # Handle URLs without scheme is now unnecessary as sanitize_url adds it
+    # But keep for safety
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
 
@@ -375,7 +439,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
             print(f"\n\n⭐⭐⭐ SUPREME PRIORITY SUCCESS: Found user/customer privacy link: {user_customer_link}")
             # Return immediately with this high priority link
             return PrivacyResponse(
-                url=url,
+                url=original_url,
                 pp_url=user_customer_link,
                 success=True,
                 message="Found User/Customer Privacy Policy (HIGHEST PRIORITY)",
@@ -456,7 +520,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                     # Try to navigate to it
                     await page.goto(user_customer_link, timeout=5000, wait_until="domcontentloaded")
                     return PrivacyResponse(
-                        url=url,
+                        url=original_url,
                         pp_url=user_customer_link,
                         success=True,
                         message="Found User/Customer Privacy Policy (highest priority)",
@@ -466,7 +530,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                     print(f"Error navigating to user/customer link: {e}")
                     # Still return it even if navigation fails
                     return PrivacyResponse(
-                        url=url,
+                        url=original_url,
                         pp_url=user_customer_link,
                         success=True,
                         message="Found User/Customer Privacy Policy (navigation failed but high confidence)",
@@ -476,7 +540,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
             # Otherwise proceed with the high score footer link
             print(f"Prioritizing high-score footer link with privacy-related title: {high_score_footer_link}")
             return PrivacyResponse(
-                url=url,
+                url=original_url,
                 pp_url=high_score_footer_link,
                 success=True,
                 message="Found Privacy Policy using high-priority footer link with privacy title",
@@ -555,7 +619,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 if 'privacy' in title.lower():
                     print(f"✅ Confirmed main domain footer link has privacy-related title")
                     return PrivacyResponse(
-                        url=url,
+                        url=original_url,
                         pp_url=main_domain_footer,
                         success=True,
                         message="Found Privacy Policy using main domain footer link",
@@ -679,7 +743,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 if total_score >= 70:
                     print(f"✅ Using high-scoring footer link: {best_footer_link} (Score: {total_score})")
                     return PrivacyResponse(
-                        url=url,
+                        url=original_url,
                         pp_url=best_footer_link,
                         success=True,
                         message="Found Privacy Policy using high-scoring footer link",
@@ -705,7 +769,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 await page.goto(best_link, timeout=10000, wait_until="domcontentloaded")
                 # No need to verify content - presence of user/customer in URL is enough
                 return PrivacyResponse(
-                    url=url,
+                    url=original_url,
                     pp_url=best_link,
                     success=True,
                     message="Found Privacy Policy containing user/customer terms in URL",
@@ -715,7 +779,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 print(f"Error navigating to user/customer link: {e}")
                 # Return anyway as high confidence
                 return PrivacyResponse(
-                    url=url,
+                    url=original_url,
                     pp_url=best_link,
                     success=True,
                     message="Found Privacy Policy with user/customer terms (navigation failed but high confidence)",
@@ -752,7 +816,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                      search_path.lower().endswith(hp_path.lower()))):
                     print(f"✅ Found overlap between high priority link and search result: {hp_link}")
                     return PrivacyResponse(
-                        url=url,
+                        url=original_url,
                         pp_url=hp_link,
                         success=True,
                         message="Found Privacy Policy (confirmed by multiple methods)",
@@ -791,7 +855,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                     if any(term in title_lower for term in user_customer_terms) or any(term in link_lower for term in user_customer_terms):
                         print(f"🚀 Returning user/customer privacy link immediately: {link}")
                         return PrivacyResponse(
-                            url=url,
+                            url=original_url,
                             pp_url=link,
                             success=True,
                             message="Found User/Customer Privacy Policy (highest priority)",

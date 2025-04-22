@@ -20,6 +20,55 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+def sanitize_url(url: str) -> str:
+    """
+    Sanitize and validate URLs to ensure they are valid.
+    
+    If the URL is severely malformed or clearly invalid, returns an empty string
+    instead of attempting to fix it.
+    """
+    if not url:
+        logger.error("Empty URL provided")
+        return ""
+        
+    # Trim whitespace and control characters
+    url = url.strip().strip('\r\n\t')
+    
+    # Log the original URL for debugging
+    logger.info(f"Validating URL: {url}")
+    
+    try:
+        # Fix only the most common minor issues
+        # Add protocol if missing
+        if not re.match(r'^https?://', url):
+            url = 'https://' + url
+        
+        # Validate the URL structure
+        parsed = urlparse(url)
+        
+        # Check for severely malformed URLs
+        if not parsed.netloc or '.' not in parsed.netloc:
+            logger.error(f"Invalid domain in URL: {url}")
+            return ""
+            
+        # Check for nonsensical URL patterns that indicate a malformed URL
+        if re.match(r'https?://[a-z]+s?://', url):
+            # Invalid patterns like https://ttps://
+            logger.error(f"Malformed URL with invalid protocol pattern: {url}")
+            return ""
+            
+        # Additional validation to ensure domain has a valid TLD
+        domain_parts = parsed.netloc.split('.')
+        if len(domain_parts) < 2 or len(domain_parts[-1]) < 2:
+            logger.error(f"Domain lacks valid TLD: {url}")
+            return ""
+            
+        logger.info(f"URL validated: {url}")
+        return url
+    except Exception as e:
+        logger.error(f"Error validating URL {url}: {str(e)}")
+        return ""
+
 def is_pdf_url(url: str) -> bool:
     """Check if URL likely points to a PDF file based on extension."""
     parsed_url = urlparse(url)
@@ -55,7 +104,20 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
     2. Standard requests + BeautifulSoup for HTML pages
     3. Headless browser rendering with Playwright for JavaScript-heavy sites
     """
-    url = request.url
+    # Sanitize the URL to handle malformed URLs
+    original_url = request.url
+    url = sanitize_url(original_url)
+    
+    if not url:
+        response.status_code = 400
+        return ExtractResponse(
+            url=original_url,
+            success=False,
+            text=None,
+            message="Invalid URL format. The URL appears to be malformed or non-existent.",
+            method_used="url_validation_failed"
+        )
+    
     logger.info(f"Processing text extraction request for URL: {url}")
     
     # Check if URL points to a PDF file
@@ -81,7 +143,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
                 pdf_text = extract_text_from_pdf(pdf_response.content)
                 
                 return ExtractResponse(
-                    url=url,
+                    url=original_url,
                     success=True,
                     text=pdf_text,
                     message="Successfully extracted text from PDF document",
@@ -94,7 +156,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
             logger.error(f"PDF extraction failed: {str(e)}")
             response.status_code = 500
             return ExtractResponse(
-                url=url,
+                url=original_url,
                 success=False,
                 text=None,
                 message=f"Error extracting text from PDF: {str(e)}",
@@ -119,7 +181,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
             pdf_text = extract_text_from_pdf(pdf_response.content)
             
             return ExtractResponse(
-                url=url,
+                url=original_url,
                 success=True,
                 text=pdf_text,
                 message="Successfully extracted text from PDF document (detected by content type)",
@@ -154,7 +216,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
             pdf_text = extract_text_from_pdf(response_data.content)
             
             return ExtractResponse(
-                url=url,
+                url=original_url,
                 success=True,
                 text=pdf_text,
                 message="Successfully extracted text from PDF document (detected after redirection)",
@@ -169,7 +231,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
         
         if extracted_text:
             return ExtractResponse(
-                url=url,
+                url=original_url,
                 success=True,
                 text=extracted_text,
                 message="Successfully extracted text content using standard method",
@@ -190,7 +252,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
         
         if playwright_text:
             return ExtractResponse(
-                url=url,
+                url=original_url,
                 success=True,
                 text=playwright_text,
                 message="Successfully extracted text content using JavaScript-enabled browser rendering",
@@ -200,7 +262,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
             # Both methods failed
             response.status_code = 404
             return ExtractResponse(
-                url=url,
+                url=original_url,
                 success=False,
                 text=None,
                 message="Failed to extract meaningful text content from the URL",
@@ -211,7 +273,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
         logger.error(f"Playwright extraction failed: {str(e)}")
         response.status_code = 500
         return ExtractResponse(
-            url=url,
+            url=original_url,
             success=False,
             text=None,
             message=f"Error extracting text: {str(e)}",
