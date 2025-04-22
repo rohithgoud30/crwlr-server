@@ -2778,6 +2778,33 @@ async def extract_app_store_privacy_link(page):
             
         print("✅ Detected Apple App Store page, looking for privacy policy link")
         
+        # Extract developer info first to help filter out Apple links
+        developer_info = await page.evaluate("""
+            () => {
+                // Get the developer name and website if available
+                const developerElement = document.querySelector('.app-header__identity a');
+                if (!developerElement) return null;
+                
+                const developerName = developerElement.textContent.trim();
+                const developerLink = developerElement.href;
+                
+                return {
+                    name: developerName,
+                    link: developerLink
+                };
+            }
+        """)
+        
+        if developer_info:
+            print(f"📱 App developer: {developer_info['name']}")
+            print(f"🔗 Developer link: {developer_info['link']}")
+            
+            # If the developer link is available and not an Apple domain, return it
+            # as the base for finding privacy policy/ToS
+            if developer_info['link'] and not 'apple.com' in developer_info['link']:
+                print(f"✅ Using developer website as base for policy links: {developer_info['link']}")
+                return developer_info['link']
+        
         # Look for the privacy policy link in the app-privacy section
         privacy_link = await page.evaluate("""
             () => {
@@ -2788,19 +2815,24 @@ async def extract_app_store_privacy_link(page):
                 // Look for direct privacy policy link
                 const directLink = privacySection.querySelector('a[href*="privacy"]');
                 if (directLink && directLink.href) {
-                    return { 
-                        href: directLink.href,
-                        text: directLink.textContent.trim(),
-                        confidence: 'high'
-                    };
+                    // Skip Apple domains
+                    if (!directLink.href.includes('apple.com')) {
+                        return { 
+                            href: directLink.href,
+                            text: directLink.textContent.trim(),
+                            confidence: 'high'
+                        };
+                    }
                 }
                 
                 // Fallback: look for any link in the privacy section
-                const anyLink = privacySection.querySelector('a[href]');
-                if (anyLink && anyLink.href) {
+                const allLinks = Array.from(privacySection.querySelectorAll('a[href]'));
+                const nonAppleLinks = allLinks.filter(link => !link.href.includes('apple.com'));
+                
+                if (nonAppleLinks.length > 0) {
                     return { 
-                        href: anyLink.href,
-                        text: anyLink.textContent.trim(),
+                        href: nonAppleLinks[0].href,
+                        text: nonAppleLinks[0].textContent.trim(),
                         confidence: 'medium'
                     };
                 }
@@ -2808,7 +2840,9 @@ async def extract_app_store_privacy_link(page):
                 // Second fallback: look for links in developer info section
                 const devInfoSection = document.querySelector('.information-list--app');
                 if (devInfoSection) {
-                    const devLinks = Array.from(devInfoSection.querySelectorAll('a[href]'));
+                    const devLinks = Array.from(devInfoSection.querySelectorAll('a[href]'))
+                        .filter(link => !link.href.includes('apple.com'));
+                    
                     const privacyLink = devLinks.find(link => 
                         link.textContent.toLowerCase().includes('privacy') || 
                         link.href.toLowerCase().includes('privacy')
@@ -2819,6 +2853,16 @@ async def extract_app_store_privacy_link(page):
                             href: privacyLink.href,
                             text: privacyLink.textContent.trim(),
                             confidence: 'medium'
+                        };
+                    }
+                    
+                    // If we found any developer links but none are privacy policy,
+                    // return the first one as a fallback
+                    if (devLinks.length > 0) {
+                        return {
+                            href: devLinks[0].href,
+                            text: devLinks[0].textContent.trim(),
+                            confidence: 'low'
                         };
                     }
                 }
@@ -2834,7 +2878,6 @@ async def extract_app_store_privacy_link(page):
         
         print("No privacy policy link found in App Store page")
         return None
-        
     except Exception as e:
         print(f"Error extracting App Store privacy link: {e}")
         return None
@@ -2983,9 +3026,9 @@ async def find_tos_via_privacy_policy(page, context):
         # Parse the privacy link to get the base domain
         parsed_url = urlparse(privacy_link)
         
-        # Ensure this is not a Google domain
-        if "google.com" in parsed_url.netloc or "play.google.com" in parsed_url.netloc:
-            print("❌ Privacy link is from Google domain, not from app developer")
+        # Ensure this is not an Apple or Google domain
+        if "apple.com" in parsed_url.netloc or "google.com" in parsed_url.netloc or "play.google.com" in parsed_url.netloc:
+            print(f"❌ Privacy link is from {'Apple' if 'apple.com' in parsed_url.netloc else 'Google'} domain, not from app developer")
             return None, None, page
         
         # Try to guess the ToS URL based on the privacy URL patterns
