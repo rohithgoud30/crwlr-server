@@ -3035,32 +3035,47 @@ async def find_tos_via_privacy_policy(page, context):
         # If navigation failed or we didn't find ToS links, try common ToS URLs without navigation
         print("🔍 Using common ToS URL patterns based on privacy policy domain")
         
-        # Construct common ToS URLs based on the domain from the privacy policy
-        common_tos_patterns = []
-        
-        # Add patterns based on analysis of the privacy URL structure
-        if "/legal/" in privacy_link:
-            # If privacy URL has a /legal/ path, ToS is likely in the same directory
-            privacy_path = parsed_url.path
-            legal_dir = privacy_path.split('/legal/')[0] + '/legal/'
-            common_tos_patterns.append(f"{parsed_url.scheme}://{base_domain}{legal_dir}terms-of-service")
-            common_tos_patterns.append(f"{parsed_url.scheme}://{base_domain}{legal_dir}terms")
-        
-        # Add standard patterns
-        common_tos_patterns.extend([
+        # Prioritized list of common ToS URL patterns
+        common_tos_patterns = [
+            # Legal section - terms of service
             f"https://{base_domain}/legal/terms-of-service",
-            f"https://{base_domain}/legal/terms",
-            f"https://{base_domain}/terms-of-service",
-            f"https://{base_domain}/terms",
-            f"https://{base_domain}/tos",
-            f"https://{base_domain}/legal",
             f"https://www.{base_domain.replace('www.', '')}/legal/terms-of-service",
+            
+            # Legal section - terms
+            f"https://{base_domain}/legal/terms",
             f"https://www.{base_domain.replace('www.', '')}/legal/terms",
+            
+            # Root terms of service
+            f"https://{base_domain}/terms-of-service",
             f"https://www.{base_domain.replace('www.', '')}/terms-of-service",
-            f"https://www.{base_domain.replace('www.', '')}/terms"
-        ])
+            
+            # Root terms
+            f"https://{base_domain}/terms",
+            f"https://www.{base_domain.replace('www.', '')}/terms",
+            
+            # Other common variations
+            f"https://{base_domain}/tos",
+            f"https://www.{base_domain.replace('www.', '')}/tos",
+            f"https://{base_domain}/legal",
+            f"https://www.{base_domain.replace('www.', '')}/legal",
+            f"https://{base_domain}/terms-conditions",
+            f"https://www.{base_domain.replace('www.', '')}/terms-conditions",
+            f"https://{base_domain}/terms-and-conditions",
+            f"https://www.{base_domain.replace('www.', '')}/terms-and-conditions"
+        ]
         
-        # Try the first common pattern without checking (to give user a likely URL even if not verified)
+        # Try to validate some common patterns by checking if they exist
+        for tos_pattern in common_tos_patterns[:4]:  # Try validating only first few patterns
+            try:
+                print(f"🔍 Checking if URL exists: {tos_pattern}")
+                response = await page.context.request.head(tos_pattern, timeout=2000)
+                if response.ok:
+                    print(f"✅ Validated ToS URL exists: {tos_pattern}")
+                    return tos_pattern, "app_store_privacy_to_tos_validated_pattern", page
+            except Exception as e:
+                print(f"⚠️ Error checking URL {tos_pattern}: {e}")
+        
+        # If validation fails, try the first common pattern anyway
         if len(common_tos_patterns) > 0:
             print(f"🔍 Returning likely ToS URL without verification: {common_tos_patterns[0]}")
             return common_tos_patterns[0], "app_store_privacy_to_tos_common_pattern", page
