@@ -2939,8 +2939,10 @@ async def extract_play_store_privacy_link(page):
 
 async def find_tos_via_privacy_policy(page, context):
     """
-    Find ToS directly on App Store and Play Store pages,
-    without navigating away from the store page.
+    Find ToS for App Store and Play Store links by:
+    1. Finding privacy policy link
+    2. Extracting base domain from privacy policy
+    3. Using that domain to search for ToS
     
     Returns:
         tuple of (tos_url, method_used, page)
@@ -2960,96 +2962,66 @@ async def find_tos_via_privacy_policy(page, context):
         print("Not an App Store or Play Store page, skipping app-specific ToS finder")
         return None, None, page
     
-    print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, looking for ToS links")
+    print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, attempting ToS via privacy policy")
     
-    # Look for ToS links directly on the store page - no navigation to other domains
-    try:
-        # Extract all links that might be ToS related
-        tos_links = await page.evaluate("""
-            () => {
-                // Get all links on the page
-                const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                
-                // Find links that look like app-specific ToS (not Google/Apple ToS)
-                const appLinks = allLinks.filter(link => {
-                    const text = link.textContent.toLowerCase().trim();
-                    const href = link.href.toLowerCase();
-                    
-                    // Check if this might be an app-specific ToS link
-                    // We want to exclude Google/Apple own ToS links
-                    const isAppSpecific = 
-                        (text.includes('terms') || 
-                         text.includes('tos') || 
-                         href.includes('terms') || 
-                         href.includes('tos')) && 
-                        // Exclude Google/Apple own terms
-                        !href.includes('google.com/terms') &&
-                        !href.includes('play.google.com/about/play-terms') &&
-                        !href.includes('myaccount.google.com') &&
-                        !href.includes('apple.com/legal') &&
-                        // Make sure the link goes to the app developer's site
-                        !href.includes('play.google.com') &&
-                        !href.includes('apps.apple.com');
-                    
-                    return isAppSpecific;
-                });
-                
-                // Return the filtered app-specific links
-                return appLinks.map(link => ({
-                    text: link.textContent.trim(),
-                    href: link.href
-                }));
-            }
-        """)
-        
-        if tos_links and len(tos_links) > 0:
-            # Log all found links
-            print(f"Found {len(tos_links)} potential app-specific ToS links:")
-            for i, link in enumerate(tos_links):
-                print(f"Link #{i+1}: {link['text']} - {link['href']}")
-            
-            # Return the first app-specific ToS link
-            return tos_links[0]['href'], "app_store_direct_app_tos", page
-        
-        print("No app-specific ToS links found, looking for developer info...")
-        
-        # Try to find developer website link and check it
-        developer_site = await page.evaluate("""
-            () => {
-                // On Play Store, look for developer website link
-                let devLink = document.querySelector('a[href*="developer"]');
-                if (!devLink) {
-                    // Look for any developer attribution link
-                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                    devLink = allLinks.find(link => 
-                        link.textContent.toLowerCase().includes('developer') ||
-                        link.textContent.toLowerCase().includes('website')
-                    );
-                }
-                
-                if (devLink) {
-                    return {
-                        text: devLink.textContent.trim(),
-                        href: devLink.href
-                    };
-                }
-                return null;
-            }
-        """)
-        
-        if developer_site:
-            print(f"Found developer site: {developer_site['text']} - {developer_site['href']}")
-            
-            # Check if this link looks like it might lead to ToS
-            if ('terms' in developer_site['href'].lower() or 
-                'tos' in developer_site['href'].lower() or 
-                'legal' in developer_site['href'].lower()):
-                print(f"Developer link appears to contain ToS reference")
-                return developer_site['href'], "app_store_developer_tos_link", page
-        
-        print("❌ No app-specific ToS links found on store page")
+    # Extract privacy policy link based on store type
+    privacy_link = None
+    if is_app_store:
+        privacy_link = await extract_app_store_privacy_link(page)
+    elif is_play_store:
+        privacy_link = await extract_play_store_privacy_link(page)
+    
+    if not privacy_link:
+        print("❌ Could not extract privacy policy link from store page")
         return None, None, page
+    
+    print(f"✅ Found privacy policy link: {privacy_link}")
+    
+    # Extract base URL from privacy policy without visiting it
+    try:
+        # Parse the privacy link to get the base domain
+        parsed_url = urlparse(privacy_link)
+        base_domain = parsed_url.netloc
         
+        # Ensure this is not a Google domain
+        if "google.com" in base_domain or "play.google.com" in base_domain:
+            print("❌ Privacy link is from Google domain, not from app developer")
+            return None, None, page
+            
+        print(f"✅ Extracted base domain from privacy policy: {base_domain}")
+        
+        # Try to guess the ToS URL based on the privacy URL patterns
+        privacy_path = parsed_url.path.lower()
+        
+        # Direct replacement of "privacy" with "terms" in the original URL
+        if "privacy" in privacy_path:
+            tos_url = privacy_link.lower().replace("privacy", "terms")
+            if tos_url != privacy_link:  # Only if it actually changed something
+                print(f"✅ Created ToS URL by replacing 'privacy' with 'terms': {tos_url}")
+                return tos_url, "app_store_privacy_to_tos_direct_pattern", page
+                
+        # Extract the base path (directory) from the privacy URL
+        path_parts = privacy_path.split('/')
+        base_path = '/'.join(path_parts[:-1]) if len(path_parts) > 1 else ''
+        
+        # Look for patterns like /privacy-policy or /privacy/policy that can be transformed
+        if privacy_path.endswith("privacy-policy") or privacy_path.endswith("privacy/policy"):
+            # Try to replace with terms equivalent
+            if privacy_path.endswith("privacy-policy"):
+                tos_path = privacy_path.replace("privacy-policy", "terms-of-service")
+            else:
+                tos_path = base_path + "/terms"
+                
+            tos_url = f"{parsed_url.scheme}://{base_domain}{tos_path}"
+            print(f"✅ Created ToS URL from privacy pattern: {tos_url}")
+            return tos_url, "app_store_privacy_to_tos_pattern_match", page
+            
+        # If we can't pattern match, build URL from the base domain
+        # Try legal/terms-of-service or similar path on the same domain
+        tos_url = f"{parsed_url.scheme}://{base_domain}/legal/terms-of-service"
+        print(f"✅ Created ToS URL from base domain: {tos_url}")
+        return tos_url, "app_store_privacy_to_tos_base_domain", page
+            
     except Exception as e:
-        print(f"❌ Error finding ToS on store page: {e}")
+        print(f"❌ Error finding ToS via privacy policy: {e}")
         return None, None, page
