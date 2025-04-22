@@ -194,15 +194,15 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         if not success:
             print("\nMain site navigation had issues, but trying to analyze current page...")
 
-        # Special handling for App Store and Play Store - extract ToS via privacy policy link
+        # Special handling for App Store and Play Store pages
         app_store_tos, app_store_method, page = await find_tos_via_privacy_policy(page, context)
         if app_store_tos:
-            print(f"\n\n🔍 APP STORE/PLAY STORE SUCCESS: Found ToS via privacy policy link: {app_store_tos}")
+            print(f"\n\n🔍 APP STORE/PLAY STORE SUCCESS: Found direct ToS link: {app_store_tos}")
             return ToSResponse(
                 url=original_url,
                 tos_url=app_store_tos,
                 success=True,
-                message="Found Terms of Service via app's privacy policy link",
+                message="Found Terms of Service for app directly from store page",
                 method_used=app_store_method
             )
 
@@ -2939,10 +2939,8 @@ async def extract_play_store_privacy_link(page):
 
 async def find_tos_via_privacy_policy(page, context):
     """
-    Find ToS for App Store and Play Store links by:
-    1. Finding privacy policy link
-    2. Extracting base domain from privacy policy
-    3. Using that domain to search for ToS
+    Find ToS for App Store and Play Store links using direct detection on the app store page.
+    This function is kept for compatibility but no longer follows privacy policy URLs.
     
     Returns:
         tuple of (tos_url, method_used, page)
@@ -2962,114 +2960,117 @@ async def find_tos_via_privacy_policy(page, context):
         print("Not an App Store or Play Store page, skipping app-specific ToS finder")
         return None, None, page
     
-    print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, attempting ToS via privacy policy")
+    print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, looking for app developer ToS")
     
-    # Store the original page URL to return to if needed
-    original_url = await page.evaluate("() => window.location.href")
-    
-    # Extract privacy policy link based on store type
-    privacy_link = None
-    if is_app_store:
-        privacy_link = await extract_app_store_privacy_link(page)
-    elif is_play_store:
-        privacy_link = await extract_play_store_privacy_link(page)
-    
-    if not privacy_link:
-        print("❌ Could not extract privacy policy link from store page")
-        return None, None, page
-    
-    print(f"✅ Found privacy policy link: {privacy_link}")
-    
-    # Extract base domain from privacy policy URL
-    try:
-        parsed_url = urlparse(privacy_link)
-        base_domain = parsed_url.netloc
-        
-        # Try different URL schemes and variations
-        base_urls = [
-            f"https://{base_domain}",
-            f"https://www.{base_domain.replace('www.', '')}",
-            privacy_link  # Use the original privacy link as fallback
-        ]
-        
-        navigation_successful = False
-        
-        # Try each URL variation
-        for base_url in base_urls:
-            print(f"🔍 Trying URL: {base_url}")
-            
-            # Navigate to the base URL and search for ToS
-            try:
-                success, _, _ = await navigate_with_retry(page, base_url, max_retries=2)
-                if success:
-                    navigation_successful = True
-                    print(f"✅ Successfully navigated to {base_url}")
-                    break
-                else:
-                    print(f"⚠️ Issues navigating to {base_url}, trying next URL")
-            except Exception as e:
-                print(f"⚠️ Error navigating to {base_url}: {e}")
-        
-        # If we successfully navigated to a page, look for ToS links
-        if navigation_successful:
-            print("🔍 Looking for ToS on developer website...")
-            
-            # First check for user/customer terms links with high priority
-            user_terms_link = await find_user_customer_terms_links(page)
-            if user_terms_link:
-                print(f"✅ Found user/customer terms link on developer site: {user_terms_link}")
-                return user_terms_link, "app_store_privacy_to_tos_user_terms", page
-            
-            # Try JavaScript method
-            js_result, page, js_unverified = await find_all_links_js(page, context, None)
-            if js_result:
-                print(f"✅ Found ToS link via JavaScript method on developer site: {js_result}")
-                return js_result, "app_store_privacy_to_tos_js", page
-            
-            # Try scroll method
-            scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
-            if scroll_result:
-                print(f"✅ Found ToS link via scroll method on developer site: {scroll_result}")
-                return scroll_result, "app_store_privacy_to_tos_scroll", page
-        
-        # If navigation failed or we couldn't find ToS links, return to the app store page
-        print("🔍 Returning to app store page...")
-        try:
-            await page.goto(original_url, timeout=5000, wait_until="domcontentloaded")
-            
-            # Look for direct ToS links on the app store page
-            direct_tos = await page.evaluate("""
-                () => {
-                    // Look for any terms-related links
-                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                    const tosLinks = allLinks.filter(link => {
-                        const text = link.textContent.toLowerCase().trim();
-                        const href = link.href.toLowerCase();
-                        return (
-                            (text.includes('terms') || href.includes('terms') || 
-                             text.includes('tos') || href.includes('tos')) && 
-                            !href.includes('google.com/') && 
-                            !href.includes('apple.com/')
-                        );
-                    });
-                    
-                    if (tosLinks.length > 0) {
-                        return tosLinks[0].href;
+    # Get the app developer name
+    developer_name = await page.evaluate("""
+        () => {
+            try {
+                // For Play Store
+                if (window.location.href.includes('play.google.com')) {
+                    // Look for developer info section
+                    const devElements = Array.from(document.querySelectorAll('a[href*="developer"]'));
+                    for (const el of devElements) {
+                        if (el.textContent && el.textContent.trim().length > 0) {
+                            return el.textContent.trim();
+                        }
                     }
-                    return null;
+                    
+                    // Alternative approach
+                    const metaTags = document.querySelectorAll('meta');
+                    for (const tag of metaTags) {
+                        if (tag.getAttribute('itemprop') === 'author') {
+                            return tag.getAttribute('content');
+                        }
+                    }
+                } 
+                // For App Store
+                else if (window.location.href.includes('apps.apple.com')) {
+                    const devElement = document.querySelector('.app-header__identity');
+                    if (devElement) {
+                        return devElement.textContent.trim();
+                    }
+                    
+                    // Alternative developer link
+                    const devLink = document.querySelector('a.link[href*="/developer/"]');
+                    if (devLink) {
+                        return devLink.textContent.trim();
+                    }
                 }
-            """)
-            
-            if direct_tos:
-                print(f"✅ Found direct ToS link on app store page: {direct_tos}")
-                return direct_tos, "app_store_direct_tos_link", page
-        except Exception as e:
-            print(f"⚠️ Error returning to app store page: {e}")
-        
-        # No ToS found through any method
-        print("❌ Could not find ToS through any method")
-        return None, None, page
+                return null;
+            } catch (e) {
+                console.error("Error finding developer name:", e);
+                return null;
+            }
+        }
+    """)
     
-    except Exception as e:
-        print(f"❌ Error finding ToS via privacy policy: {e}")
-        return None, None, page
+    if developer_name:
+        print(f"✅ Found app developer: {developer_name}")
+    else:
+        print("❌ Could not identify app developer")
+    
+    # Look for direct links to ToS on the current page
+    direct_tos = await page.evaluate("""
+        () => {
+            try {
+                // Find all links
+                const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                const tosLinks = allLinks.filter(link => {
+                    const text = link.textContent.toLowerCase().trim();
+                    const href = link.href.toLowerCase();
+                    
+                    // Ignore Google/Apple store links
+                    if (href.includes('google.com/store') || 
+                        href.includes('apple.com/app-store') ||
+                        href.includes('play.google.com') ||
+                        href.includes('apps.apple.com') ||
+                        href.includes('support.google.com') ||
+                        href.includes('support.apple.com') ||
+                        href.includes('myaccount.google.com') ||
+                        href.includes('id.apple.com')) {
+                        return false;
+                    }
+                    
+                    // Look for terms-related links
+                    return (text.includes('terms') || 
+                            href.includes('terms') || 
+                            text.includes('conditions') ||
+                            href.includes('tos') ||
+                            text.includes('tos') ||
+                            text.includes('legal'));
+                });
+                
+                if (tosLinks.length > 0) {
+                    console.log("Found direct ToS link:", tosLinks[0].href);
+                    return tosLinks[0].href;
+                }
+                return null;
+            } catch (e) {
+                console.error("Error finding direct ToS link:", e);
+                return null;
+            }
+        }
+    """)
+    
+    if direct_tos:
+        print(f"✅ Found direct ToS link on app store page: {direct_tos}")
+        return direct_tos, "app_store_direct_tos", page
+    
+    # If direct link not found, try using our standard methods on the current page
+    print("🔍 No direct ToS link found, using standard detection methods...")
+    
+    # Try JavaScript method first
+    js_result, page, js_unverified = await find_all_links_js(page, context, None)
+    if js_result:
+        print(f"✅ Found ToS link via JavaScript method: {js_result}")
+        return js_result, "app_store_js_detection", page
+    
+    # Try scroll method
+    scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
+    if scroll_result:
+        print(f"✅ Found ToS link via scroll method: {scroll_result}")
+        return scroll_result, "app_store_scroll_detection", page
+    
+    print("❌ Could not find app-specific ToS through any method")
+    return None, None, page
