@@ -1,6 +1,7 @@
 import random
 from urllib.parse import urlparse
 import re
+import traceback
 
 from fastapi import APIRouter, HTTPException 
 from playwright.async_api import async_playwright
@@ -674,252 +675,290 @@ async def detect_anti_bot_patterns(page):
 
 
 async def find_all_links_js(page, context, unverified_result=None):
-    """Optimized JavaScript-based link finder with anti-bot protection handling."""
-    print("\n=== Starting find_all_links_js ===")
-    print("Searching for all links using JavaScript...")
-
+    """
+    Use JavaScript to extract all links from the page that might be ToS links.
+    Also detects if there's anti-bot protection.
+    """
+    
     try:
-        # Shorter wait for page loading
-        await page.wait_for_timeout(500)
-
-        # First check if we're on an anti-bot page
-        is_anti_bot = await page.evaluate(
-            """() => {
-            const html = document.documentElement.innerHTML.toLowerCase();
-            return html.includes('captcha') || 
-                   html.includes('cloudflare') || 
-                   html.includes('challenge') ||
-                   html.includes('security check') ||
-                   html.includes('bot detection');
-        }"""
-        )
-
-        if is_anti_bot:
-            print(
-                "Detected anti-bot protection, looking for footer links specifically..."
-            )
-            # On anti-bot pages, specifically target footer links which are often still accessible
-            footer_links = await page.evaluate(
-                """() => {
-                // Look for footer elements, which often contain Terms links
-                const footers = [
-                    document.querySelector('footer'),
-                    document.querySelector('.footer'),
-                    document.querySelector('#footer'),
-                    document.querySelector('[class*="footer"]'),
-                    document.querySelector('[id*="footer"]'),
-                ];
-                
-                const footer = footers.find(f => f !== null);
-                if (!footer) return [];
-                
-                // Get all links in the footer and score them
-                return Array.from(document.querySelectorAll('a[href]'))
-                    .filter(a => {
-                        // General filtering
-                        if (!a.href || !a.textContent) return false;
-                        if (a.href.startsWith('javascript:') || a.href.startsWith('mailto:')) return false;
-                        
-                        const text = a.textContent.trim().toLowerCase();
-                        const href = a.href.toLowerCase();
-                        
-                        // Look for terms-related links
-                        return text.includes('terms') || 
-                               text.includes('tos') || 
-                               text.includes('legal') ||
-                               text.includes('conditions') ||
-                               href.includes('terms') ||
-                               href.includes('tos') ||
-                               href.includes('legal');
-                    })
-                    .map(a => {
-                        const text = a.textContent.trim().toLowerCase();
-                        const href = a.href.toLowerCase();
-                        
-                        // Score the link
-                        let score = 0;
-                        if (text.includes('terms of service') || text.includes('terms of use')) score += 100;
-                        else if (text.includes('terms')) score += 80;
-                        else if (text.includes('tos')) score += 70;
-                        else if (text.includes('legal')) score += 50;
-                        
-                        if (href.includes('terms-of-service') || href.includes('terms_of_service')) score += 50;
-                        else if (href.includes('terms') || href.includes('tos')) score += 40;
-                        else if (href.includes('legal')) score += 30;
-                        
-                        return {
-                            text: a.textContent.trim(),
-                            href: a.href,
-                            score: score
-                        };
-                    })
-                    .sort((a, b) => b.score - a.score);
-            }"""
-            )
-
-            if footer_links and len(footer_links) > 0:
-                print(
-                    f"Found {len(footer_links)} potential links in footer despite anti-bot protection"
-                )
-                for i, link in enumerate(footer_links[:3]):
-                    print(
-                        f"Footer link #{i+1}: {link['text']} - {link['href']} (Score: {link['score']})"
-                    )
-
-                best_link = footer_links[0]["href"]
-                # Just return the link without navigating to verify
-                return best_link, page, best_link
-
-        # Get the base domain for validation
-        base_domain = await page.evaluate(
-            """() => {
-            try {
-                return new URL(window.location.href).hostname;
-            } catch (e) {
-                return '';
-            }
-        }"""
-        )
-
+        print("\n=== Starting find_all_links_js ===")
+        print("Searching for all links using JavaScript...")
+        
+        # Get the base domain for comparison
+        current_url = await page.evaluate("() => window.location.href")
+        parsed_url = urlparse(current_url)
+        base_domain = parsed_url.netloc
         print(f"Base domain: {base_domain}")
-
-        # Enhanced link detection script - specifically targeting common ToS links at bottom of page
-        links = await page.evaluate(
-            """(baseDomain) => {
-            // Get all footer sections (most ToS links are in footers)
-            const footerSelectors = [
-                'footer', '.footer', '#footer', '[class*="footer"]', '[id*="footer"]',
-                '.legal', '#legal', '.bottom', '.links', '.nav-bottom', '.site-info'
-            ];
+        
+        # Check if we're on Apple or Google domains
+        is_apple_domain = "apple.com" in base_domain
+        is_google_domain = "google.com" in base_domain or "play.google.com" in base_domain
+        
+        # Anti-bot protection test
+        anti_bot = await detect_anti_bot_patterns(page)
+        
+        # If we're looking at a developer site that was navigated from an App/Play store
+        # and we detect anti-bot protection, we should check if the links found are from Apple/Google
+        # and filter them out if they are
+        developer_site_from_store = context.get("came_from_app_store") or context.get("came_from_play_store")
+        
+        # Different approaches based on anti-bot presence
+        if anti_bot:
+            print("Detected anti-bot protection, looking for footer links specifically...")
             
-            // Get all links that might be ToS links
-            let allLinks = [];
-            
-            // First check footer areas
-            for (const selector of footerSelectors) {
-                const container = document.querySelector(selector);
-                if (container) {
-                    const links = Array.from(container.querySelectorAll('a[href]'));
-                    allLinks = [...allLinks, ...links];
+            # With anti-bot, focus on footer links which are most likely to contain ToS
+            footer_links = await page.evaluate("""
+                () => {
+                    const footers = document.querySelectorAll('footer, [id*="foot"], [class*="foot"]');
+                    const links = [];
+                    
+                    footers.forEach(footer => {
+                        const footerLinks = footer.querySelectorAll('a[href]');
+                        footerLinks.forEach(link => {
+                            if (link.href && link.href.trim() !== '' && !link.href.startsWith('javascript:')) {
+                                // Get link text or closest heading
+                                let text = link.textContent.trim();
+                                if (!text) {
+                                    const closestHeading = link.closest('h1, h2, h3, h4, h5, h6');
+                                    if (closestHeading) {
+                                        text = closestHeading.textContent.trim();
+                                    }
+                                }
+                                
+                                links.push({
+                                    href: link.href,
+                                    text: text || "No text available"
+                                });
+                            }
+                        });
+                    });
+                    
+                    return links;
                 }
-            }
+            """)
             
-            // If no links found in footers, check the entire page
-            if (allLinks.length === 0) {
-                allLinks = Array.from(document.querySelectorAll('a[href]'));
-            }
-            
-            // Term patterns to look for
-            const termPatterns = [
-                'terms of use', 'terms of service', 'terms and conditions', 
-                'user agreement', 'terms', 'tos', 'legal', 'conditions'
-            ];
-            
-            // Score and filter links
-            const scoredLinks = allLinks
-                .filter(link => {
-                    // Basic filtering
-                    if (!link.href || !link.textContent) return false;
-                    
-                    // Skip javascript, mail links
-                    if (link.href.startsWith('javascript:') || 
-                        link.href.startsWith('mailto:') || 
-                        link.href.startsWith('tel:')) return false;
-                    
-                    const text = link.textContent.trim().toLowerCase();
-                    const href = link.href.toLowerCase();
-                    
-                    // Include if text or URL contains any of our terms
-                    return termPatterns.some(term => text.includes(term) || href.includes(term));
-                })
-                .map(link => {
-                    const text = link.textContent.trim().toLowerCase();
-                    const href = link.href.toLowerCase();
-                    
-                    // Score the link
-                let score = 0;
-                    
-                    // Text matching
-                    if (text === 'terms of use' || text === 'terms of service') score += 100;
-                    else if (text.includes('terms of use') || text.includes('terms of service')) score += 90;
-                    else if (text.includes('terms') && text.includes('conditions')) score += 85;
-                    else if (text.includes('user agreement')) score += 80;
-                    else if (text.includes('terms')) score += 70;
-                    else if (text === 'legal' || text === 'legal info') score += 60;
-                    else if (text.includes('legal')) score += 50;
-                    
-                    // URL matching
-                    if (href.includes('terms-of-use') || 
-                        href.includes('terms-of-service') || 
-                        href.includes('terms_of_use') || 
-                        href.includes('terms_of_service')) score += 50;
-                    else if (href.includes('terms-and-conditions') || 
-                             href.includes('terms_and_conditions')) score += 45;
-                    else if (href.includes('user-agreement') || 
-                             href.includes('user_agreement')) score += 45;
-                    else if (href.includes('/terms/') || 
-                             href.includes('/tos/')) score += 40;
-                    else if (href.includes('/terms') || 
-                             href.includes('/tos')) score += 35;
-                    else if (href.includes('legal') || 
-                             href.includes('conditions')) score += 30;
-                    
-                    // Add boost for links in the page footer or with legal in the path
-                    const isInFooter = footerSelectors.some(sel => 
-                        link.closest(sel) !== null);
-                    
-                    if (isInFooter) score += 20;
-                    if (href.includes('/legal/')) score += 15;
+            if footer_links and len(footer_links) > 0:
+                print(f"Found {len(footer_links)} potential links in footer despite anti-bot protection")
                 
-                return {
-                    text: text,
-                        href: href,
-                        score: score
-                    };
-                })
-                .filter(item => item.score > 30) // Only include higher scored links
-                .sort((a, b) => b.score - a.score);
-            
-            return scoredLinks;
-        }""",
-            base_domain,
-        )
-
-        # No links found
-        if not links or len(links) == 0:
+                # Filter out links from Apple/Google domains if we're on a developer site navigated from store
+                filtered_links = []
+                for idx, link in enumerate(footer_links):
+                    link_url = link.get('href', '')
+                    link_text = link.get('text', '')
+                    
+                    # Skip links from Apple/Google domains if we're on a developer site
+                    if developer_site_from_store:
+                        link_domain = urlparse(link_url).netloc
+                        if (is_apple_domain or "apple.com" in link_domain) and context.get("came_from_app_store"):
+                            print(f"Skipping Apple domain link: {link_text} - {link_url}")
+                            continue
+                        if (is_google_domain or "google.com" in link_domain or "play.google.com" in link_domain) and context.get("came_from_play_store"):
+                            print(f"Skipping Google domain link: {link_text} - {link_url}")
+                            continue
+                    
+                    # Calculate a score based on how likely this is a ToS link
+                    score = 0
+                    link_text_lower = link_text.lower()
+                    link_url_lower = link_url.lower()
+                    
+                    # Highest priority: exact matches for user/customer terms
+                    if "user agreement" in link_text_lower:
+                        score += 150
+                    if "customer agreement" in link_text_lower:
+                        score += 150
+                    if "user terms" in link_text_lower:
+                        score += 140
+                    if "customer terms" in link_text_lower:
+                        score += 140
+                    if "terms of use" in link_text_lower:
+                        score += 140
+                    if "terms of service" in link_text_lower:
+                        score += 130
+                    if "terms and conditions" in link_text_lower:
+                        score += 120
+                    if "terms & conditions" in link_text_lower:
+                        score += 120
+                    if "conditions of use" in link_text_lower:
+                        score += 110
+                    if "legal terms" in link_text_lower:
+                        score += 100
+                    
+                    # Medium priority: partial matches
+                    if "terms" in link_text_lower:
+                        score += 90
+                    if "legal" in link_text_lower:
+                        score += 80
+                    if "agreement" in link_text_lower:
+                        score += 70
+                    if "conditions" in link_text_lower:
+                        score += 60
+                    
+                    # URL patterns
+                    if "terms-of-service" in link_url_lower or "tos" in link_url_lower:
+                        score += 50
+                    if "terms-of-use" in link_url_lower or "tou" in link_url_lower:
+                        score += 50
+                    if "terms-and-conditions" in link_url_lower:
+                        score += 40
+                    if "legal/terms" in link_url_lower:
+                        score += 40
+                    if "agreement" in link_url_lower:
+                        score += 30
+                    
+                    # If this is a good candidate, add it to our filtered list
+                    if score > 0:
+                        filtered_links.append({
+                            "link": link,
+                            "score": score
+                        })
+                        print(f"Footer link #{idx+1}: {link_text} - {link_url} (Score: {score})")
+                
+                # Sort by score (highest first)
+                filtered_links.sort(key=lambda x: x["score"], reverse=True)
+                
+                # If we found good candidates
+                if filtered_links:
+                    best_link = filtered_links[0]["link"]
+                    best_score = filtered_links[0]["score"]
+                    
+                    if best_score >= 100:
+                        print(f"✅ Found high-score footer link with ToS-related title: {best_link['href']}")
+                        return best_link['href'], page, unverified_result
+                    elif filtered_links and len(filtered_links) > 0:
+                        # Return the best link we found, even if score isn't super high
+                        print(f"👍 Found potential footer link: {best_link['href']} (Score: {best_score})")
+                        return best_link['href'], page, unverified_result
+                else:
+                    print("No relevant links found in footer")
+            else:
+                print("No footer links found")
+        
+        # If no anti-bot or no good footer links found, try standard method
+        links_data = await page.evaluate("""
+            () => {
+                // Get all links on the page
+                const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                const links = [];
+                
+                allLinks.forEach(link => {
+                    if (link.href && link.href.trim() !== '' && 
+                        !link.href.startsWith('javascript:') && 
+                        !link.href.includes('mailto:') &&
+                        !link.href.includes('tel:')) {
+                        
+                        // Get link text
+                        let text = link.textContent.trim();
+                        if (!text) {
+                            // If no text, check for aria-label or title
+                            text = link.getAttribute('aria-label') || link.getAttribute('title') || '';
+                        }
+                        
+                        links.push({
+                            href: link.href,
+                            text: text,
+                            isFooter: !!link.closest('footer, [id*="foot"], [class*="foot"]')
+                        });
+                    }
+                });
+                
+                return links;
+            }
+        """)
+        
+        if not links_data or len(links_data) == 0:
             print("No relevant links found using JavaScript method")
             return None, page, unverified_result
-
-        # Display top results with scores for JS method
-        print(f"Found {len(links)} relevant links (JS):")
-        for i, link in enumerate(links[:5]):
-            print(f"JS Link #{i+1}: {link['text']} - {link['href']} (Score: {link['score']})")
-
-        # If links were found, use the highest scored one
-        if links:
-            best_link = links[0]["href"]
-
-            # Set unverified result if none exists
-            if not unverified_result:
-                unverified_result = best_link
-
-            # Skip navigation completely for any link with score > 60
-            # This removes mandatory navigation to improve performance
-            if links[0]["score"] > 60:
-                print(f"Found high-scoring link ({links[0]['score']}): {best_link}")
-                print(f"Skipping navigation to save time")
-                return best_link, page, unverified_result
-                
-            # Only try navigation for medium-confidence links (score between 30-60)
-            # For scores below this threshold, just return the best link
-            if links[0]["score"] <= 60:
-                print(f"Medium-confidence link found with score {links[0]['score']}, returning without navigation")
-                return best_link, page, unverified_result
-
+        
+        # Extract all links with a relevant name or URL
+        relevant_links = []
+        
+        for link_data in links_data:
+            href = link_data.get('href', '')
+            text = link_data.get('text', '').lower()
+            is_footer = link_data.get('isFooter', False)
+            
+            # Skip links from Apple/Google domains if we're on a developer site
+            if developer_site_from_store:
+                link_domain = urlparse(href).netloc
+                if (is_apple_domain or "apple.com" in link_domain) and context.get("came_from_app_store"):
+                    continue
+                if (is_google_domain or "google.com" in link_domain or "play.google.com" in link_domain) and context.get("came_from_play_store"):
+                    continue
+            
+            # Calculate relevance score
+            score = 0
+            
+            # Highest priority: exact matches for user/customer terms
+            if "user agreement" in text:
+                score += 150
+            if "customer agreement" in text:
+                score += 150
+            if "user terms" in text:
+                score += 140
+            if "customer terms" in text:
+                score += 140
+            if "terms of use" in text:
+                score += 140
+            if "terms of service" in text:
+                score += 130
+            if "terms and conditions" in text:
+                score += 120
+            if "terms & conditions" in text:
+                score += 120
+            if "conditions of use" in text:
+                score += 110
+            if "legal terms" in text:
+                score += 100
+            
+            # Medium priority: partial matches
+            if "terms" in text:
+                score += 90
+            if "legal" in text:
+                score += 80
+            if "agreement" in text:
+                score += 70
+            if "conditions" in text:
+                score += 60
+            
+            # URL patterns
+            href_lower = href.lower()
+            if "terms-of-service" in href_lower or "tos" in href_lower:
+                score += 50
+            if "terms-of-use" in href_lower or "tou" in href_lower:
+                score += 50
+            if "terms-and-conditions" in href_lower:
+                score += 40
+            if "legal/terms" in href_lower:
+                score += 40
+            if "agreement" in href_lower:
+                score += 30
+            
+            # Boost score for footer links
+            if is_footer:
+                score *= 1.2  # 20% boost for footer links
+            
+            if score > 0:
+                relevant_links.append({
+                    "href": href,
+                    "text": text,
+                    "score": score
+                })
+        
+        # Sort by score (highest first)
+        relevant_links.sort(key=lambda x: x["score"], reverse=True)
+        
+        # Return the highest scoring link
+        if relevant_links and len(relevant_links) > 0:
+            best_link = relevant_links[0]["href"]
+            print(f"Found best ToS link via JavaScript: {best_link} (Score: {relevant_links[0]['score']})")
+            return best_link, page, unverified_result
+        
+        print("No relevant links found after filtering")
         return None, page, unverified_result
-
+    
     except Exception as e:
-        print(f"Error in JavaScript link finder: {e}")
+        print(f"Error in find_all_links_js: {e}")
+        traceback.print_exc()
         return None, page, unverified_result
 
 
@@ -3008,6 +3047,12 @@ async def find_tos_via_privacy_policy(page, context):
     
     print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, attempting ToS via privacy policy")
     
+    # Update context to track where we came from
+    if is_app_store:
+        context["came_from_app_store"] = True
+    elif is_play_store:
+        context["came_from_play_store"] = True
+    
     # Extract privacy policy link based on store type
     privacy_link = None
     if is_app_store:
@@ -3086,14 +3131,26 @@ async def find_tos_via_privacy_policy(page, context):
         # Try JavaScript method
         js_result, page, js_unverified = await find_all_links_js(page, context, None)
         if js_result:
-            print(f"✅ Found ToS link via JavaScript method on developer site: {js_result}")
-            return js_result, "app_store_base_domain_js", page
+            # Check if the found link is from an Apple or Google domain
+            js_result_domain = urlparse(js_result).netloc
+            if (is_app_store and "apple.com" in js_result_domain) or (is_play_store and ("google.com" in js_result_domain or "play.google.com" in js_result_domain)):
+                print(f"❌ Found link is from {'Apple' if 'apple.com' in js_result_domain else 'Google'} domain, not from app developer")
+                # Do not return this link
+            else:
+                print(f"✅ Found ToS link via JavaScript method on developer site: {js_result}")
+                return js_result, "app_store_base_domain_js", page
         
         # Try scroll method
         scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
         if scroll_result:
-            print(f"✅ Found ToS link via scroll method on developer site: {scroll_result}")
-            return scroll_result, "app_store_base_domain_scroll", page
+            # Check if the found link is from an Apple or Google domain
+            scroll_result_domain = urlparse(scroll_result).netloc
+            if (is_app_store and "apple.com" in scroll_result_domain) or (is_play_store and ("google.com" in scroll_result_domain or "play.google.com" in scroll_result_domain)):
+                print(f"❌ Found link is from {'Apple' if 'apple.com' in scroll_result_domain else 'Google'} domain, not from app developer")
+                # Do not return this link
+            else:
+                print(f"✅ Found ToS link via scroll method on developer site: {scroll_result}")
+                return scroll_result, "app_store_base_domain_scroll", page
         
         # If all else fails, return to the app store page
         print("❌ Could not find ToS on developer website")
