@@ -183,14 +183,15 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         sanitized_url = sanitize_url(url)
         if not sanitized_url:
             logger.warning(f"Invalid URL provided: {url}")
-        return ToSResponse(
+            return ToSResponse(
                 url=url,
-            success=False,
+                tos_url=None,
+                success=False,
                 message="Invalid URL format",
                 method_used="validation"
             )
 
-        url = normalize_url(url)
+        url = normalize_url(sanitized_url)
         
         # Check if this is an app store URL
         if is_app_store_url(url):
@@ -200,7 +201,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 return ToSResponse(
                     url=url,
                     tos_url=tos_url,
-                success=True,
+                    success=True,
                     message="Terms of Service found via App Store",
                     method_used="app_store"
                 )
@@ -209,10 +210,10 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
             logger.info(f"Detected Play Store URL: {url}")
             tos_url = await find_play_store_tos(url)
             if tos_url:
-                    return ToSResponse(
+                return ToSResponse(
                     url=url,
                     tos_url=tos_url,
-                        success=True,
+                    success=True,
                     message="Terms of Service found via Play Store",
                     method_used="play_store"
                 )
