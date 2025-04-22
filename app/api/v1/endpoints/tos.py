@@ -3036,7 +3036,18 @@ async def find_tos_via_privacy_policy(page, context):
         print("🔍 Using common ToS URL patterns based on privacy policy domain")
         
         # Construct common ToS URLs based on the domain from the privacy policy
-        common_tos_patterns = [
+        common_tos_patterns = []
+        
+        # Add patterns based on analysis of the privacy URL structure
+        if "/legal/" in privacy_link:
+            # If privacy URL has a /legal/ path, ToS is likely in the same directory
+            privacy_path = parsed_url.path
+            legal_dir = privacy_path.split('/legal/')[0] + '/legal/'
+            common_tos_patterns.append(f"{parsed_url.scheme}://{base_domain}{legal_dir}terms-of-service")
+            common_tos_patterns.append(f"{parsed_url.scheme}://{base_domain}{legal_dir}terms")
+        
+        # Add standard patterns
+        common_tos_patterns.extend([
             f"https://{base_domain}/legal/terms-of-service",
             f"https://{base_domain}/legal/terms",
             f"https://{base_domain}/terms-of-service",
@@ -3047,13 +3058,7 @@ async def find_tos_via_privacy_policy(page, context):
             f"https://www.{base_domain.replace('www.', '')}/legal/terms",
             f"https://www.{base_domain.replace('www.', '')}/terms-of-service",
             f"https://www.{base_domain.replace('www.', '')}/terms"
-        ]
-        
-        # For WhatsApp specifically (common case)
-        if "whatsapp" in base_domain.lower():
-            print("🔍 Detected WhatsApp domain, adding WhatsApp-specific ToS URLs")
-            whatsapp_tos = "https://www.whatsapp.com/legal/terms-of-service"
-            return whatsapp_tos, "app_store_privacy_to_tos_whatsapp_specific", page
+        ])
         
         # Try the first common pattern without checking (to give user a likely URL even if not verified)
         if len(common_tos_patterns) > 0:
