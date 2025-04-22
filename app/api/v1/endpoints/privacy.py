@@ -295,7 +295,9 @@ def normalize_domain(url):
 
 
 async def find_user_customer_privacy_links(page):
-    """Special function to prioritize user/customer privacy links above all else."""
+    """
+    Find user or customer-specific privacy links with highest priority
+    """
     try:
         print("🔍🔍🔍 SUPREME PRIORITY CHECK: Looking for user/customer privacy links...")
         # Use a targeted CSS selector just for user/customer privacy links
@@ -306,86 +308,105 @@ async def find_user_customer_privacy_links(page):
         )
         
         if user_customer_links and len(user_customer_links) > 0:
-            print(f"💎💎💎 SUPREME PRIORITY: Found {len(user_customer_links)} direct user/customer privacy links!")
-            
-            # Score the links to prioritize them
-            scored_links = []
-            
-            for link in user_customer_links:
-                try:
-                    href = await link.get_attribute("href")
-                    text = await link.text_content() or ""
-                    text = text.lower().strip()
-                    
-                    if not href:
-                        continue
-                        
-                    # Calculate a score for each link
-                    score = 0
-                    
-                    # Scores for text
-                    if text == "user privacy notice" or text == "user privacy policy":
-                        score += 1000
-                    elif "user privacy" in text:
-                        score += 800
-                    elif text == "customer privacy notice" or text == "customer privacy policy":
-                        score += 600
-                    elif "customer privacy" in text:
-                        score += 400
-                    
-                    # Scores for URL
-                    href_lower = href.lower()
-                    if "user-privacy" in href_lower or "user_privacy" in href_lower:
-                        score += 500
-                    elif "user" in href_lower and "privacy" in href_lower:
-                        score += 400
-                    elif "customer-privacy" in href_lower or "customer_privacy" in href_lower:
-                        score += 300
-                    elif "customer" in href_lower and "privacy" in href_lower:
-                        score += 200
-                        
-                    # Any link with user/customer terms should get minimum baseline score
-                    if score == 0 and ("user" in href_lower or "customer" in href_lower):
-                        score += 100
-                    
-                    # Print details about high-scoring links
-                    if score >= 100:
-                        print(f"User/Customer Link: '{text}' - {href} (Score: {score})")
-                        scored_links.append({"link": link, "text": text, "href": href, "score": score})
-                except Exception as e:
-                    print(f"Error scoring user/customer link: {e}")
-                    continue
-            
-            # Sort by score
-            scored_links.sort(key=lambda x: x["score"], reverse=True)
-            
-            # Try the highest scoring links
-            for scored_link in scored_links[:3]:  # Try the top 3 links
-                link = scored_link["link"]
-                href = scored_link["href"]
-                text = scored_link["text"]
-                score = scored_link["score"]
+            print(f"✅ Found {len(user_customer_links)} potential user/customer specific privacy links")
+            for i, link in enumerate(user_customer_links[:3]):
+                href = await link.get_attribute('href')
+                text = await link.text_content()
+                print(f"  Link #{i+1}: {text} - {href}")
                 
-                print(f"⭐⭐⭐ Trying SUPREME PRIORITY user/customer link: {text} - {href} (Score: {score})")
-                try:
-                    success = await click_and_wait_for_navigation(page, link, timeout=5000)
-                    if success:
-                        print(f"✓✓✓ Successfully navigated to USER/CUSTOMER privacy link: {page.url}")
-                        return page.url
-                except Exception as e:
-                    print(f"Error navigating to user/customer link: {e}")
-                    continue
-            
-            # If navigation failed for all links, return the best URL anyway
-            if scored_links:
-                best_link = scored_links[0]["href"]
-                print(f"⚠️ Navigation failed, but returning best user/customer link: {best_link}")
-                return best_link
-        
-        return None
+            # Use the first link
+            first_link = user_customer_links[0]
+            href = await first_link.get_attribute('href')
+            return href
     except Exception as e:
-        print(f"Error in user/customer privacy search: {e}")
+        print(f"Error in find_user_customer_privacy_links: {e}")
+    
+    return None
+
+
+async def extract_app_store_privacy_link(page):
+    """
+    Extract privacy policy link from Apple App Store pages.
+    App Store has a specific HTML structure for privacy policy links.
+    """
+    try:
+        print("🍎 Checking if this is an Apple App Store page...")
+        
+        # Check if this is an App Store page
+        is_app_store = await page.evaluate("""
+            () => {
+                return window.location.href.includes('apps.apple.com') || 
+                       document.querySelector('meta[property="og:site_name"]')?.content?.includes('App Store');
+            }
+        """)
+        
+        if not is_app_store:
+            print("Not an App Store page, skipping App Store specific extraction")
+            return None
+            
+        print("✅ Detected Apple App Store page, looking for privacy policy link")
+        
+        # Look for the privacy policy link in the app-privacy section
+        privacy_link = await page.evaluate("""
+            () => {
+                // Target the app-privacy section
+                const privacySection = document.querySelector('.app-privacy');
+                if (!privacySection) return null;
+                
+                // Look for direct privacy policy link
+                const directLink = privacySection.querySelector('a[href*="privacy"]');
+                if (directLink && directLink.href) {
+                    return { 
+                        href: directLink.href,
+                        text: directLink.textContent.trim(),
+                        confidence: 'high'
+                    };
+                }
+                
+                // Fallback: look for any link in the privacy section
+                const anyLink = privacySection.querySelector('a[href]');
+                if (anyLink && anyLink.href) {
+                    return { 
+                        href: anyLink.href,
+                        text: anyLink.textContent.trim(),
+                        confidence: 'medium'
+                    };
+                }
+                
+                // Second fallback: look for links in developer info section
+                const devInfoSection = document.querySelector('.information-list--app');
+                if (devInfoSection) {
+                    const devLinks = Array.from(devInfoSection.querySelectorAll('a[href]'));
+                    const privacyLink = devLinks.find(link => 
+                        link.textContent.toLowerCase().includes('privacy') || 
+                        link.href.toLowerCase().includes('privacy')
+                    );
+                    
+                    if (privacyLink) {
+                        return {
+                            href: privacyLink.href,
+                            text: privacyLink.textContent.trim(),
+                            confidence: 'medium'
+                        };
+                    }
+                }
+                
+                return null;
+            }
+        """)
+        
+        if privacy_link:
+            print(f"🍏 Found privacy policy link in App Store: {privacy_link['text']} - {privacy_link['href']}")
+            print(f"Confidence: {privacy_link['confidence']}")
+            return privacy_link['href']
+        
+        print("No privacy policy link found in App Store page")
         return None
+        
+    except Exception as e:
+        print(f"Error extracting App Store privacy link: {e}")
+        return None
+
 
 @router.post("/privacy", response_model=PrivacyResponse)
 async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
@@ -422,7 +443,6 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
     browser = None
     playwright = None
     unverified_result = None  # Initialize unverified_result here
-    high_score_footer_link = None  # Track high-scoring footer links
 
     try:
         playwright = await async_playwright().start()
@@ -430,17 +450,26 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         success, _, _ = await navigate_with_retry(page, url, max_retries=2)
         if not success:
             print("\nMain site navigation had issues, but trying to analyze current page...")
-                
-        # HIGHEST PRIORITY: First try to find user/customer privacy links directly
-        # This is done BEFORE any other methods to ensure these links get absolute priority
-        print("Running SUPREME PRIORITY user/customer privacy link detection first...")
-        user_customer_link = await find_user_customer_privacy_links(page)
-        if user_customer_link:
-            print(f"\n\n⭐⭐⭐ SUPREME PRIORITY SUCCESS: Found user/customer privacy link: {user_customer_link}")
-            # Return immediately with this high priority link
+
+        # Check if this is an App Store page first
+        app_store_privacy_link = await extract_app_store_privacy_link(page)
+        if app_store_privacy_link:
+            print(f"\n\n🍏 HIGHEST PRIORITY SUCCESS: Found App Store privacy link: {app_store_privacy_link}")
             return PrivacyResponse(
                 url=original_url,
-                pp_url=user_customer_link,
+                pp_url=app_store_privacy_link,
+                success=True,
+                message="Found privacy policy link in Apple App Store",
+                method_used="app_store_detection"
+            )
+
+        # Check for user/customer privacy links with highest priority
+        user_privacy_link = await find_user_customer_privacy_links(page)
+        if user_privacy_link:
+            print(f"\n\n⭐⭐⭐ HIGHEST PRIORITY SUCCESS: Found user/customer privacy link: {user_privacy_link}")
+            return PrivacyResponse(
+                url=original_url,
+                pp_url=user_privacy_link,
                 success=True,
                 message="Found User/Customer Privacy Policy (HIGHEST PRIORITY)",
                 method_used="user_customer_supreme_priority"
