@@ -3047,11 +3047,11 @@ async def find_tos_via_privacy_policy(page, context):
     
     print(f"✅ Detected {'App Store' if is_app_store else 'Play Store'} page, attempting ToS via privacy policy")
     
-    # Update context to track where we came from
-    if is_app_store:
-        context["came_from_app_store"] = True
-    elif is_play_store:
-        context["came_from_play_store"] = True
+    # Create a custom context object instead of modifying the browser context
+    store_context = {
+        "came_from_app_store": is_app_store,
+        "came_from_play_store": is_play_store
+    }
     
     # Extract privacy policy link based on store type
     privacy_link = None
@@ -3129,7 +3129,7 @@ async def find_tos_via_privacy_policy(page, context):
             return user_terms_link, "app_store_base_domain_user_terms", page
         
         # Try JavaScript method
-        js_result, page, js_unverified = await find_all_links_js(page, context, None)
+        js_result, page, js_unverified = await find_all_links_js(page, store_context, None)
         if js_result:
             # Check if the found link is from an Apple or Google domain
             js_result_domain = urlparse(js_result).netloc
@@ -3141,7 +3141,7 @@ async def find_tos_via_privacy_policy(page, context):
                 return js_result, "app_store_base_domain_js", page
         
         # Try scroll method
-        scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, context, js_unverified)
+        scroll_result, page, scroll_unverified = await smooth_scroll_and_click(page, store_context, js_unverified)
         if scroll_result:
             # Check if the found link is from an Apple or Google domain
             scroll_result_domain = urlparse(scroll_result).netloc
