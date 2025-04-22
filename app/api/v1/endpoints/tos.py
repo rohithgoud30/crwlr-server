@@ -4,9 +4,9 @@ import re
 import traceback
 import time
 import logging
+import aiohttp
 from fastapi import APIRouter, HTTPException, status
 from playwright.async_api import async_playwright
-import aiohttp
 
 from app.models.tos import ToSRequest, ToSResponse
 
@@ -70,6 +70,20 @@ LINK_EVALUATION_WEIGHTS = {
     "position": 0.1,
 }
 
+# Configuration for common Terms of Service paths to check
+TOS_COMMON_PATHS = [
+    "/terms",
+    "/terms-of-service",
+    "/terms-of-use",
+    "/terms-and-conditions",
+    "/tos",
+    "/legal/terms",
+    "/legal",
+    "/legal/terms-of-service",
+    "/legal/terms-of-use",
+    "/about/legal/terms-of-service",
+    "/about/terms"
+]
 
 def sanitize_url(url: str) -> str:
     """
@@ -2963,41 +2977,32 @@ async def find_play_store_tos(url: str) -> str:
 async def find_tos_via_common_paths(url: str) -> str:
     """Try to find Terms of Service via common URL paths."""
     try:
-        # Common paths where ToS might be found
-        common_paths = [
-            "/terms",
-            "/terms-of-service",
-            "/terms-of-use",
-            "/terms-and-conditions",
-            "/tos",
-            "/legal/terms",
-            "/legal",
-            "/legal/terms-of-service",
-            "/legal/terms-of-use",
-            "/about/legal/terms-of-service",
-            "/about/terms"
-        ]
-        
         # Parse the base URL
         parsed_url = urlparse(url)
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
         
+        # Use paths from configuration
+        logger.info(f"Checking {len(TOS_COMMON_PATHS)} common paths for ToS on {base_url}")
+        
         # Try each common path
         async with aiohttp.ClientSession() as session:
-            for path in common_paths:
+            for path in TOS_COMMON_PATHS:
                 test_url = f"{base_url}{path}"
                 try:
                     # Simple HEAD request to check if the URL exists
                     async with session.head(test_url, timeout=2) as response:
                         if response.status == 200:
+                            logger.info(f"Found ToS at common path: {test_url}")
                             return test_url
-                except:
-                    # Ignore errors and try next path
+                except Exception as e:
+                    # Log but continue to next path
+                    logger.debug(f"Error checking path {path}: {str(e)}")
                     continue
-                
+        
+        logger.info(f"No common ToS paths found for {base_url}")
         return None
     except Exception as e:
-        print(f"Error checking common paths: {e}")
+        logger.error(f"Error checking common paths: {str(e)}")
         return None
 
 async def find_tos_via_html_inspection(url: str) -> str:
