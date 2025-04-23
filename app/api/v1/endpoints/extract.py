@@ -442,6 +442,8 @@ def extract_text_from_pdf(pdf_content: bytes) -> str:
 def extract_content_from_soup(soup) -> str:
     """Extract and clean up text content from a BeautifulSoup object."""
     try:
+        logger.info(f"Starting content extraction from soup")
+        
         # Remove script and style elements
         for script_or_style in soup(['script', 'style', 'header', 'footer', 'nav']):
             script_or_style.extract()
@@ -453,33 +455,48 @@ def extract_content_from_soup(soup) -> str:
         content_selectors = [
             'article', 'main', 'div[role="main"]', 
             '.content', '.main-content', '#content', '#main',
-            '.terms', '.terms-content', '.privacy-policy', '.legal'
+            '.terms', '.terms-content', '.privacy-policy', '.legal',
+            '.legal-text', '#terms', '#tos', '.tos'
         ]
         
+        logger.debug(f"Looking for content containers using selectors")
         # Try each selector in order of likelihood
         for selector in content_selectors:
             elements = soup.select(selector)
             if elements:
                 # Use the largest matching element
                 main_content = max(elements, key=lambda elem: len(elem.get_text(strip=True)))
-                if len(main_content.get_text(strip=True)) > 500:  # If it has substantial content
+                text_length = len(main_content.get_text(strip=True))
+                logger.info(f"Found content with selector {selector} - length: {text_length}")
+                if text_length > 500:  # If it has substantial content
                     break
         
         # If we couldn't find a clear main content, use the body
         if not main_content or len(main_content.get_text(strip=True)) < 500:
+            logger.info("No main content container found, falling back to body")
             main_content = soup.body
         
         if not main_content:
+            logger.warning("No body element found, using entire soup")
             main_content = soup
+        
+        # Check if we have any content at all
+        if not main_content:
+            logger.error("No content found in HTML")
+            return ""
             
         # Use optimized strategy for text extraction based on content size
         main_text = main_content.get_text(strip=True)
+        logger.info(f"Raw text length before processing: {len(main_text)}")
+        
         if len(main_text) < 5000:
             # For smaller content, use direct text extraction
             text = main_content.get_text(separator='\n', strip=True)
+            logger.info(f"Used direct text extraction - result length: {len(text)}")
         else:
             # For larger content, use html2text which is more memory efficient
             text = html2text(str(main_content))
+            logger.info(f"Used html2text - result length: {len(text)}")
         
         # Post-processing - simplified for performance
         # Remove excessive whitespace 
@@ -488,7 +505,15 @@ def extract_content_from_soup(soup) -> str:
         # Remove URLs that appear as plain text
         text = re.sub(r'https?://\S+', '', text)
         
-        return text.strip()
+        final_text = text.strip()
+        logger.info(f"Final extracted text length: {len(final_text)}")
+        
+        # Preview the first 100 characters
+        if final_text:
+            preview = final_text[:100] + "..." if len(final_text) > 100 else final_text
+            logger.info(f"Text preview: {preview}")
+        
+        return final_text
     except Exception as e:
         logger.error(f"Error extracting content from soup: {str(e)}")
         # Return empty string on failure, let the calling function handle it
@@ -509,7 +534,6 @@ async def extract_with_playwright(url: str, document_type: str, url_to_return: s
             context = await browser.new_context(
                 viewport={"width": 1366, "height": 768},
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-                javascript_enabled=True,
             )
             
             # Set timeout for the entire context
@@ -518,23 +542,165 @@ async def extract_with_playwright(url: str, document_type: str, url_to_return: s
             page = await context.new_page()
             
             try:
-                # Set shorter timeouts for faster performance
-                await page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
+                # Navigate to the page with improved waiting strategy
+                logger.info(f"Navigating to {url}")
+                response = await page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
                 
-                # Quick scroll to load lazy content
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight/2)")
-                await asyncio.sleep(0.5)  # Reduced wait time
+                if not response:
+                    logger.warning(f"Failed to load page: {url}")
+                    raise Exception("Page load failed")
                 
-                # Get the page content
-                content = await page.content()
+                logger.info(f"Page loaded with status: {response.status}")
                 
-                # Parse with BeautifulSoup
-                soup = BeautifulSoup(content, 'html.parser')
+                # Close any cookie consent dialogs or popups that might appear
+                popup_buttons = [
+                    'button:text-is("Accept All")', 
+                    'button:text-is("Accept")', 
+                    'button:text-is("Agree")', 
+                    'button:text-is("I Agree")', 
+                    'button:text-is("OK")',
+                    'button:text-is("Continue")',
+                    '[aria-label="Accept cookies"]',
+                    '[aria-label="Accept all cookies"]',
+                    '[data-cookiebanner="accept_button"]',
+                    '[data-testid="cookie-policy-dialog-accept-button"]'
+                ]
                 
-                # Extract text
-                extracted_text = extract_content_from_soup(soup)
+                logger.info("Looking for cookie/consent popups to dismiss")
+                for selector in popup_buttons:
+                    try:
+                        if await page.locator(selector).count() > 0:
+                            logger.info(f"Found popup button matching '{selector}', clicking it")
+                            await page.locator(selector).first.click(timeout=3000)
+                            await asyncio.sleep(1)  # Wait for popup to close
+                    except Exception as e:
+                        logger.debug(f"Button click attempt failed for '{selector}': {str(e)}")
+                
+                # Check for login walls that might be blocking content
+                if await page.locator('text="Log In"').count() > 0 or await page.locator('text="Sign Up"').count() > 0:
+                    logger.info("Detected a possible login wall, looking for alternative content")
+                    
+                    # Try to find the main content despite the login wall
+                    # Sometimes content is still loaded but obscured by login prompts
+                    await page.evaluate("""
+                        // Try to remove login overlays
+                        document.querySelectorAll('[role="dialog"]').forEach(e => e.remove());
+                        document.querySelectorAll('.login-overlay').forEach(e => e.remove());
+                        document.querySelectorAll('.signup-overlay').forEach(e => e.remove());
+                    """)
+                
+                # Perform progressive scrolling to ensure dynamic content loads
+                logger.info("Performing progressive scrolling")
+                for scroll_position in [0.3, 0.6, 1.0]:
+                    await page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {scroll_position})")
+                    await asyncio.sleep(0.7)
+                
+                # Wait for network to be idle
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                    logger.info("Network is idle")
+                except Exception as e:
+                    logger.warning(f"Network idle timeout: {str(e)}")
+                
+                # Try different approaches to get the content
+                
+                # 1. Try to get inner text of specific elements first
+                logger.info("Attempting targeted content extraction")
+                targeted_content = await page.evaluate("""() => {
+                    // Prioritized list of selectors for legal content
+                    const selectors = [
+                        '#terms-content', '.legal-content', '.terms-content', '.privacy-content',
+                        'article', 'main', '.terms', '.legal', '#legal', '#terms',
+                        'div[role="main"]', '.content', '.main-content', '#content', '#main'
+                    ];
+                    
+                    for (const selector of selectors) {
+                        const element = document.querySelector(selector);
+                        if (element && element.innerText && element.innerText.length > 500) {
+                            return element.innerText;
+                        }
+                    }
+                    
+                    // If we couldn't find a specific container, try the body excluding navigation
+                    if (document.body) {
+                        // Clone body to avoid modifying the actual page
+                        const clone = document.body.cloneNode(true);
+                        
+                        // Remove navigation, headers, footers from the clone
+                        ['nav', 'header', 'footer', 'script', 'style'].forEach(tag => {
+                            clone.querySelectorAll(tag).forEach(el => el.remove());
+                        });
+                        
+                        return clone.innerText;
+                    }
+                    
+                    return null;
+                }""")
+                
+                # 2. Also get all visible text from the page as a backup
+                logger.info("Attempting full page text extraction")
+                full_page_text = await page.evaluate("""() => {
+                    function getVisibleText(node) {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            return node.textContent;
+                        }
+                        
+                        // Skip invisible elements
+                        const style = window.getComputedStyle(node);
+                        if (style.display === 'none' || style.visibility === 'hidden' || 
+                            style.opacity === '0' || node.offsetHeight === 0) {
+                            return '';
+                        }
+                        
+                        // Skip navigation and other non-content elements
+                        if (node.tagName === 'NAV' || node.tagName === 'HEADER' || 
+                            node.tagName === 'FOOTER' || node.tagName === 'SCRIPT' || 
+                            node.tagName === 'STYLE') {
+                            return '';
+                        }
+                        
+                        let text = '';
+                        for (const child of node.childNodes) {
+                            if (child.nodeType === Node.TEXT_NODE) {
+                                text += child.textContent.trim() + ' ';
+                            } else if (child.nodeType === Node.ELEMENT_NODE) {
+                                text += getVisibleText(child);
+                            }
+                        }
+                        return text;
+                    }
+                    
+                    return getVisibleText(document.body);
+                }""")
+                
+                # 3. Get the HTML for BeautifulSoup parsing as another approach
+                html_content = await page.content()
+                
+                # Process the content from the different methods
+                logger.info("Processing extracted content")
+                
+                extracted_text = ""
+                
+                # Try BeautifulSoup parsing first
+                if html_content:
+                    logger.info("Parsing HTML with BeautifulSoup")
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    extracted_text = extract_content_from_soup(soup)
+                
+                # If BeautifulSoup didn't yield good results, try the targeted content
+                if not extracted_text or len(extracted_text.strip()) < MIN_CONTENT_LENGTH:
+                    if targeted_content and len(targeted_content.strip()) > MIN_CONTENT_LENGTH:
+                        logger.info(f"Using targeted content (length: {len(targeted_content.strip())})")
+                        extracted_text = targeted_content.strip()
+                
+                # If targeted content didn't work, try the full page text
+                if not extracted_text or len(extracted_text.strip()) < MIN_CONTENT_LENGTH:
+                    if full_page_text and len(full_page_text.strip()) > MIN_CONTENT_LENGTH:
+                        logger.info(f"Using full page text (length: {len(full_page_text.strip())})")
+                        extracted_text = full_page_text.strip()
                 
                 if extracted_text and len(extracted_text.strip()) > MIN_CONTENT_LENGTH:
+                    logger.info("Successfully extracted text with Playwright")
                     return ExtractResponse(
                         url=url_to_return,
                         document_type=document_type,
@@ -543,7 +709,9 @@ async def extract_with_playwright(url: str, document_type: str, url_to_return: s
                         message="Successfully extracted text content using JavaScript-enabled browser rendering",
                         method_used="playwright"
                     )
-                    
+                
+                # If still no content, take a screenshot to help debug
+                logger.warning("Playwright extraction didn't yield sufficient content")
                 raise Exception("Playwright extraction didn't yield sufficient content")
             finally:
                 await browser.close()
