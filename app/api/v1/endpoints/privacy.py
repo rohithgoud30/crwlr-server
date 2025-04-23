@@ -2634,7 +2634,7 @@ async def duckduckgo_search_fallback(domain, page):
     """Search for privacy policy using DuckDuckGo Search."""
     try:
         print("Attempting search engine fallback with DuckDuckGo...")
-        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data policy" OR "privacy"'
+        search_query = f'{domain} privacy policy, privacy notice, data policy, privacy'
         
         # Navigate to DuckDuckGo
         await page.goto('https://duckduckgo.com/', timeout=5000)
@@ -2802,7 +2802,7 @@ async def yahoo_search_fallback(domain, page):
     """Search for privacy policy using Yahoo Search."""
     try:
         print("Attempting search engine fallback with Yahoo...")
-        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data policy" OR "privacy"'
+        search_query = f'{domain} privacy policy, privacy notice, data policy, privacy'
         
         # Navigate to Yahoo
         await page.goto('https://search.yahoo.com/', timeout=5000)
@@ -2970,7 +2970,7 @@ async def bing_search_fallback(domain, page):
     """Search for privacy policy using Bing Search."""
     try:
         print("Attempting search engine fallback with Bing...")
-        search_query = f'site:{domain} "privacy policy" OR "privacy notice" OR "data policy" OR "privacy"'
+        search_query = f'{domain} privacy policy, privacy notice, data policy, privacy'
         
         # Navigate to Bing
         await page.goto('https://www.bing.com/', timeout=1000)
