@@ -1828,427 +1828,281 @@ async def verify_is_terms_page(page):
 
 def score_tos_url_by_path_specificity(url):
     """
-    Score ToS URLs based on path specificity. More general paths get higher scores.
-    This helps prioritize general terms of service over product/feature specific ones.
+    Score a URL based on how likely it is to be a ToS page.
+    Higher scores indicate higher likelihood.
     
     Args:
-        url: The URL to score
+        url: URL to score
         
     Returns:
-        int: A score where higher values indicate more general/preferred ToS URLs
+        Score integer
     """
+    # Validate URL
     if not url:
         return 0
         
-    try:
-        parsed = urlparse(url)
-        path = parsed.path.lower()
-        hostname = parsed.netloc.lower()
-        
-        # Base score
-        score = 100
-        
-        # Reject user-generated content platforms outright if path structure suggests a community post
-        # Forum patterns
-        forum_patterns = [
-            r'/r/\w+', # Reddit subreddits
-            r'/t/\w+', # Discourse topics
-            r'/discussion',
-            r'/forum',
-            r'/thread',
-            r'/comment',
-            r'/topic',
-            r'/post',
-            r'/viewtopic',
-            r'/showthread',
-            r'/board',
-            r'/f/',
-            r'/profile/',
-            r'/user/',
-            r'/u/',
-            r'/viewpost',
-            r'/status',
-            r'/tweets'
-        ]
-        
-        for pattern in forum_patterns:
-            if re.search(pattern, path):
-                return 0  # Immediately reject with zero score - this is a discussion, not a ToS
-        
-        # Check for IDs in paths that suggest user content
-        # Common alphanumeric ID patterns
-        if re.search(r'/[a-z0-9]{6,}/?$', path) or re.search(r'/[a-z0-9-]{10,}/?$', path):
-            # Likely a generated content ID - significantly reduce score
-            score -= 80
-        
-        # Look for patterns suggesting this is a blog post/article
-        content_indicators = [
-            'comments', 'article', 'blogpost', 'post-', 'thread-', 'viewpost', 
-            'discussion', 'community', 'forum-', 'question', 'answer', 'response'
-        ]
-        
-        for indicator in content_indicators:
-            if indicator in path:
-                score -= 70
-        
-        # Check for numeric IDs in the URL (often indicates content pages)
-        if re.search(r'/\d+/?$', path) or re.search(r'[?&]id=\d+', parsed.query.lower()):
-            score -= 60
-        
-        # Known corporate domains that host legal/terms pages
-        # This is a dynamic pattern check, not a hardcoded list of URLs
-        corporate_patterns = [
-            ('redditinc.com', '/policies/user-agreement', 200),  # Reddit's corporate site
-            ('redditinc.com', '/policies/terms', 180),           # Reddit's corporate site
-            ('reddit.com', '/help/useragreement', 160),          # Reddit's legacy path
-            ('facebook.com', '/legal/terms', 170),               # Facebook's legal terms
-            ('instagram.com', '/legal/terms', 160),              # Instagram's legal terms
-            ('whatsapp.com', '/legal/terms-of-service', 160),    # WhatsApp's legal terms
-            ('linkedin.com', '/legal/user-agreement', 160),      # LinkedIn's legal terms
-            ('x.com', '/en/tos', 160),                           # Twitter/X's terms
-            ('twitter.com', '/tos', 160),                        # Twitter's legacy path
-            ('tiktok.com', '/legal/terms-of-service', 160)       # TikTok's legal terms
-        ]
-        
-        # Check for matches with corporate patterns
-        for corp_domain, corp_path, bonus in corporate_patterns:
-            if corp_domain in hostname and path.startswith(corp_path):
-                score += bonus
-                print(f"✓ Found corporate domain match: {hostname}{path} +{bonus} points")
-        
-        # Preferred general ToS patterns (highest priority)
-        if re.search(r'/terms/?$', path) or re.search(r'/tos/?$', path):
-            score += 100
-        elif re.search(r'/terms-of-service/?$', path):
-            score += 95
-        elif re.search(r'/terms-of-use/?$', path):
-            score += 90
-        elif re.search(r'/terms-and-conditions/?$', path):
-            score += 85
-        elif re.search(r'/legal/terms/?$', path) or re.search(r'/terms-policies/?$', path):
-            score += 80
-        elif re.search(r'/user-agreement/?$', path) or re.search(r'/useragreement/?$', path):
-            score += 75
-        elif re.search(r'/legal/?$', path) and not re.search(r'/legal/.+', path):
-            score += 65
-        elif re.search(r'/policies/?$', path) and not re.search(r'/policies/.+', path):
-            score += 60
-        
-        # Look at the path structure
-        segments = [s for s in path.split('/') if s]
-        
-        # Fewer segments usually means more general/root document
-        if len(segments) <= 2:
-            score += 20
-        else:
-            # Reduce score for more specific paths (deeper in the hierarchy)
-            score -= (len(segments) - 2) * 15
-            
-        # Penalize paths containing specific features/products
-        specific_terms = ['ai', 'api', 'developers', 'premium', 'pro', 'business', 
-                         'enterprise', 'app', 'mobile', 'data', 'privacy', 'cookies', 
-                         'update', 'blog', 'help', 'support', 'faq', 'changes']
-        
-        for term in specific_terms:
-            if term in path:
-                score -= 20
-                
-        # Higher penalty for AI-specific terms
-        if 'ai' in path or 'artificial-intelligence' in path or 'machine-learning' in path:
-            score -= 40
-            
-        # Extra boost for paths that suggest official user/customer agreement
-        if ('user' in path and ('agreement' in path or 'terms' in path)) or 'useragreement' in path:
-            score += 30
-        if 'customer' in path and ('agreement' in path or 'terms' in path):
-            score += 30
-        
-        # Normalize score to a sane range    
-        return max(0, score)  # Ensure score doesn't go negative
-    except Exception as e:
-        logger.error(f"Error scoring ToS URL: {e}")
-        return 0
+    url = url.lower()
+    score = 0
+    
+    # Check for paths that often contain terms of service
+    path_patterns = [
+        ('/terms', 100),
+        ('/tos', 120),
+        ('/terms-of-service', 150),
+        ('/terms-of-use', 140),
+        ('/terms-and-conditions', 130),
+        ('/legal', 100),
+        ('/legal/terms', 120),
+        ('/legal/user-agreement', 120),
+        ('/user-agreement', 110),
+        ('/customer-agreement', 110),
+        ('/agreement', 90),
+        ('/policies', 80),
+        ('/legal/policies', 90),
+        ('/policies/terms', 100),
+        ('/about/terms', 100),
+        ('/about/legal', 90)
+    ]
+    
+    # Score URL based on path patterns
+    for pattern, pattern_score in path_patterns:
+        if pattern in url:
+            score += pattern_score
+    
+    # Prefer URLs with fewer path segments after the term
+    # /terms is better than /terms/something-else
+    path_parts = urlparse(url).path.strip('/').split('/')
+    if len(path_parts) > 0 and any(term in path_parts[0] for term in ['term', 'tos', 'legal', 'agreement']):
+        score += max(0, 50 - (len(path_parts) - 1) * 10)
+    
+    # Check for query parameters - prefer URLs without them
+    if '?' in url:
+        score -= 30
+    
+    # Check for fragments - prefer URLs without them
+    if '#' in url:
+        score -= 20
+    
+    return score
 
-async def yahoo_search_fallback(domain, page):
-    """Search for terms of service using Yahoo Search."""
+async def yahoo_search_fallback(query, page):
+    """
+    Search for ToS using Yahoo as a fallback method.
+    Uses a single query string containing multiple terms.
+    
+    Args:
+        query: Search query string including multiple terms (e.g. "example.com terms of service, terms of use")
+        page: Playwright page to use for the search
+    
+    Returns:
+        URL to ToS page if found, None otherwise
+    """
     try:
         print("Attempting search engine fallback with Yahoo...")
-
-        # Create a search query for the domain with specific site constraint
-        search_query = f'{domain} terms of service, terms of use, user agreement, legal terms'
-        yahoo_search_url = f"https://search.yahoo.com/search?p={search_query}"
-
-        # Navigate to Yahoo search with longer timeout
-        await page.goto(yahoo_search_url, timeout=20000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(5000)  # Longer wait for results to load
-
-        # Check for captcha or other blocking
-        is_blocked = await page.evaluate(
-            """() => {
-            const html = document.documentElement.innerHTML.toLowerCase();
-            return {
-                isCaptcha: html.includes('captcha') || 
-                           html.includes('challenge') || 
-                           html.includes('blocked') ||
-                           html.includes('verify you are a human'),
-                title: document.title,
-                url: window.location.href
-            };
-        }"""
-        )
-
-        if is_blocked["isCaptcha"]:
-            print(f"⚠️ Captcha or blocking detected on Yahoo: {is_blocked['title']}")
-            print("Waiting for possible manual intervention...")
-            # Wait longer to allow manual captcha solving if headless=False
-            await page.wait_for_timeout(15000)
-
-        # Extract search results with multiple selector options for robustness
-        search_results = await page.evaluate(
-            r"""(domain) => {
-            // Yahoo uses different selectors depending on the layout
-            const selectors = [
-                'a.d-ib.fz-20.lh-26.td-hu.tc',              // Standard Yahoo results
-                '.algo-sr a[href^="http"]',                 // Alternative Yahoo results
-                'h3.title a[href^="http"]',                 // Older Yahoo layout
-                'div.compTitle a[href^="http"]',            // Yahoo component layout
-                'a[href^="http"].lb-title',                 // Another Yahoo pattern
-                'a[href^="http"]'                           // Fallback to all links (filtered later)
-            ];
-            
-            // Try each selector and merge results
-            let allLinks = [];
-            for (const selector of selectors) {
-                try {
-                    const links = Array.from(document.querySelectorAll(selector));
-                    if (links.length > 0) {
-                        allLinks = allLinks.concat(links);
-                    }
-                } catch (e) {
-                    // Ignore selector errors
-                }
-            }
-            
-            // Filter and process links
-            const results = allLinks
-                .filter(a => {
-                    try {
-                        const url = new URL(a.href);
-                        const urlPath = url.pathname.toLowerCase();
-                        
-                        // Only include links to the target domain
-                        if (!url.hostname.includes(domain) && !domain.includes(url.hostname)) {
-                            return false;
-                        }
-                        
-                        // Filter out search engines and unrelated domains
-                        if (url.href.includes('yahoo.com') ||
-                            url.href.includes('google.com') ||
-                            url.href.includes('bing.com') ||
-                            url.href.includes('duckduckgo.com')) {
-                            return false;
-                        }
-                        
-                        // Filter out articles/blog posts by checking URL patterns
-                        
-                        // 1. Filter out date patterns (YYYY/MM/DD) commonly used in news/blog URLs
-                        if (/\/\d{4}\/\d{1,2}\/\d{1,2}\//.test(urlPath)) {
-                            return false;
-                        }
-                        
-                        // 2. Filter out URLs with long numeric IDs (often articles)
-                        if (/\/\d{5,}/.test(urlPath)) {
-                            return false;
-                        }
-                        
-                        // 3. Filter out news/blog sections
-                        if (urlPath.includes('/news/') || 
-                            urlPath.includes('/blog/') || 
-                            urlPath.includes('/article/') || 
-                            urlPath.includes('/story/') ||
-                            urlPath.includes('/posts/')) {
-                            return false;
-                        }
-                        
-                        // 4. Filter out URLs with dates in them (likely articles)
-                        const segments = urlPath.split('/').filter(s => s.length > 0);
-                        if (segments.length > 2 && /^\d{4}$/.test(segments[0])) {
-                            return false;
-                        }
-                        
-                        // 5. Filter out forum/discussion content
-                        if (/\/r\/\w+/.test(urlPath) || // Reddit
-                            /\/t\/\w+/.test(urlPath) || // Discourse
-                            urlPath.includes('/discussion/') ||
-                            urlPath.includes('/forum/') ||
-                            urlPath.includes('/thread/') ||
-                            urlPath.includes('/comment/') ||
-                            urlPath.includes('/viewtopic') ||
-                            urlPath.includes('/showthread') ||
-                            urlPath.includes('/profile/') ||
-                            urlPath.includes('/user/')) {
-                            return false;
-                        }
-                        
-                        // 6. Exclude specific content patterns that suggest user-generated content
-                        const contentPatterns = ['comments', 'article', 'blogpost', 'discussion', 
-                                              'community', 'forum', 'question', 'answer'];
-                        for (const pattern of contentPatterns) {
-                            if (urlPath.includes('/' + pattern)) {
-                                return false;
+        
+        # Navigate to Yahoo search
+        yahoo_search_url = f"https://search.yahoo.com/search?p={query}"
+        
+        # Navigate to Yahoo and perform the search
+        await page.goto(yahoo_search_url, wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)  # Wait for results to load
+        
+        # Extract search results from Yahoo
+        search_results = await page.evaluate("""
+            () => {
+                // Function to extract text content safely
+                const getTextContent = (element) => {
+                    return element ? element.textContent.trim() : '';
+                };
+                
+                const results = [];
+                
+                // Yahoo results are in various formats depending on the layout
+                // Try multiple selectors to increase chances of finding results
+                const resultSelectors = [
+                    '.algo-sr', // Standard results
+                    '.dd.algo', // Alternative result format
+                    'li.first', // Yet another format
+                    '#web li'   // Basic web results
+                ];
+                
+                // Try each selector
+                for (const selector of resultSelectors) {
+                    const elements = document.querySelectorAll(selector);
+                    
+                    if (elements && elements.length > 0) {
+                        for (const element of elements) {
+                            // Extract link - multiple possible selectors
+                            let link = null;
+                            
+                            // Try to find links in various locations
+                            const linkSelectors = [
+                                'a.d-ib', // Main link
+                                'a.ac-algo', // Alternative link format
+                                'h3 a', // Heading link
+                                'a.fz-m', // Another format
+                                'a' // Any link as fallback
+                            ];
+                            
+                            for (const linkSelector of linkSelectors) {
+                                const linkElement = element.querySelector(linkSelector);
+                                if (linkElement && linkElement.href) {
+                                    link = linkElement.href;
+                                    break;
+                                }
                             }
+                            
+                            if (!link) continue;
+                            
+                            // Skip Yahoo's RU links which are redirect wrappers
+                            if (link.includes('/RU=')) {
+                                try {
+                                    // Extract the actual URL from Yahoo's redirect
+                                    const match = /\/RU=([^\/]+)\//.exec(link);
+                                    if (match && match[1]) {
+                                        link = decodeURIComponent(match[1]);
+                                    }
+                                } catch (e) {
+                                    // If decoding fails, skip this result
+                                    continue;
+                                }
+                            }
+                            
+                            // Extract title
+                            let title = '';
+                            const titleSelectors = ['h3', '.title', '.fz-ms'];
+                            
+                            for (const titleSelector of titleSelectors) {
+                                const titleElement = element.querySelector(titleSelector);
+                                if (titleElement) {
+                                    title = getTextContent(titleElement);
+                                    break;
+                                }
+                            }
+                            
+                            // Extract description
+                            let description = '';
+                            const descriptionSelectors = ['.compText', '.lh-l', '.fz-ms'];
+                            
+                            for (const descSelector of descriptionSelectors) {
+                                const descElement = element.querySelector(descSelector);
+                                if (descElement && descElement.textContent.length > 20) {
+                                    description = getTextContent(descElement);
+                                    break;
+                                }
+                            }
+                            
+                            // Skip search engine and unrelated results
+                            if (link.includes('yahoo.com/search') || 
+                                link.includes('google.com/search') ||
+                                link.includes('bing.com/search') ||
+                                link.includes('duckduckgo.com')) {
+                                continue;
+                            }
+                            
+                            // Add to results
+                            results.push({
+                                url: link,
+                                title: title,
+                                description: description
+                            });
                         }
                         
-                        return true;
-                    } catch (e) {
-                        return false;
-                    }
-                })
-                .map(a => {
-                    // Get title from the element
-                    const title = a.textContent.trim();
-                    
-                    // Look for description in parent elements
-                    let description = '';
-                    let parent = a;
-                    for (let i = 0; i < 5; i++) { // Look up to 5 levels up
-                        parent = parent.parentElement;
-                        if (!parent) break;
-                        
-                        // Try common Yahoo description selectors
-                        const descEl = parent.querySelector('.compText, .ac-1st, .fz-ms');
-                        if (descEl) {
-                            description = descEl.textContent.trim();
+                        // If we found results with this selector, stop trying others
+                        if (results.length > 0) {
                             break;
                         }
+                    }
+                }
+                
+                return results;
+            }
+        """)
+        
+        print(f"Found {len(search_results)} initial Yahoo results")
+        
+        # Score the results based on how likely they are to be ToS pages
+        scored_results = []
+        
+        for result in search_results:
+            url = result.get("url", "")
+            title = result.get("title", "").lower()
+            description = result.get("description", "").lower()
+            
+            # Skip invalid results
+            if not url or not title:
+                continue
+                
+            # Skip URLs that are likely not ToS
+            if "youtube.com/watch" in url or "wikipedia.org" in url:
+                continue
+                
+            # Score the result based on title, description and URL
+            tos_score = score_tos_url_by_path_specificity(url)
+            
+            # Title indicators
+            tos_indicators = ["terms", "tos", "service", "agreement", "legal", "policy", "conditions"]
+            for indicator in tos_indicators:
+                if indicator in title:
+                    tos_score += 10
+            
+            # Description indicators
+            if description:
+                for indicator in tos_indicators:
+                    if indicator in description:
+                        tos_score += 5
                         
-                        // If this parent has enough text that's not just the title, use it
-                        const parentText = parent.textContent.trim();
-                        if (parentText.length > title.length + 30) {
-                            description = parentText;
-                            break;
-                        }
-                    }
-                    
-                    // Score based on title, description and URL
-                    let score = 0;
-                    const titleLower = title.toLowerCase();
-                    const descLower = description ? description.toLowerCase() : '';
-                    const urlLower = a.href.toLowerCase();
-                    
-                    // Scoring for title matches (prioritize user agreement and conditions of use)
-                    if (titleLower.includes('user agreement') || titleLower.includes('users agreement') || titleLower.includes('user agremment')) score += 70;
-                    else if (titleLower.includes('conditions of use') || titleLower.includes('condition of use')) score += 65;
-                    else if (titleLower.includes('terms of service')) score += 60;
-                    else if (titleLower.includes('terms and conditions')) score += 55;
-                    else if (titleLower.includes('terms')) score += 30;
-                    else if (titleLower.includes('conditions')) score += 30;
-                    else if (titleLower.includes('legal')) score += 25;
-                    
-                    // Scoring for description matches
-                    if (descLower.includes('terms of service')) score += 30;
-                    else if (descLower.includes('terms and conditions')) score += 28;
-                    else if (descLower.includes('user agreement')) score += 30;
-                    else if (descLower.includes('conditions of use')) score += 33;
-                    else if (descLower.includes('legal terms')) score += 24;
-                    else if (descLower.includes('terms')) score += 15; // Lower priority
-                    
-                    // URL-based scoring
-                    if (urlLower.includes('user-agreement') || urlLower.includes('useragreement')) score += 45;
-                    else if (urlLower.includes('conditions-of-use') || urlLower.includes('conditionsofuse')) score += 43;
-                    else if (urlLower.includes('terms-of-service')) score += 40;
-                    else if (urlLower.includes('terms-and-conditions')) score += 38;
-                    else if (urlLower.includes('tos')) score += 35;
-                    else if (urlLower.includes('terms')) score += 20; // Lower priority for generic terms
-                    else if (urlLower.includes('legal')) score += 20;
-                    
-                    // Penalize URLs with forum patterns
-                    const urlPath = new URL(urlLower).pathname;
-                    if (urlPath.includes('/r/') ||  // Reddit subreddit
-                        urlPath.includes('/comments/') ||  // Reddit comments
-                        urlPath.includes('/discussion/') ||
-                        urlPath.includes('/forum/') ||
-                        urlPath.includes('/thread/') ||
-                        urlPath.includes('/community/')) {
-                        score -= 100;  // Very strong penalty
-                    }
-                    
-                    // Penalize AI or product-specific terms URLs
-                    if (urlPath.includes('/ai/')) score -= 30;
-                    if (urlPath.includes('/artificial-intelligence/')) score -= 30;
-                    if (urlPath.includes('/ai-terms')) score -= 30;
-                    
-                    return {
-                        url: a.href,
-                        title: title || "No Title",  // Fallback title
-                        description: description,
-                        score: score
-                    };
+            # Big boost for exact matches
+            if any(phrase in title for phrase in ["terms of service", "terms and conditions", "user agreement"]):
+                tos_score += 50
+                
+            # Check for user/customer focus
+            if "user" in title or "customer" in title:
+                tos_score += 20
+                
+            # Only include results with a minimum score
+            if tos_score > 20:
+                scored_results.append({
+                    "url": url,
+                    "title": title,
+                    "score": tos_score
                 })
-                .filter(result => 
-                    result.score > 0 || 
-                    result.url.toLowerCase().includes('terms') || 
-                    result.url.toLowerCase().includes('tos') || 
-                    result.url.toLowerCase().includes('legal')
-                );
-                
-            return results.sort((a, b) => b.score - a.score).slice(0, 5);
-        }""",
-            domain,
-        )
-
-        print(f"🔍 Yahoo search found {len(search_results)} potential ToS results")
         
-        if len(search_results) > 0:
-            # Apply the path specificity scoring to the search results
-            for result in search_results:
-                # Add the path specificity score to the existing score
-                path_score = score_tos_url_by_path_specificity(result["url"])
-                result["path_specificity_score"] = path_score
-                result["final_score"] = result["score"] + path_score
-                
-                print(f"ToS Candidate: '{result['title']}' - {result['url']}")
-                print(f"  Base Score: {result['score']}, Path Score: {path_score}, Final Score: {result['final_score']}")
+        # Sort by score and select the best result
+        if scored_results:
+            # Sort by score (highest first)
+            scored_results.sort(key=lambda x: x["score"], reverse=True)
             
-            # Re-sort based on the combined scores
-            search_results.sort(key=lambda x: x["final_score"], reverse=True)
+            # Log the top results for debugging
+            for i, result in enumerate(scored_results[:3]):
+                print(f"{i+1}. ToS Candidate: '{result['title']}' - {result['url']} (Score: {result['score']})")
             
-            # Only consider results with a minimum combined score to avoid completely wrong matches
-            valid_results = [r for r in search_results if r["final_score"] > 50]
+            # Return the highest scoring result
+            return scored_results[0]["url"]
             
-            if valid_results:
-                # Take the highest scoring result
-                best_result = valid_results[0]
-                print(f"✅ Best Yahoo ToS result: {best_result['url']} (Score: {best_result['final_score']})")
-                return best_result["url"]
-            else:
-                print("No valid ToS results found after scoring - all candidates had too low scores")
-        
         return None
     except Exception as e:
         print(f"Error in Yahoo search fallback: {e}")
         return None
 
 
-async def bing_search_fallback(domain, page):
-    """Search for terms of service using Bing Search."""
+async def bing_search_fallback(query, page):
+    """
+    Search for ToS using Bing as a fallback method.
+    Uses a single query string containing multiple terms.
+    
+    Args:
+        query: Search query string including multiple terms (e.g. "example.com terms of service, terms of use")
+        page: Playwright page to use for the search
+    
+    Returns:
+        URL to ToS page if found, None otherwise
+    """
     try:
         print("Attempting search engine fallback with Bing...")
-
-        # Get potential corporate domains for this site
-        potential_domains = get_potential_corporate_domains(domain)
-        print(f"Potential corporate domains for {domain}: {potential_domains}")
         
-        # Create a search query with the domain and terms
-        site_conditions = []
-        for d in potential_domains:
-            site_conditions.append(f"site:{d}")
-            
-        site_query = " OR ".join(site_conditions)
-        search_query = f'{domain} terms of service, terms of use, user agreement, legal terms'
-        bing_search_url = f"https://www.bing.com/search?q={search_query}"
-
         # Navigate to Bing search
+        bing_search_url = f"https://www.bing.com/search?q={query}"
         await page.goto(bing_search_url, timeout=20000, wait_until="domcontentloaded")
         await page.wait_for_timeout(5000)  # Wait for search results to load
 
@@ -2275,7 +2129,7 @@ async def bing_search_fallback(domain, page):
 
         # Extract search results from Bing
         search_results = await page.evaluate(
-            r"""(domain, potentialDomains) => {
+            r"""() => {
             // Bing uses different selectors depending on the layout
             const selectors = [
                 'h2 a[href^="http"]',                  // Common Bing result title links
@@ -2304,22 +2158,8 @@ async def bing_search_fallback(domain, page):
                     try {
                         const url = new URL(a.href);
                         const urlPath = url.pathname.toLowerCase();
-                        const urlHostname = url.hostname.toLowerCase();
                         
-                        // Only include links to the target domain or potential corporate domains
-                        let domainMatch = false;
-                        for (const potentialDomain of potentialDomains) {
-                            if (urlHostname.includes(potentialDomain) || potentialDomain.includes(urlHostname)) {
-                                domainMatch = true;
-                                break;
-                            }
-                        }
-                        
-                        if (!domainMatch) {
-                            return false;
-                        }
-                        
-                        // Filter out search engines and unrelated domains
+                        // Filter out search engines
                         if (url.href.includes('bing.com') ||
                             url.href.includes('google.com') ||
                             url.href.includes('yahoo.com') ||
@@ -2362,15 +2202,6 @@ async def bing_search_fallback(domain, page):
                             return false;
                         }
                         
-                        // 5. Exclude specific content patterns that suggest user-generated content
-                        const contentPatterns = ['comments', 'article', 'blogpost', 'discussion', 
-                                             'community', 'forum', 'question', 'answer'];
-                        for (const pattern of contentPatterns) {
-                            if (urlPath.includes('/' + pattern)) {
-                                return false;
-                            }
-                        }
-                        
                         return true;
                     } catch (e) {
                         return false;
@@ -2402,117 +2233,92 @@ async def bing_search_fallback(domain, page):
                         }
                     }
                     
-                    // Score based on title, description and URL
-                    let score = 0;
-                    const titleLower = title.toLowerCase();
-                    const descLower = description.toLowerCase();
-                    const urlLower = a.href.toLowerCase();
-                    
-                    // Check if this is from a corporate domain - give bonus points
-                    const url = new URL(a.href);
-                    const urlHostname = url.hostname.toLowerCase();
-                    
-                    // Bonus for corporate domains
-                    let corporateDomainBonus = 0;
-                    if (urlHostname.includes('redditinc.com')) corporateDomainBonus = 100;
-                    else if (urlHostname.includes('facebook.com') && !urlHostname.includes('www.facebook.com')) corporateDomainBonus = 80;
-                    else if (urlHostname.includes('about.') || urlHostname.includes('legal.')) corporateDomainBonus = 70;
-                    else if (urlHostname.includes('corp.') || urlHostname.includes('corporate.')) corporateDomainBonus = 60;
-                    
-                    score += corporateDomainBonus;
-                    
-                    // Scoring for title matches (prioritize user agreement and conditions of use)
-                    if (titleLower.includes('user agreement') || 
-                        titleLower.includes('users agreement') || 
-                        titleLower.includes('customer agreement')) score += 70;
-                    else if (titleLower.includes('conditions of use') || 
-                            titleLower.includes('condition of use')) score += 65;
-                    else if (titleLower.includes('terms of service')) score += 60;
-                    else if (titleLower.includes('terms and conditions')) score += 55;
-                    else if (titleLower.includes('terms')) score += 30;
-                    else if (titleLower.includes('conditions')) score += 30;
-                    else if (titleLower.includes('legal')) score += 25;
-                    
-                    // Scoring for description matches
-                    if (descLower.includes('terms of service')) score += 30;
-                    else if (descLower.includes('terms and conditions')) score += 28;
-                    else if (descLower.includes('user agreement')) score += 30;
-                    else if (descLower.includes('conditions of use')) score += 33;
-                    else if (descLower.includes('legal terms')) score += 24;
-                    else if (descLower.includes('terms')) score += 15;
-                    
-                    // URL-based scoring
-                    if (urlLower.includes('user-agreement') || urlLower.includes('useragreement')) score += 45;
-                    else if (urlLower.includes('conditions-of-use') || urlLower.includes('conditionsofuse')) score += 43;
-                    else if (urlLower.includes('terms-of-service')) score += 40;
-                    else if (urlLower.includes('terms-and-conditions')) score += 38;
-                    else if (urlLower.includes('tos')) score += 35;
-                    else if (urlLower.includes('terms')) score += 20;
-                    else if (urlLower.includes('legal')) score += 20;
-                    
-                    // Penalize URLs with forum patterns
-                    const urlPath = new URL(urlLower).pathname;
-                    if (urlPath.includes('/r/') ||  // Reddit subreddit
-                        urlPath.includes('/comments/') ||  // Reddit comments
-                        urlPath.includes('/discussion/') ||
-                        urlPath.includes('/forum/') ||
-                        urlPath.includes('/thread/') ||
-                        urlPath.includes('/community/')) {
-                        score -= 100;  // Very strong penalty
-                    }
-                    
-                    // Penalize AI or product-specific terms URLs
-                    if (urlPath.includes('/ai/')) score -= 30;
-                    if (urlPath.includes('/artificial-intelligence/')) score -= 30;
-                    if (urlPath.includes('/ai-terms')) score -= 30;
-                    
+                    const isTermsTitle = 
+                        title.toLowerCase().includes('terms') || 
+                        title.toLowerCase().includes('tos') ||
+                        title.toLowerCase().includes('agreement') || 
+                        title.toLowerCase().includes('legal');
+                        
+                    const isTermsURL = 
+                        a.href.toLowerCase().includes('/terms') || 
+                        a.href.toLowerCase().includes('/tos') ||
+                        a.href.toLowerCase().includes('/legal') || 
+                        a.href.toLowerCase().includes('/agreement');
+                
                     return {
                         url: a.href,
-                        title: title || "No Title",
-                        description: description || "No description",
-                        score: score
+                        title: title,
+                        description: description,
+                        score: isTermsTitle ? 20 : 0 + isTermsURL ? 30 : 0
                     };
                 })
-                .filter(result => 
-                    result.score > 0 || 
-                    result.url.toLowerCase().includes('terms') || 
-                    result.url.toLowerCase().includes('tos') || 
-                    result.url.toLowerCase().includes('legal')
-                );
+                .filter(item => item.title && item.url);
                 
-            return results.sort((a, b) => b.score - a.score).slice(0, 5);
-        }""",
-            domain,
+            return results;
+        """
         )
 
-        print(f"🔍 Bing search found {len(search_results)} potential ToS results")
+        print(f"Found {len(search_results)} initial Bing results")
         
-        if len(search_results) > 0:
-            # Apply the path specificity scoring to the search results
-            for result in search_results:
-                # Add the path specificity score to the existing score
-                path_score = score_tos_url_by_path_specificity(result["url"])
-                result["path_specificity_score"] = path_score
-                result["final_score"] = result["score"] + path_score
+        # Now score and filter the results
+        scored_results = []
+        
+        for result in search_results:
+            url = result["url"]
+            title = result["title"].lower()
+            
+            # Skip empty results
+            if not url or not title:
+                continue
                 
-                print(f"ToS Candidate: '{result['title']}' - {result['url']}")
-                print(f"  Base Score: {result['score']}, Path Score: {path_score}, Final Score: {result['final_score']}")
+            # Skip URLs that are likely not ToS
+            if "youtube.com/watch" in url or "wikipedia.org" in url:
+                continue
+                
+            # Generate a base score for ToS-like titles
+            base_score = result.get("score", 0)
             
-            # Re-sort based on the combined scores
-            search_results.sort(key=lambda x: x["final_score"], reverse=True)
+            # Check for ToS indicators in title
+            tos_indicators = ["terms", "tos", "service", "agreement", "legal", "policy", "conditions"]
+            for indicator in tos_indicators:
+                if indicator in title:
+                    base_score += 10
             
-            # Only consider results with a minimum combined score to avoid completely wrong matches
-            valid_results = [r for r in search_results if r["final_score"] > 50]
+            # Big boost for exact matches
+            if any(phrase in title for phrase in ["terms of service", "terms and conditions", "user agreement"]):
+                base_score += 50
+                
+            # Check for user/customer focus
+            if "user" in title or "customer" in title:
+                base_score += 20
+                
+            # Score the URL paths, focusing on ToS-like paths
+            path_score = score_tos_url_by_path_specificity(url)
             
-            if valid_results:
-                # Take the highest scoring result
-                best_result = valid_results[0]
-                print(f"✅ Best Bing ToS result: {best_result['url']} (Score: {best_result['final_score']})")
-                return best_result["url"]
-            else:
-                print("No valid ToS results found after scoring - all candidates had too low scores")
+            total_score = base_score + path_score
             
+            # Only consider results with some relevance
+            if total_score > 0:
+                scored_results.append({
+                    "url": url,
+                    "title": title,
+                    "score": total_score
+                })
+        
+        # If we have scored results, return the best one
+        if scored_results:
+            # Sort by score (highest first)
+            scored_results.sort(key=lambda x: x["score"], reverse=True)
+            
+            # Log the top results for debugging
+            for i, result in enumerate(scored_results[:3]):
+                print(f"{i+1}. ToS Candidate: '{result['title']}' - {result['url']} (Score: {result['score']})")
+            
+            # Return the highest scoring result
+            return scored_results[0]["url"]
+        
         return None
+        
     except Exception as e:
         print(f"Error in Bing search fallback: {e}")
         return None
@@ -3283,58 +3089,30 @@ async def find_play_store_tos(url: str) -> str:
     return None
 
 def normalize_url(url: str) -> str:
-    """Normalize URL by adding protocol if missing."""
-    if not url.startswith('http'):
-        return 'https://' + url
+    """Normalize URL to handle common variations"""
+    if not url:
+        return url
+    
+    # Remove trailing slashes, fragments and normalize to lowercase
+    url = url.lower().split('#')[0].rstrip('/')
+    
+    # Ensure URL has protocol
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+        
     return url
 
-def get_potential_corporate_domains(domain):
-    """
-    Get potential corporate domains that might host terms of service.
-    This helps with finding ToS on separate corporate domains.
-    
-    Args:
-        domain: Original domain, e.g. 'reddit.com'
-        
-    Returns:
-        List of potential related domains
-    """
-    # Extract main domain without subdomains
-    parts = domain.split('.')
-    if len(parts) > 2:
-        main_domain = '.'.join(parts[-2:])
-    else:
-        main_domain = domain
-    
-    # Strip www prefix
-    main_domain = re.sub(r'^www\.', '', main_domain)
-    
-    # Get company name from domain
-    company_name = main_domain.split('.')[0]
-    
-    # Generate common variations of corporate domains
-    potential_domains = [
-        main_domain,
-        f"{company_name}inc.com",
-        f"{company_name}-inc.com",
-        f"{company_name}corp.com",
-        f"{company_name}legal.com",
-        f"{company_name}hq.com",
-        f"about.{main_domain}",
-        f"legal.{main_domain}",
-        f"corporate.{main_domain}",
-        f"policies.{main_domain}",
-        f"terms.{main_domain}",
-        f"help.{main_domain}",
-        f"docs.{main_domain}",
-        f"wiki.{main_domain}"
-    ]
-    
-    # Return unique domains
-    return list(set(potential_domains))
 
 async def find_tos_via_html_inspection(url: str) -> str:
-    """Try to find Terms of Service via HTML inspection with an optimized approach."""
+    """
+    Find ToS page by inspecting HTML content.
+    
+    Args:
+        url: URL of the website to inspect
+    
+    Returns:
+        URL to ToS page if found, None otherwise
+    """
     try:
         # Set up browser to inspect HTML
         playwright = await async_playwright().start()
