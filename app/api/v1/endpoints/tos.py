@@ -1616,6 +1616,71 @@ async def verify_is_terms_page(page):
         return {"isTermsPage": False, "confidence": 0, "error": str(e)}
 
 
+def score_tos_url_by_path_specificity(url):
+    """
+    Score ToS URLs based on path specificity. More general paths get higher scores.
+    This helps prioritize general terms of service over product/feature specific ones.
+    
+    Args:
+        url: The URL to score
+        
+    Returns:
+        int: A score where higher values indicate more general/preferred ToS URLs
+    """
+    if not url:
+        return 0
+        
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        
+        # Base score
+        score = 100
+        
+        # Preferred general ToS patterns (highest priority)
+        if re.search(r'/terms/?$', path) or re.search(r'/tos/?$', path):
+            score += 100
+        elif re.search(r'/terms-of-service/?$', path):
+            score += 95
+        elif re.search(r'/terms-of-use/?$', path):
+            score += 90
+        elif re.search(r'/terms-and-conditions/?$', path):
+            score += 85
+        elif re.search(r'/legal/terms/?$', path):
+            score += 80
+        elif re.search(r'/user-agreement/?$', path):
+            score += 75
+        
+        # Reduce score for product-specific or feature-specific ToS
+        # More path segments generally means more specific terms
+        segments = [s for s in path.split('/') if s]
+        if len(segments) > 2:
+            score -= (len(segments) - 2) * 10
+            
+        # Penalize paths containing specific features/products
+        specific_terms = ['ai', 'api', 'developers', 'premium', 'pro', 'business', 
+                         'enterprise', 'app', 'mobile', 'data', 'privacy', 'cookies']
+        
+        for term in specific_terms:
+            if term in path:
+                score -= 20
+                
+        # Higher penalty for AI-specific terms
+        if 'ai' in path or 'artificial-intelligence' in path or 'machine-learning' in path:
+            score -= 40
+            
+        # Extra boost for paths that suggest user/customer agreement
+        if 'user' in path and ('agreement' in path or 'terms' in path):
+            score += 30
+        if 'customer' in path and ('agreement' in path or 'terms' in path):
+            score += 30
+            
+        return max(0, score)  # Ensure score doesn't go negative
+    except Exception as e:
+        logger.error(f"Error scoring ToS URL: {e}")
+        return 0
+
+
 async def yahoo_search_fallback(domain, page):
     """Search for terms of service using Yahoo Search."""
     try:
@@ -1786,6 +1851,12 @@ async def yahoo_search_fallback(domain, page):
                     else if (urlLower.includes('terms')) score += 20; // Lower priority for generic terms
                     else if (urlLower.includes('legal')) score += 20;
                     
+                    // Penalize AI or product-specific terms URLs
+                    const urlPath = new URL(urlLower).pathname;
+                    if (urlPath.includes('/ai/')) score -= 30;
+                    if (urlPath.includes('/artificial-intelligence/')) score -= 30;
+                    if (urlPath.includes('/ai-terms')) score -= 30;
+                    
                     return {
                         url: a.href,
                         title: title || "No Title",  // Fallback title
@@ -1800,197 +1871,32 @@ async def yahoo_search_fallback(domain, page):
                     result.url.toLowerCase().includes('legal')
                 );
                 
-            // Deduplicate results based on URL
-            const uniqueResults = [];
-            const seenUrls = new Set();
-            
-            for (const result of results) {
-                if (!seenUrls.has(result.url)) {
-                    seenUrls.add(result.url);
-                    uniqueResults.push(result);
-                }
-            }
-            
-            return uniqueResults;
+            return results.sort((a, b) => b.score - a.score).slice(0, 5);
         }""",
             domain,
         )
 
-        if search_results and len(search_results) > 0:
-            print(f"Found {len(search_results)} potential results from Yahoo search")
-
-            # Sort by score
-            search_results.sort(key=lambda x: x["score"], reverse=True)
-
-            # Store best result in case all verifications fail
-            best_result_url = search_results[0]["url"]
-            best_result_score = search_results[0]["score"]
-
-            # Display top results for debugging
-            for i, result in enumerate(search_results[:3]):
-                print(
-                    f"Result #{i+1}: {result['title']} - {result['url']} (Score: {result['score']})"
-                )
-
-            # Check the top 5 results instead of just 3
-            for result_index in range(min(5, len(search_results))):
-                best_result = search_results[result_index]["url"]
-
-                try:
-                    # Visit the page to verify it's a terms page
-                    print(f"Checking result: {best_result}")
-                    await page.goto(
-                        best_result, timeout=10000, wait_until="domcontentloaded"
-                    )
-                    await page.wait_for_timeout(
-                        2000
-                    )  # Increased wait time for full page load
-
-                    # Check if we hit a captcha or "just a moment" page
-                    is_captcha = await page.evaluate(
-                        """() => {
-                        const html = document.documentElement.innerHTML.toLowerCase();
-                        const title = document.title.toLowerCase();
-                        return {
-                            isCaptcha: html.includes('captcha') || 
-                                      html.includes('challenge') || 
-                                      html.includes('security check') ||
-                                      html.includes('please verify') ||
-                                      html.includes('just a moment') ||
-                                      title.includes('just a moment'),
-                            title: document.title,
-                            url: window.location.href
-                        };
-                    }"""
-                    )
-
-                    if is_captcha["isCaptcha"]:
-                        print(
-                            f"⚠️ Captcha/protection detected when accessing: {is_captcha['url']}"
-                        )
-
-                        # If this is a high-scoring result from the target domain, accept it even with captcha
-                        original_url_lower = best_result.lower()
-
-                        # Look for terms indicators in URL
-                        has_terms_path = (
-                            "policies" in original_url_lower
-                            or "terms-of-service" in original_url_lower
-                            or "terms-of-use" in original_url_lower
-                            or "user-agreement" in original_url_lower
-                            or "terms" in original_url_lower
-                        )
-
-                        if (
-                            domain in original_url_lower
-                            and has_terms_path
-                            and search_results[result_index]["score"] >= 60
-                        ):
-                            print(
-                                f"✅ Accepting URL from target domain despite protection: {best_result}"
-                            )
-                            return best_result
-
-                    # Perform two-stage verification for more confidence
-                    # First stage: comprehensive verification
-                    verification = await verify_is_terms_page(page)
-
-                    if (
-                        verification["isTermsPage"] and verification["confidence"] >= 60
-                    ):  # Increased threshold
-                        print(
-                            f"✅ First verification passed: {page.url} (score: {verification['confidence']})"
-                        )
-
-                        # Second stage: Double-check specific content markers
-                        content_markers = await page.evaluate(
-                            """() => {
-                            const html = document.body.innerText.toLowerCase();
-                            return {
-                                hasAgreementText: html.includes('by using') && html.includes('agree'),
-                                hasLegalDefinitions: html.includes('definitions') || html.includes('defined terms'),
-                                hasLegalSections: html.includes('governing law') || html.includes('jurisdiction'),
-                                hasTosSpecificText: html.includes('terms of service') || 
-                                                   html.includes('terms and conditions') || 
-                                                   html.includes('user agreement')
-                            };
-                        }"""
-                        )
-
-                        # Calculate second-stage confidence
-                        second_stage_confidence = 0
-                        if content_markers["hasAgreementText"]:
-                            second_stage_confidence += 25
-                        if content_markers["hasLegalDefinitions"]:
-                            second_stage_confidence += 25
-                        if content_markers["hasLegalSections"]:
-                            second_stage_confidence += 25
-                        if content_markers["hasTosSpecificText"]:
-                            second_stage_confidence += 25
-
-                        if second_stage_confidence >= 50:  # At least two strong markers
-                            print(
-                                f"✅✅ Complete verification passed (secondary score: {second_stage_confidence}/100)"
-                            )
-                            return page.url
-                        else:
-                            print(
-                                f"⚠️ Secondary verification failed (score: {second_stage_confidence}/100)"
-                            )
-                    else:
-                        print(
-                            f"❌ Primary verification failed (score: {verification['confidence']})"
-                        )
-                except Exception as e:
-                    print(f"Error checking Yahoo search result: {e}")
-
-            # If we checked all results but none were verified, only return highest scored result
-            # if it meets a very high threshold
-            if (
-                len(search_results) > 0 and search_results[0]["score"] >= 80
-            ):  # Higher threshold than before
-                print(
-                    f"⚠️ No verified pages found. Final attempt with highest-scored result: {search_results[0]['url']} (Score: {search_results[0]['score']})"
-                )
-                try:
-                    await page.goto(
-                        search_results[0]["url"],
-                        timeout=10000,
-                        wait_until="domcontentloaded",
-                    )
-                    await page.wait_for_timeout(2000)
-
-                    verification = await verify_is_terms_page(page)
-                    if verification["confidence"] >= 50:  # Higher minimum threshold
-                        print(
-                            f"⚠️ Final verification passed with sufficient confidence: {verification['confidence']}"
-                        )
-                        return page.url
-                    else:
-                        print(
-                            f"❌ Final verification failed with confidence score: {verification['confidence']}"
-                        )
-                        # Return the highest-scored result even if verification fails
-                        print(
-                            f"⚠️ Returning highest-scored result as last resort: {search_results[0]['url']}"
-                        )
-                        return search_results[0]["url"]
-                except Exception as e:
-                    print(f"Error in final verification: {e}")
-                    # Return the best result anyway since verification failed with an error
-                    print(
-                        f"⚠️ Verification failed with error, returning highest-scored result: {search_results[0]['url']}"
-                    )
-                    return search_results[0]["url"]
-
-            # Return the best result anyway if it has a decent score (60+)
-            if best_result_score >= 60:
-                print(
-                    f"⚠️ All verification methods failed, returning best unverified result: {best_result_url} (Score: {best_result_score})"
-                )
-                return best_result_url
-
-        print("No relevant Yahoo search results found")
+        print(f"🔍 Yahoo search found {len(search_results)} potential ToS results")
+        
+        if len(search_results) > 0:
+            # Apply the path specificity scoring to the search results
+            for result in search_results:
+                # Add the path specificity score to the existing score
+                path_score = score_tos_url_by_path_specificity(result["url"])
+                result["path_specificity_score"] = path_score
+                result["final_score"] = result["score"] + path_score
+                
+                print(f"ToS Candidate: '{result['title']}' - {result['url']}")
+                print(f"  Base Score: {result['score']}, Path Score: {path_score}, Final Score: {result['final_score']}")
+            
+            # Re-sort based on the combined scores
+            search_results.sort(key=lambda x: x["final_score"], reverse=True)
+            
+            # Take the highest scoring result
+            best_result = search_results[0]
+            print(f"✅ Best Yahoo ToS result: {best_result['url']} (Score: {best_result['final_score']})")
+            return best_result["url"]
+        
         return None
     except Exception as e:
         print(f"Error in Yahoo search fallback: {e}")
@@ -2002,13 +1908,13 @@ async def bing_search_fallback(domain, page):
     try:
         print("Attempting search engine fallback with Bing...")
 
-        # Create a search query for the domain with specific site constraint and exact term matches
-        search_query = f'site:{domain} "terms of service" OR "terms and conditions" OR "user agreement" OR "legal"'
+        # Create a search query with the domain and terms terms
+        search_query = f'site:{domain} ("terms of service" OR "terms of use" OR "user agreement" OR "terms and conditions")'
         bing_search_url = f"https://www.bing.com/search?q={search_query}"
 
-        # Navigate to Bing search with shorter timeout
-        await page.goto(bing_search_url, timeout=15000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(2000)  # Shorter wait for results to load
+        # Navigate to Bing search
+        await page.goto(bing_search_url, timeout=20000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(5000)  # Wait for search results to load
 
         # Check for captcha or other blocking
         is_blocked = await page.evaluate(
@@ -2026,22 +1932,21 @@ async def bing_search_fallback(domain, page):
         )
 
         if is_blocked["isCaptcha"]:
-            print(f"⚠️ Captcha or blocking detected on Bing: {is_blocked['title']}")
+            print(f"⚠️ Captcha detected on Bing: {is_blocked['title']}")
             print("Waiting for possible manual intervention...")
-            await page.wait_for_timeout(
-                2000
-            )  # Give a small window for manual intervention
+            # Wait longer to allow manual captcha solving if headless=False
+            await page.wait_for_timeout(15000)
 
-        # Extract search results with multiple selector options for robustness
+        # Extract search results from Bing
         search_results = await page.evaluate(
             r"""(domain) => {
             // Bing uses different selectors depending on the layout
             const selectors = [
-                'h2 a[href^="http"]',                   // Standard Bing results
-                '#b_results .b_algo a[href^="http"]',   // Main results
-                '.b_title a[href^="http"]',             // Title links
-                '.b_caption a[href^="http"]',           // Caption links
-                'a[href^="http"]'                       // Fallback to all links (filtered later)
+                'h2 a[href^="http"]',                  // Common Bing result title links
+                '.b_algo h2 a[href^="http"]',          // Older Bing layout
+                '.b_title a[href^="http"]',            // Another Bing pattern
+                'li.b_algo cite',                      // URL citation fields
+                'a[href^="http"]'                      // Fallback to all links (filtered later)
             ];
             
             // Try each selector and merge results
@@ -2071,7 +1976,6 @@ async def bing_search_fallback(domain, page):
                         
                         // Filter out search engines and unrelated domains
                         if (url.href.includes('bing.com') ||
-                            url.href.includes('microsoft.com/en-us/bing') ||
                             url.href.includes('google.com') ||
                             url.href.includes('yahoo.com') ||
                             url.href.includes('duckduckgo.com')) {
@@ -2099,19 +2003,13 @@ async def bing_search_fallback(domain, page):
                             return false;
                         }
                         
-                        // 4. Filter out URLs with dates in them (likely articles)
-                        const segments = urlPath.split('/').filter(s => s.length > 0);
-                        if (segments.length > 2 && /^\d{4}$/.test(segments[0])) {
-                            return false;
-                        }
-                        
                         return true;
                     } catch (e) {
                         return false;
                     }
                 })
                 .map(a => {
-                    // Get title from the element
+                    // Get title and parent element for additional info
                     const title = a.textContent.trim();
                     
                     // Look for description in parent elements
@@ -2122,7 +2020,7 @@ async def bing_search_fallback(domain, page):
                         if (!parent) break;
                         
                         // Try common Bing description selectors
-                        const descEl = parent.querySelector('.b_caption p, .b_snippet');
+                        const descEl = parent.querySelector('.b_caption p, .b_snippet, .b_dList');
                         if (descEl) {
                             description = descEl.textContent.trim();
                             break;
@@ -2139,41 +2037,20 @@ async def bing_search_fallback(domain, page):
                     // Score based on title, description and URL
                     let score = 0;
                     const titleLower = title.toLowerCase();
-                    const descLower = description ? description.toLowerCase() : '';
+                    const descLower = description.toLowerCase();
                     const urlLower = a.href.toLowerCase();
-                    const urlPath = new URL(a.href).pathname.toLowerCase();
                     
                     // Scoring for title matches (prioritize user agreement and conditions of use)
-                    if (titleLower.includes('user agreement')) score += 70;
-                    else if (titleLower.includes('conditions of use')) score += 65;
+                    if (titleLower.includes('user agreement') || 
+                        titleLower.includes('users agreement') || 
+                        titleLower.includes('customer agreement')) score += 70;
+                    else if (titleLower.includes('conditions of use') || 
+                            titleLower.includes('condition of use')) score += 65;
                     else if (titleLower.includes('terms of service')) score += 60;
                     else if (titleLower.includes('terms and conditions')) score += 55;
-                    else if (titleLower.includes('terms')) score += 30;  // Lower priority for generic terms
+                    else if (titleLower.includes('terms')) score += 30;
                     else if (titleLower.includes('conditions')) score += 30;
                     else if (titleLower.includes('legal')) score += 25;
-                    
-                    // Boost URLs in common "legal" directories
-                    if (urlPath === '/terms' || 
-                        urlPath === '/terms/' ||
-                        urlPath === '/tos' || 
-                        urlPath === '/tos/' ||
-                        urlPath === '/terms-of-service' || 
-                        urlPath === '/terms-of-service/' ||
-                        urlPath === '/terms-and-conditions' || 
-                        urlPath === '/terms-and-conditions/') {
-                        score += 80;  // High boost for exact matches
-                    }
-                    else if (urlPath === '/legal/terms' || 
-                             urlPath === '/legal/terms/' ||
-                             urlPath === '/policies/terms' || 
-                             urlPath === '/policies/terms/') {
-                        score += 75;  // Also high boost
-                    }
-                    else if (urlPath.startsWith('/legal/') || 
-                             urlPath.startsWith('/policies/') ||
-                             urlPath.startsWith('/about/legal/')) {
-                        score += 50;  // Medium boost for general legal directories
-                    }
                     
                     // Scoring for description matches
                     if (descLower.includes('terms of service')) score += 30;
@@ -2184,19 +2061,24 @@ async def bing_search_fallback(domain, page):
                     else if (descLower.includes('terms')) score += 15;
                     
                     // URL-based scoring
-                    if (urlLower.includes('terms-of-service')) score += 40;
+                    if (urlLower.includes('user-agreement') || urlLower.includes('useragreement')) score += 45;
+                    else if (urlLower.includes('conditions-of-use') || urlLower.includes('conditionsofuse')) score += 43;
+                    else if (urlLower.includes('terms-of-service')) score += 40;
                     else if (urlLower.includes('terms-and-conditions')) score += 38;
-                    else if (urlLower.includes('user-agreement')) score += 40;
-                    else if (urlLower.includes('useragreement')) score += 40;
-                    else if (urlLower.includes('conditions-of-use') || urlLower.includes('condition-of-use') || urlLower.includes('conditionsofuse') || urlLower.includes('conditionofuse')) score += 43;
                     else if (urlLower.includes('tos')) score += 35;
                     else if (urlLower.includes('terms')) score += 20;
                     else if (urlLower.includes('legal')) score += 20;
                     
+                    // Penalize AI or product-specific terms URLs
+                    const urlPath = new URL(urlLower).pathname;
+                    if (urlPath.includes('/ai/')) score -= 30;
+                    if (urlPath.includes('/artificial-intelligence/')) score -= 30;
+                    if (urlPath.includes('/ai-terms')) score -= 30;
+                    
                     return {
                         url: a.href,
-                        title: title || "No Title",  // Fallback title
-                        description: description,
+                        title: title || "No Title",
+                        description: description || "No description",
                         score: score
                     };
                 })
@@ -2207,169 +2089,32 @@ async def bing_search_fallback(domain, page):
                     result.url.toLowerCase().includes('legal')
                 );
                 
-            // Deduplicate results based on URL
-            const uniqueResults = [];
-            const seenUrls = new Set();
-            
-            for (const result of results) {
-                if (!seenUrls.has(result.url)) {
-                    seenUrls.add(result.url);
-                    uniqueResults.push(result);
-                }
-            }
-            
-            return uniqueResults;
+            return results.sort((a, b) => b.score - a.score).slice(0, 5);
         }""",
             domain,
         )
 
-        if search_results and len(search_results) > 0:
-            print(f"Found {len(search_results)} potential results from Bing search")
-
-            # Sort by score
-            search_results.sort(key=lambda x: x["score"], reverse=True)
-
-            # Store the best result in case all verifications fail
-            best_result_url = search_results[0]["url"]
-            best_result_score = search_results[0]["score"]
-
-            # Display top results for debugging
-            for i, result in enumerate(search_results[:3]):
-                print(
-                    f"Result #{i+1}: {result['title']} - {result['url']} (Score: {result['score']})"
-                )
-
-            # Check the top 5 results
-            for result_index in range(min(5, len(search_results))):
-                best_result = search_results[result_index]["url"]
-
-                try:
-                    # Visit the page to verify it's a terms page
-                    print(f"Checking result: {best_result}")
-                    await page.goto(
-                        best_result, timeout=10000, wait_until="domcontentloaded"
-                    )
-                    await page.wait_for_timeout(2000)  # Allow time for page to load
-
-                    # Check if we hit a captcha
-                    is_captcha = await page.evaluate(
-                        """() => {
-                        const html = document.documentElement.innerHTML.toLowerCase();
-                        const url = window.location.href.toLowerCase();
-                        return {
-                            isCaptcha: html.includes('captcha') || 
-                                      url.includes('captcha') ||
-                                      html.includes('security measure') ||
-                                      html.includes('security check') ||
-                                      html.includes('please verify') ||
-                                      html.includes('just a moment'),
-                            url: window.location.href
-                        };
-                    }"""
-                    )
-
-                    # Special handling for high-scoring URLs that hit captchas
-                    if is_captcha["isCaptcha"]:
-                        print(f"⚠️ Captcha detected when accessing: {is_captcha['url']}")
-
-                        # If the original URL was high-scoring and contains key terms, accept it even with captcha
-                        original_url_lower = best_result.lower()
-                        captcha_bypass_domains = [
-                            "ebay.com",
-                            "amazon.com",
-                            "facebook.com",
-                            "meta.com",
-                            "instagram.com",
-                            "openai.com",
-                        ]
-
-                        # Check if it's from a known domain and has user agreement/terms in URL
-                        is_known_domain = any(
-                            domain in original_url_lower
-                            for domain in captcha_bypass_domains
-                        )
-                        has_terms_path = (
-                            "user-agreement" in original_url_lower
-                            or "useragreement" in original_url_lower
-                            or "conditions-of-use" in original_url_lower
-                            or "conditionsofuse" in original_url_lower
-                            or "terms" in original_url_lower
-                            or "tos" in original_url_lower
-                            or "policies" in original_url_lower
-                        )
-
-                        if (
-                            is_known_domain
-                            and has_terms_path
-                            and search_results[result_index]["score"] >= 60
-                        ):
-                            print(
-                                f"✅ Accepting high-scoring URL from known domain despite captcha: {best_result}"
-                            )
-                            return best_result
-                        else:
-                            print(
-                                f"❌ Not accepting captcha-protected URL as it doesn't meet criteria"
-                            )
-
-                    # Perform verification
-                    verification = await verify_is_terms_page(page)
-
-                    if verification["isTermsPage"] and verification["confidence"] >= 60:
-                        print(f"✅ Verified terms page from Bing results: {page.url}")
-                        return page.url
-                    else:
-                        print(
-                            f"❌ Not a valid Terms page (verification score: {verification['confidence']})"
-                        )
-                except Exception as e:
-                    print(f"Error checking Bing search result: {e}")
-
-            # If we checked all results but none were verified, consider the highest scored result
-            # with a minimum score threshold
-            if len(search_results) > 0 and search_results[0]["score"] >= 70:
-                print(
-                    f"⚠️ No verified pages found. Checking highest-scored result: {search_results[0]['url']} (Score: {search_results[0]['score']})"
-                )
-                try:
-                    await page.goto(
-                        search_results[0]["url"],
-                        timeout=10000,
-                        wait_until="domcontentloaded",
-                    )
-                    await page.wait_for_timeout(2000)
-
-                    verification = await verify_is_terms_page(page)
-                    if verification["confidence"] >= 50:  # Higher minimum threshold
-                        print(
-                            f"⚠️ Final verification passed with sufficient confidence: {verification['confidence']}"
-                        )
-                        return page.url
-                    else:
-                        print(
-                            f"❌ Final verification failed with confidence score: {verification['confidence']}"
-                        )
-                        # Return the highest-scored result even if verification fails
-                        print(
-                            f"⚠️ Returning highest-scored result as last resort: {search_results[0]['url']}"
-                        )
-                        return search_results[0]["url"]
-                except Exception as e:
-                    print(f"Error in final verification: {e}")
-                    # Return the highest-scored result even if verification fails due to error
-                    print(
-                        f"⚠️ Verification failed with error, returning highest-scored result: {search_results[0]['url']}"
-                    )
-                    return search_results[0]["url"]
-
-            # Return the best result anyway if it has a decent score (60+)
-            if best_result_score >= 60:
-                print(
-                    f"⚠️ All verification methods failed, returning best unverified result: {best_result_url} (Score: {best_result_score})"
-                )
-                return best_result_url
-
-        print("No relevant Bing search results found")
+        print(f"🔍 Bing search found {len(search_results)} potential ToS results")
+        
+        if len(search_results) > 0:
+            # Apply the path specificity scoring to the search results
+            for result in search_results:
+                # Add the path specificity score to the existing score
+                path_score = score_tos_url_by_path_specificity(result["url"])
+                result["path_specificity_score"] = path_score
+                result["final_score"] = result["score"] + path_score
+                
+                print(f"ToS Candidate: '{result['title']}' - {result['url']}")
+                print(f"  Base Score: {result['score']}, Path Score: {path_score}, Final Score: {result['final_score']}")
+            
+            # Re-sort based on the combined scores
+            search_results.sort(key=lambda x: x["final_score"], reverse=True)
+            
+            # Take the highest scoring result
+            best_result = search_results[0]
+            print(f"✅ Best Bing ToS result: {best_result['url']} (Score: {best_result['final_score']})")
+            return best_result["url"]
+            
         return None
     except Exception as e:
         print(f"Error in Bing search fallback: {e}")
@@ -2377,124 +2122,135 @@ async def bing_search_fallback(domain, page):
 
 
 async def duckduckgo_search_fallback(domain, page):
-    """Search for terms of service using DuckDuckGo Search."""
+    """Search for terms of service using DuckDuckGo."""
     try:
         print("Attempting search engine fallback with DuckDuckGo...")
-        search_query = f'site:{domain} "terms of service" OR "terms of use" OR "terms and conditions" OR "user agreement" OR "legal"'
-        ddg_search_url = f"https://duckduckgo.com/?q={search_query}&t=h_&ia=web"
 
-        await page.goto(ddg_search_url, timeout=15000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(3000)
+        # Create a search query for the domain with specific site constraint
+        search_query = f'site:{domain} ("terms of service" OR "terms of use" OR "user agreement" OR "terms and conditions")'
+        
+        # Use the lite version which has a simpler interface
+        ddg_search_url = f"https://lite.duckduckgo.com/lite?q={search_query}"
 
-        search_results = await page.evaluate(r"""(domain) => {
-            const selectors = [
-                '.result__a[href^="http"]',
-                'article a[href^="http"]',
-                'a.eVNpHGjtxRBq_gLOfGDr[href^="http"]',
-                '.nrn-react-div a[href^="http"]',
-                '.react-results a[href^="http"]',
-                '.web-result a[href^="http"]',
-                'a[href^="http"]'
-            ];
-            let allLinks = [];
-            for (const selector of selectors) {
+        # Navigate to DuckDuckGo with appropriate timeout
+        await page.goto(ddg_search_url, timeout=20000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)  # Wait for results to load
+
+        # Extract search results from DuckDuckGo's simplified HTML
+        search_results = await page.evaluate(
+            r"""(domain) => {
+            // DuckDuckGo lite version uses simple HTML with tables
+            const results = [];
+            const allLinks = Array.from(document.querySelectorAll('a[href]'));
+            
+            // Filter for result links - DuckDuckGo lite has a simple structure
+            for (const link of allLinks) {
                 try {
-                    const links = Array.from(document.querySelectorAll(selector));
-                    if (links.length > 0) {
-                        allLinks = [...allLinks, ...links];
+                    const url = new URL(link.href);
+                    
+                    // Skip DuckDuckGo internal links
+                    if (url.hostname.includes('duckduckgo.com')) {
+                        continue;
                     }
-                } catch (e) {}
-            }
-            const results = allLinks
-                .filter(a => {
-                    try {
-                        const urlText = a.href.toLowerCase();
-                        if (!urlText.includes(domain.toLowerCase())) {
-                            return false;
-                        }
-                        if (urlText.includes('duckduckgo.com') ||
-                            urlText.includes('google.com') ||
-                            urlText.includes('bing.com') ||
-                            urlText.includes('yahoo.com')) {
-                            return false;
-                        }
-                        return true;
-                    } catch (e) { return false; }
-                })
-                .map(a => {
-                    let title = a.textContent.trim();
-                    let description = '';
-                    let parentElem = a.parentElement;
-                    for (let i = 0; i < 3; i++) {
-                        if (!parentElem) break;
-                        const descriptionElem = parentElem.querySelector('.result__snippet') || 
-                                              parentElem.querySelector('p') ||
-                                              parentElem.querySelector('div > span');
-                        if (descriptionElem && descriptionElem.textContent) {
-                            description = descriptionElem.textContent.trim();
-                            break;
-                        }
-                        parentElem = parentElem.parentElement;
+                    
+                    // Only include links to the target domain
+                    if (!url.hostname.includes(domain) && !domain.includes(url.hostname)) {
+                        continue;
                     }
+                    
+                    // Filter out likely non-ToS URLs
+                    const urlPath = url.pathname.toLowerCase();
+                    
+                    // Filter out date-based URLs (likely articles)
+                    if (/\/\d{4}\/\d{1,2}\//.test(urlPath)) {
+                        continue;
+                    }
+                    
+                    // Filter out URLs with long numeric IDs
+                    if (/\/\d{5,}/.test(urlPath)) {
+                        continue;
+                    }
+                    
+                    // Score the result
                     let score = 0;
-                    const titleLower = title.toLowerCase();
-                    const descLower = description.toLowerCase();
-                    const urlLower = a.href.toLowerCase();
-                    if (titleLower.includes('terms of service')) score += 50;
-                    else if (titleLower.includes('terms of use')) score += 48;
-                    else if (titleLower.includes('terms and conditions')) score += 45;
-                    else if (titleLower.includes('user agreement')) score += 40;
-                    else if (titleLower.includes('terms')) score += 30;
-                    else if (titleLower.includes('legal')) score += 20;
-                    if (descLower.includes('terms of service')) score += 20;
-                    else if (descLower.includes('terms and conditions')) score += 18;
-                    else if (descLower.includes('user agreement')) score += 16;
-                    else if (descLower.includes('legal') && descLower.includes('terms')) score += 15;
-                    if (urlLower.includes('/terms-of-service') || urlLower.includes('/tos/')) score += 60;
-                    else if (urlLower.includes('/terms-of-use') || urlLower.includes('/terms_of_use')) score += 55;
-                    else if (urlLower.includes('/terms-and-conditions')) score += 50;
-                    else if (urlLower.includes('/terms/') || urlLower.includes('/tos')) score += 45;
-                    else if (urlLower.includes('/legal/terms')) score += 40;
-                    else if (urlLower.includes('/legal/')) score += 30;
-                    return {
-                        url: a.href,
-                        title: title || 'No Title',
-                        description: description || 'No Description',
-                        score: score
-                    };
-                });
-            const uniqueResults = [];
-            const seenUrls = new Set();
-            for (const result of results) {
-                if (!seenUrls.has(result.url)) {
-                    seenUrls.add(result.url);
-                    uniqueResults.push(result);
+                    const text = link.textContent.trim().toLowerCase();
+                    const href = link.href.toLowerCase();
+                    
+                    // Text-based scoring
+                    if (text.includes('user agreement')) score += 70;
+                    else if (text.includes('conditions of use')) score += 65;
+                    else if (text.includes('terms of service')) score += 60;
+                    else if (text.includes('terms and conditions')) score += 55;
+                    else if (text.includes('terms')) score += 30;
+                    else if (text.includes('legal')) score += 20;
+                    
+                    // URL-based scoring
+                    if (href.includes('user-agreement')) score += 45;
+                    else if (href.includes('conditions-of-use')) score += 43;
+                    else if (href.includes('terms-of-service')) score += 40;
+                    else if (href.includes('terms-and-conditions')) score += 38;
+                    else if (href.includes('tos')) score += 35;
+                    else if (href.includes('terms')) score += 20;
+                    else if (href.includes('legal')) score += 20;
+                    
+                    // Penalize AI or product-specific terms URLs
+                    if (urlPath.includes('/ai/')) score -= 30;
+                    if (urlPath.includes('/artificial-intelligence/')) score -= 30;
+                    if (urlPath.includes('/ai-terms')) score -= 30;
+                    
+                    // Only add results with a positive score or clear terms indicators in URL
+                    if (score > 0 || 
+                        href.includes('terms') || 
+                        href.includes('tos') || 
+                        href.includes('user-agreement') ||
+                        href.includes('legal')) {
+                        
+                        // Get a description if possible
+                        let description = '';
+                        if (link.parentElement && link.parentElement.nextElementSibling) {
+                            description = link.parentElement.nextElementSibling.textContent.trim();
+                        }
+                        
+                        results.push({
+                            url: link.href,
+                            title: text || url.hostname + url.pathname,
+                            description: description,
+                            score: score
+                        });
+                    }
+                } catch (e) {
+                    // Skip problematic links
+                    continue;
                 }
             }
-            return uniqueResults;
-        }""", domain)
-        if search_results and len(search_results) > 0:
-            print(f"Found {len(search_results)} potential results from DuckDuckGo search")
-            search_results.sort(key=lambda x: x['score'], reverse=True)
-            for i in range(min(3, len(search_results))):
-                print(f"Result #{i+1}: {search_results[i]['title']} - {search_results[i]['url']} (Score: {search_results[i]['score']})")
-            for result in search_results[:3]:
-                try:
-                    await page.goto(result['url'], timeout=10000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(2000)
-                    verification = await verify_is_terms_page(page)
-                    if verification["isTermsPage"]:
-                        print(f"✅ Verified terms page from DuckDuckGo results: {page.url}")
-                        return page.url
-                    else:
-                        print(f"Not a terms page (score: {verification['confidence']})")
-                except Exception as e:
-                    print(f"Error checking result: {e}")
-            if search_results[0]['score'] >= 60:
-                print(f"Returning unverified high-confidence result: {search_results[0]['url']}")
-                return search_results[0]['url']
-        else:
-            print("No relevant search results found from DuckDuckGo")
+            
+            // Sort and return top results
+            return results.sort((a, b) => b.score - a.score).slice(0, 5);
+        }""",
+            domain,
+        )
+
+        print(f"🔍 DuckDuckGo search found {len(search_results)} potential ToS results")
+        
+        if len(search_results) > 0:
+            # Apply the path specificity scoring to the search results
+            for result in search_results:
+                # Add the path specificity score to the existing score
+                path_score = score_tos_url_by_path_specificity(result["url"])
+                result["path_specificity_score"] = path_score
+                result["final_score"] = result["score"] + path_score
+                
+                print(f"ToS Candidate: '{result['title']}' - {result['url']}")
+                print(f"  Base Score: {result['score']}, Path Score: {path_score}, Final Score: {result['final_score']}")
+            
+            # Re-sort based on the combined scores
+            search_results.sort(key=lambda x: x["final_score"], reverse=True)
+            
+            # Take the highest scoring result
+            best_result = search_results[0]
+            print(f"✅ Best DuckDuckGo ToS result: {best_result['url']} (Score: {best_result['final_score']})")
+            return best_result["url"]
+        
         return None
     except Exception as e:
         print(f"Error in DuckDuckGo search fallback: {e}")
