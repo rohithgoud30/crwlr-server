@@ -1,5 +1,5 @@
 import random
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import re
 import traceback
 import time
@@ -186,77 +186,27 @@ def is_likely_user_generated_content(url):
         path = parsed.path.lower()
         hostname = parsed.netloc.lower()
         
-        # Known social/forum platforms
-        social_platforms = [
-            'reddit.com', 'twitter.com', 'facebook.com/groups', 'quora.com',
-            'stackoverflow.com', 'stackexchange.com', 'medium.com',
-            'discourse', 'community', 'forum', 'boards', 'disqus',
-            'github.com/issues', 'github.com/discussions', 'gist.github.com'
-        ]
+        # Check if the URL path contains elements that suggest user content
+        user_content_indicators = ['post', 'thread', 'topic', 'discussion', 'comment', 
+                                  'forum', 'question', 'answer', 'review', 'article', 
+                                  'profile', 'user', 'member', 'status', 'tweet']
         
-        # Check for known social media/forum domains
-        for platform in social_platforms:
-            if platform in hostname:
-                # For social platforms, allow only specific legal paths
-                legal_paths = ['/terms', '/tos', '/terms-of-service', '/legal/terms', 
-                              '/legal', '/user-agreement', '/useragreement', '/terms-of-use']
-                
-                for legal_path in legal_paths:
-                    if path.startswith(legal_path):
-                        # This is actually a legal document path within a social platform
-                        return False
-                
-                # If we don't find a legal path pattern, assume it's user content
-                return True
+        # Legal content indicators that override user content detection
+        legal_content_indicators = ['terms', 'tos', 'service', 'legal', 'privacy', 
+                                    'policy', 'agreement', 'condition']
         
-        # Common patterns that indicate user content
-        user_content_patterns = [
-            r'/r/\w+',  # Reddit subreddits
-            r'/t/\w+',  # Discourse topics
-            r'/posts/\d+',  # Blog posts with ID
-            r'/discussions?/',  # Forum discussions
-            r'/threads?/',  # Forum threads
-            r'/comments?/',  # Comments section
-            r'/topic/\d+',  # Forum topics
-            r'/viewtopic',  # phpBB
-            r'/showthread',  # vBulletin, XenForo
-            r'/questions?/\d+',  # Stack Overflow, Quora
-            r'/answers?/\d+',  # Q&A sites
-            r'/profiles?/',  # User profiles
-            r'/users?/\w+',  # User pages
-            r'/u/\w+',  # User shorthand
-            r'/p/\w+',  # Instagram, TikTok posts
-            r'/status/\d+',  # Twitter status
-            r'/tweet/',  # Tweet
-            r'/events?/',  # Event pages
-            r'/groups?/',  # Group pages
-            r'/blogs?/',  # Blog posts
-            r'/articles?/',  # Article pages
-            r'/reviews?/',  # Review pages
-            r'/members?/',  # Member pages
-            r'/videos?/',  # Video pages
-            r'/photos?/'  # Photo pages
-        ]
+        # Check if path contains legal indicators
+        for indicator in legal_content_indicators:
+            if indicator in path:
+                # This might be a legal document path
+                return False
         
-        for pattern in user_content_patterns:
-            if re.search(pattern, path):
+        # Check if path contains user content indicators
+        for indicator in user_content_indicators:
+            if indicator in path:
                 return True
                 
-        # Check for path segments indicating user content
-        content_indicators = [
-            'article', 'post', 'blog', 'thread', 'topic', 'discussion', 'comment', 
-            'forum', 'question', 'answer', 'review', 'community', 'viewpost', 
-            'viewthread', 'profile', 'user', 'member', 'status', 'tweet'
-        ]
-        
-        segments = path.split('/')
-        for segment in segments:
-            segment = segment.lower()
-            for indicator in content_indicators:
-                if indicator in segment:
-                    return True
-        
-        # Look for typical IDs in user content
+        # Check for typical IDs in user content
         # Common alphanumeric ID patterns
         if (re.search(r'/[a-z0-9]{8,}/?$', path) or 
             re.search(r'/[a-z0-9]{6,}\-[a-z0-9]{6,}/?$', path) or
@@ -270,11 +220,10 @@ def is_likely_user_generated_content(url):
         for param in discussion_params:
             if param in query_params:
                 return True
-                
-        return False
         
+        return False
     except Exception as e:
-        logger.error(f"Error checking if URL is user-generated content: {e}")
+        logger.error(f"Error checking if URL is user content: {e}")
         return False
 
 @router.post("/tos", response_model=ToSResponse, status_code=status.HTTP_200_OK)
@@ -326,56 +275,6 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     message="Terms of Service found via Play Store",
                     method_used="play_store"
                 )
-                
-        # Handle specific known domains with custom paths
-        parsed_url = urlparse(url)
-        hostname = parsed_url.netloc.lower()
-        
-        # Handle Reddit specifically, without hardcoding all possible sources
-        if 'reddit.com' in hostname or hostname == 'reddit.com':
-            logger.info("Detected Reddit domain, trying common legal paths...")
-            # Use common paths approach rather than hardcoding specific URLs
-            common_tos_paths = [
-                "https://www.redditinc.com/policies/user-agreement",
-                "https://www.reddit.com/help/useragreement",
-                "https://www.redditinc.com/policies/terms"
-            ]
-            
-            for tos_path in common_tos_paths:
-                try:
-                    # Try to validate this path
-                    playwright = await async_playwright().start()
-                    browser, browser_context, page, _ = await setup_browser(playwright)
-                    
-                    success, _, _ = await navigate_with_retry(page, tos_path)
-                    if success:
-                        # Check if this looks like a terms page
-                        verification = await verify_is_terms_page(page)
-                        is_terms = verification.get("isTermsPage", False)
-                        confidence = verification.get("confidence", 0)
-                        
-                        logger.info(f"Verified Reddit ToS path: {tos_path} (Confidence: {confidence})")
-                        
-                        if is_terms or confidence >= 50:
-                            await browser.close()
-                            await playwright.stop()
-                            return ToSResponse(
-                                url=url,
-                                tos_url=tos_path,
-                                success=True,
-                                message="Terms of Service found via common legal path for Reddit",
-                                method_used="common_legal_path"
-                            )
-                    
-                    await browser.close()
-                    await playwright.stop()
-                except Exception as e:
-                    logger.error(f"Error checking Reddit ToS path {tos_path}: {e}")
-                    try:
-                        await browser.close()
-                        await playwright.stop()
-                    except:
-                        pass
 
         # Try HTML inspection approach first - more lightweight
         logger.info("Attempting to find ToS via HTML inspection...")
@@ -387,13 +286,13 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 # Don't return this result, continue to other methods
             else:
                 logger.info(f"Found ToS via HTML inspection: {tos_url}")
-            return ToSResponse(
-                url=url,
-                tos_url=tos_url,
-                success=True,
-                message="Terms of Service found via HTML inspection",
-                method_used="html_inspection"
-            )
+                return ToSResponse(
+                    url=url,
+                    tos_url=tos_url,
+                    success=True,
+                    message="Terms of Service found via HTML inspection",
+                    method_used="html_inspection"
+                )
         
         # Use browser approach
         playwright = await async_playwright().start()
@@ -460,12 +359,12 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                             # Don't return this result, continue to other methods
                         else:
                             return ToSResponse(
-                            url=url,
-                                tos_url=tos_url,
-                            success=True,
-                            message="Terms of Service found via Yahoo search",
-                            method_used="yahoo_search"
-                        )
+                                url=url,
+                                    tos_url=tos_url,
+                                success=True,
+                                message="Terms of Service found via Yahoo search",
+                                method_used="yahoo_search"
+                            )
                 except Exception as e:
                     logger.warning(f"Yahoo search failed: {e}")
                 
@@ -589,25 +488,47 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
             
             # Step 5: Check if we can find ToS via common paths
             try:
-                logger.info("Trying common ToS paths...")
-                tos_url = await find_tos_via_common_paths(url)
-                if tos_url:
-                    if is_likely_user_generated_content(tos_url):
-                        logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
-                        # Save as unverified but continue looking for better results
-                        if not unverified_result:
-                            unverified_result = tos_url
-                    else:
-                        logger.info(f"Found ToS via common paths: {tos_url}")
-                        return ToSResponse(
-                            url=url,
-                            tos_url=tos_url,
-                            success=True,
-                            message="Terms of Service found via common paths",
-                            method_used="common_paths"
-                        )
+                logger.info("Trying direct search approaches...")
+                
+                # Try search engine with domain name
+                parsed_url = urlparse(url)
+                domain_name = parsed_url.netloc.lower()
+                company_name = domain_name.split('.')[0] if '.' in domain_name else domain_name
+                
+                # Use a single search query string with multiple terms instead of an array
+                search_query = f"{domain_name} terms of service, terms of use, user agreement, legal terms"
+                logger.info(f"Using search query: {search_query}")
+                
+                # Try different search engines with the single query
+                tos_url = await duckduckgo_search_fallback(search_query, page)
+                if tos_url and not is_likely_user_generated_content(tos_url):
+                    logger.info(f"Found ToS via direct search: {tos_url}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=tos_url,
+                        success=True,
+                        message="Terms of Service found via direct search approach",
+                        method_used="direct_search"
+                    )
+                
+                # Try with company name if domain search fails
+                company_search_query = f"{company_name} terms of service, terms of use, user agreement, legal terms"
+                logger.info(f"Using company search query: {company_search_query}")
+                
+                tos_url = await duckduckgo_search_fallback(company_search_query, page)
+                if tos_url and not is_likely_user_generated_content(tos_url):
+                    logger.info(f"Found ToS via company search: {tos_url}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=tos_url,
+                        success=True,
+                        message="Terms of Service found via company name search",
+                        method_used="company_search"
+                    )
+                
+                logger.warning("Direct search approach failed to find ToS URL")
             except Exception as e:
-                logger.error(f"Error checking common paths: {e}")
+                logger.error(f"Error during direct search approach: {e}")
             
             # Step 6: Try to find via privacy policy for domains where they're often linked
             try:
@@ -626,8 +547,8 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                             tos_url=tos_url,
                             success=True,
                             message="Terms of Service found via privacy policy link",
-                    method_used="privacy_policy"
-            )
+                            method_used="privacy_policy"
+                        )
             except Exception as e:
                 logger.error(f"Error finding ToS via privacy policy: {e}")
             
@@ -635,8 +556,8 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
             # but only if it doesn't appear to be a UGC link
             if unverified_result and not is_likely_user_generated_content(unverified_result):
                 logger.info(f"Using unverified result as last resort: {unverified_result}")
-            return ToSResponse(
-                url=url,
+                return ToSResponse(
+                    url=url,
                     tos_url=unverified_result,
                     success=True,
                     message="Terms of Service found (low confidence)",
@@ -651,7 +572,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 success=False,
                 message="Could not find Terms of Service via any method",
                 method_used="all_methods_failed"
-               )
+            )
         
         except Exception as e:
             logger.error(f"Error during ToS search: {e}")
@@ -3361,251 +3282,56 @@ async def find_play_store_tos(url: str) -> str:
     # Implementation would go here
     return None
 
-async def find_tos_via_common_paths(url: str) -> str:
-    """Try to find Terms of Service via intelligent URL pattern detection."""
-    try:
-        # Parse the base URL
-        parsed_url = urlparse(url)
-        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-        base_domain = parsed_url.netloc.lower()
+def normalize_url(url: str) -> str:
+    """Normalize URL by adding protocol if missing."""
+    if not url.startswith('http'):
+        return 'https://' + url
+    return url
+
+def get_potential_corporate_domains(domain):
+    """
+    Get potential corporate domains that might host terms of service.
+    This helps with finding ToS on separate corporate domains.
+    
+    Args:
+        domain: Original domain, e.g. 'reddit.com'
         
-        logger.info(f"Setting up browser for common paths check on {base_url}")
-        
-        # Known patterns for corporate domains that have separate legal/corporate sites
-        # This is a general pattern match, not hardcoded exceptions
-        corporate_domain_patterns = [
-            # Format: (domain_pattern, corporate_domain_format, common_tos_paths)
-            # Where domain_pattern is a regex to match the main domain
-            # corporate_domain_format is a format string to construct the corporate domain
-            # common_tos_paths is a list of common paths to check on the corporate domain
-            (r'reddit\.com$', "redditinc.com", ["/policies/user-agreement", "/policies/terms"]),
-            (r'instagram\.com$', "facebook.com", ["/legal/terms", "/terms"]),
-            (r'whatsapp\.com$', "whatsapp.com", ["/legal/terms-of-service"]),
-            (r'linkedin\.com$', "linkedin.com", ["/legal/user-agreement"]),
-            (r'twitter\.com$', "x.com", ["/en/tos", "/tos"]),
-            (r'tiktok\.com$', "tiktok.com", ["/legal/terms-of-service", "/terms"]),
-            # General pattern - many companies use a legal subdomain or path
-            (r'.*', "{self}", ["/legal/terms", "/legal/tos", "/legal/user-agreement", "/terms", "/tos", "/terms-of-service"])
-        ]
-        
-        # Check for corporate domain patterns and add them to the list of URLs to try
-        corporate_urls_to_try = []
-        
-        for domain_pattern, corporate_format, paths in corporate_domain_patterns:
-            if re.search(domain_pattern, base_domain):
-                # Determine the corporate domain
-                if corporate_format == "{self}":
-                    corporate_domain = base_domain
-                else:
-                    # For regex match groups if needed
-                    match = re.search(domain_pattern, base_domain)
-                    if match:
-                        corporate_domain = corporate_format
-                    else:
-                        corporate_domain = corporate_format
-                
-                # Add https:// if not already present
-                if not corporate_domain.startswith("http"):
-                    corporate_domain = f"https://www.{corporate_domain}"
-                
-                # Add all the common paths for this corporate domain
-                for path in paths:
-                    corporate_urls_to_try.append(f"{corporate_domain}{path}")
-        
-        logger.info(f"Will try these corporate domain URLs: {corporate_urls_to_try}")
-        
-        # Set up browser to inspect paths
-        playwright = await async_playwright().start()
-        browser, browser_context, page, _ = await setup_browser(playwright)
-        
-        try:
-            # First check the corporate URLs if any were found
-            for corporate_url in corporate_urls_to_try:
-                try:
-                    logger.info(f"Trying corporate URL: {corporate_url}")
-                    success, _, _ = await navigate_with_retry(page, corporate_url)
-                    if success:
-                        # Verify if this is a terms page
-                        verification = await verify_is_terms_page(page)
-                        is_terms = verification.get("isTermsPage", False)
-                        confidence = verification.get("confidence", 0)
-                        
-                        logger.info(f"Checked corporate URL: {corporate_url} (Terms: {is_terms}, Confidence: {confidence})")
-                        
-                        if is_terms or confidence >= 50:
-                            return corporate_url
-                except Exception as e:
-                    logger.error(f"Error checking corporate URL {corporate_url}: {e}")
-            
-            # Navigate to the base URL
-            success, _, _ = await navigate_with_retry(page, base_url)
-            if not success:
-                logger.warning(f"Failed to navigate to base URL: {base_url}")
-                
-                # Try search engine fallbacks
-                domain = normalize_domain(base_url)
-                logger.info(f"Trying search engine fallbacks for domain: {domain}")
-                
-                # Try DuckDuckGo search  
-                try:
-                    ddg_result = await duckduckgo_search_fallback(domain, page)
-                    if ddg_result:
-                        logger.info(f"Found ToS via DuckDuckGo search in common paths: {ddg_result}")
-                        return ddg_result
-                except Exception as e:
-                    logger.error(f"Error with DuckDuckGo search in common paths: {e}")
-                
-                # Try other search engines if DuckDuckGo fails
-                try:
-                    bing_result = await bing_search_fallback(domain, page)
-                    if bing_result:
-                        logger.info(f"Found ToS via Bing search in common paths: {bing_result}")
-                        return bing_result
-                except Exception as e:
-                    logger.error(f"Error with Bing search in common paths: {e}")
-                
-                # Try Yahoo search
-                try:
-                    yahoo_result = await yahoo_search_fallback(domain, page)
-                    if yahoo_result:
-                        logger.info(f"Found ToS via Yahoo search in common paths: {yahoo_result}")
-                        return yahoo_result
-                except Exception as e:
-                    logger.error(f"Error with Yahoo search in common paths: {e}")
-                    
-                # Return None if all search engines fail
-                return None
-                
-            # Use JavaScript to find link patterns that might be ToS 
-            possible_tos_urls = await page.evaluate("""
-                () => {
-                    // Get all links on the page
-                    const allLinks = Array.from(document.querySelectorAll('a[href]'))
-                        .filter(link => link.href && link.href.trim() !== '' && 
-                                !link.href.startsWith('javascript:') &&
-                                !link.href.includes('mailto:') &&
-                                !link.href.includes('tel:'));
-                    
-                    // Strong pattern matching for ToS links
-                    const tosMatches = [];
-                    
-                    const tosTextPatterns = [
-                        'terms of service', 
-                        'terms of use', 
-                        'terms and conditions',
-                        'terms & conditions',
-                        'user agreement', 
-                        'legal terms',
-                        'terms',
-                        'tos',
-                        'user terms',
-                        'legal'
-                    ];
-                    
-                    const tosUrlPatterns = [
-                        '/user-agreement',
-                        '/customer-agreement',
-                        '/user-terms',
-                        '/customer-terms',
-                        '/terms',
-                        '/tos',
-                        '/terms-of-service',
-                        '/terms-of-use',
-                        '/terms-and-conditions',
-                        '/legal/terms',
-                        '/legal',
-                        '/eula',
-                        '/policies/terms',
-                        '/policy/terms'
-                    ];
-                    
-                    // Helper function to score links
-                    const scoreLink = (link) => {
-                        const text = link.textContent.trim().toLowerCase();
-                        const href = link.href.toLowerCase();
-                        let score = 0;
-                        
-                        // Text content matching
-                        tosTextPatterns.forEach((pattern, idx) => {
-                            if (text.includes(pattern)) {
-                                // Higher score for exact matches at start of text
-                                if (text.startsWith(pattern)) {
-                                    score += 100 - idx; // Give higher priority to patterns earlier in the array
-                                } else {
-                                    score += 50 - idx;
-                                }
-                            }
-                        });
-                        
-                        // URL pattern matching
-                        tosUrlPatterns.forEach((pattern, idx) => {
-                            if (href.includes(pattern)) {
-                                score += 40 - idx;
-                                if (!matchedTerm) matchedTerm = 'url:' + pattern;
-                            }
-                        });
-                        
-                        // Additional URL pattern boost for user/customer URLs
-                        if (href.includes('user') && (href.includes('agreement') || href.includes('terms'))) {
-                            score += 50;
-                        }
-                        if (href.includes('customer') && (href.includes('agreement') || href.includes('terms'))) {
-                            score += 50;
-                        }
-                        
-                        // Boost score for footer links (often where ToS is found)
-                        if (link.closest('footer') || 
-                            link.closest('[id*="foot"]') || 
-                            link.closest('[class*="foot"]')) {
-                            score *= 1.5;
-                        }
-                        
-                        // Boost for links in the footer or legal sections
-                        if (href.includes('/legal') || href.includes('/terms')) {
-                            score += 20;
-                        }
-                        
-                        return {link: link, href: href, text: text, score: score};
-                    };
-                    
-                    // Score all links
-                    const scoredLinks = allLinks
-                        .map(scoreLink)
-                        .filter(item => item.score > 0); // Only consider links with positive scores
-                    
-                    // Sort by score (highest first)
-                    scoredLinks.sort((a, b) => b.score - a.score);
-                    
-                    // Return top 5 candidates with their scores
-                    return scoredLinks.slice(0, 5).map(item => ({
-                        url: item.href,
-                        text: item.text,
-                        score: item.score
-                    }));
-                }
-            """)
-            
-            # Log the candidates we found
-            if possible_tos_urls and len(possible_tos_urls) > 0:
-                logger.info(f"Found {len(possible_tos_urls)} potential ToS URL candidates:")
-                for idx, candidate in enumerate(possible_tos_urls):
-                    logger.info(f"  Candidate #{idx+1}: {candidate['text']} - {candidate['url']} (Score: {candidate['score']})")
-                
-                # Return the highest-scoring candidate
-                best_candidate = possible_tos_urls[0]['url']
-                logger.info(f"Selected best ToS URL candidate: {best_candidate}")
-                return best_candidate
-                
-            return None
-        finally:
-            # Clean up browser resources
-            await browser_context.close()
-            await browser.close()
-            await playwright.stop()
-            
-    except Exception as e:
-        logger.error(f"Error in find_tos_via_common_paths: {str(e)}")
-        return None
+    Returns:
+        List of potential related domains
+    """
+    # Extract main domain without subdomains
+    parts = domain.split('.')
+    if len(parts) > 2:
+        main_domain = '.'.join(parts[-2:])
+    else:
+        main_domain = domain
+    
+    # Strip www prefix
+    main_domain = re.sub(r'^www\.', '', main_domain)
+    
+    # Get company name from domain
+    company_name = main_domain.split('.')[0]
+    
+    # Generate common variations of corporate domains
+    potential_domains = [
+        main_domain,
+        f"{company_name}inc.com",
+        f"{company_name}-inc.com",
+        f"{company_name}corp.com",
+        f"{company_name}legal.com",
+        f"{company_name}hq.com",
+        f"about.{main_domain}",
+        f"legal.{main_domain}",
+        f"corporate.{main_domain}",
+        f"policies.{main_domain}",
+        f"terms.{main_domain}",
+        f"help.{main_domain}",
+        f"docs.{main_domain}",
+        f"wiki.{main_domain}"
+    ]
+    
+    # Return unique domains
+    return list(set(potential_domains))
 
 async def find_tos_via_html_inspection(url: str) -> str:
     """Try to find Terms of Service via HTML inspection with an optimized approach."""
@@ -3642,21 +3368,6 @@ async def find_tos_via_html_inspection(url: str) -> str:
                         'terms',
                         'conditions of use',
                         'legal notices'
-                    ];
-                    
-                    // URL patterns that commonly indicate ToS pages
-                    const tosUrlPatterns = [
-                        '/terms',
-                        '/tos',
-                        '/terms-of-service',
-                        '/terms-of-use',
-                        '/terms-and-conditions',
-                        '/legal/terms',
-                        '/legal',
-                        '/user-agreement',
-                        '/eula',
-                        '/policies/terms',
-                        '/policy/terms'
                     ];
                     
                     // Use an optimized selector to filter links before processing
@@ -3711,15 +3422,6 @@ async def find_tos_via_html_inspection(url: str) -> str:
                         if (text.includes('customer terms')) {
                             score += 180; // Significantly higher priority
                             if (!matchedTerm) matchedTerm = 'customer terms';
-                        }
-                        
-                        // URL pattern matching with weighted scoring
-                        for (let i = 0; i < tosUrlPatterns.length; i++) {
-                            const pattern = tosUrlPatterns[i];
-                            if (href.includes(pattern)) {
-                                score += 40 - i;
-                                if (!matchedTerm) matchedTerm = 'url:' + pattern;
-                            }
                         }
                         
                         // Additional bonus for having 'terms' in both text and URL
@@ -3782,67 +3484,3 @@ async def find_tos_via_html_inspection(url: str) -> str:
     except Exception as e:
         logger.error(f"Error during HTML inspection: {e}")
         return None
-
-def normalize_url(url: str) -> str:
-    """Normalize URL by adding protocol if missing."""
-    if not url.startswith('http'):
-        return 'https://' + url
-    return url
-
-def get_potential_corporate_domains(domain):
-    """
-    Get potential corporate domains that might host terms of service.
-    This helps with finding ToS on separate corporate domains.
-    
-    Args:
-        domain: Original domain, e.g. 'reddit.com'
-        
-    Returns:
-        List of potential related domains
-    """
-    # Extract main domain without subdomains
-    parts = domain.split('.')
-    if len(parts) > 2:
-        main_domain = '.'.join(parts[-2:])
-    else:
-        main_domain = domain
-    
-    # Strip www prefix
-    main_domain = re.sub(r'^www\.', '', main_domain)
-    
-    # Known corporate domain patterns - dynamic, not hardcoded exceptions
-    corporate_patterns = [
-        # Format: (domain_regex, corporate_domain_format)
-        (r'reddit\.com$', "redditinc.com"),
-        (r'instagram\.com$', "facebook.com"),  # Instagram owned by Facebook
-        (r'threads\.net$', "facebook.com"),    # Threads owned by Facebook
-        (r'whatsapp\.com$', "whatsapp.com"),
-        (r'linkedin\.com$', "linkedin.com"),
-        (r'twitter\.com$', "x.com"),
-        (r'tiktok\.com$', "tiktok.com"),
-        (r'youtube\.com$', "google.com"),
-        # Add more as patterns are identified
-    ]
-    
-    potential_domains = [main_domain]
-    
-    # Add corporate domains based on patterns
-    for pattern, corporate_domain in corporate_patterns:
-        if re.search(pattern, main_domain):
-            potential_domains.append(corporate_domain)
-    
-    # Common variations
-    company_name = main_domain.split('.')[0]
-    potential_domains.extend([
-        f"{company_name}inc.com",
-        f"{company_name}-inc.com",
-        f"about.{main_domain}",
-        f"legal.{main_domain}",
-        f"corporate.{main_domain}",
-        f"{company_name}corp.com",
-        f"{company_name}legal.com",
-        f"{company_name}hq.com",
-    ])
-    
-    # Return unique domains
-    return list(set(potential_domains))
