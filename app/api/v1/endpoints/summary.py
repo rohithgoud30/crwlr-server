@@ -2,6 +2,7 @@ from fastapi import APIRouter, Response, HTTPException
 import httpx
 import logging
 import re
+import os
 from app.core.config import settings
 from app.models.summary import SummaryRequest, SummaryResponse
 from app.models.extract import ExtractResponse, ExtractRequest
@@ -52,11 +53,20 @@ async def generate_summary(request: SummaryRequest, response: Response) -> Summa
                 
         logger.info(f"Processing summary request for document type: {document_type}")
         
-        # Get API key from environment variable
+        # Get API key from multiple possible sources
         API_KEY = settings.GEMINI_API_KEY
         
+        # Try to get API key directly from environment if not in settings
         if not API_KEY:
-            logger.error("GEMINI_API_KEY not found in environment variables")
+            API_KEY = os.environ.get("GEMINI_API_KEY")
+            if API_KEY:
+                logger.info("Found GEMINI_API_KEY in environment variables")
+            
+        # Log API key status (without revealing the key)
+        logger.info(f"GEMINI_API_KEY status: {'Available' if API_KEY else 'Not Available'}")
+        
+        if not API_KEY:
+            logger.error("GEMINI_API_KEY not found in environment variables or settings")
             response.status_code = 500
             return SummaryResponse(
                 url=base_url,
@@ -122,10 +132,16 @@ Here is the document content:
             }]
         }
         
+        # Log that we're about to make the API request
+        logger.info(f"Sending request to Gemini API for {document_type} summary")
+        
         # Send API request
         async with httpx.AsyncClient() as client:
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b-001:generateContent?key={API_KEY}"
+            logger.info(f"Using Gemini API URL: {api_url.split('?key=')[0]}") # Log URL without the API key
+            
             api_response = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b-001:generateContent?key={API_KEY}",
+                api_url,
                 headers={"Content-Type": "application/json"},
                 json=json_payload,
                 timeout=60.0
@@ -144,6 +160,7 @@ Here is the document content:
             
             # Parse response
             response_data = api_response.json()
+            logger.info("Successfully received response from Gemini API")
             
             # Extract text from response
             try:
