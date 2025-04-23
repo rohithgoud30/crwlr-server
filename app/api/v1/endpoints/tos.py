@@ -168,6 +168,115 @@ def normalize_domain(url):
         return url  # Return original URL if parsing fails
 
 
+def is_likely_user_generated_content(url):
+    """
+    Check if a URL is likely to be user-generated content like a forum post, discussion, comment, etc.
+    
+    Args:
+        url: The URL to check
+        
+    Returns:
+        bool: True if the URL is likely user-generated content, False otherwise
+    """
+    if not url:
+        return False
+        
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        hostname = parsed.netloc.lower()
+        
+        # Known social/forum platforms
+        social_platforms = [
+            'reddit.com', 'twitter.com', 'facebook.com/groups', 'quora.com',
+            'stackoverflow.com', 'stackexchange.com', 'medium.com',
+            'discourse', 'community', 'forum', 'boards', 'disqus',
+            'github.com/issues', 'github.com/discussions', 'gist.github.com'
+        ]
+        
+        # Check for known social media/forum domains
+        for platform in social_platforms:
+            if platform in hostname:
+                # For social platforms, allow only specific legal paths
+                legal_paths = ['/terms', '/tos', '/terms-of-service', '/legal/terms', 
+                              '/legal', '/user-agreement', '/useragreement', '/terms-of-use']
+                
+                for legal_path in legal_paths:
+                    if path.startswith(legal_path):
+                        # This is actually a legal document path within a social platform
+                        return False
+                
+                # If we don't find a legal path pattern, assume it's user content
+                return True
+        
+        # Common patterns that indicate user content
+        user_content_patterns = [
+            r'/r/\w+',  # Reddit subreddits
+            r'/t/\w+',  # Discourse topics
+            r'/posts/\d+',  # Blog posts with ID
+            r'/discussions?/',  # Forum discussions
+            r'/threads?/',  # Forum threads
+            r'/comments?/',  # Comments section
+            r'/topic/\d+',  # Forum topics
+            r'/viewtopic',  # phpBB
+            r'/showthread',  # vBulletin, XenForo
+            r'/questions?/\d+',  # Stack Overflow, Quora
+            r'/answers?/\d+',  # Q&A sites
+            r'/profiles?/',  # User profiles
+            r'/users?/\w+',  # User pages
+            r'/u/\w+',  # User shorthand
+            r'/p/\w+',  # Instagram, TikTok posts
+            r'/status/\d+',  # Twitter status
+            r'/tweet/',  # Tweet
+            r'/events?/',  # Event pages
+            r'/groups?/',  # Group pages
+            r'/blogs?/',  # Blog posts
+            r'/articles?/',  # Article pages
+            r'/reviews?/',  # Review pages
+            r'/members?/',  # Member pages
+            r'/videos?/',  # Video pages
+            r'/photos?/'  # Photo pages
+        ]
+        
+        for pattern in user_content_patterns:
+            if re.search(pattern, path):
+                return True
+                
+        # Check for path segments indicating user content
+        content_indicators = [
+            'article', 'post', 'blog', 'thread', 'topic', 'discussion', 'comment', 
+            'forum', 'question', 'answer', 'review', 'community', 'viewpost', 
+            'viewthread', 'profile', 'user', 'member', 'status', 'tweet'
+        ]
+        
+        segments = path.split('/')
+        for segment in segments:
+            segment = segment.lower()
+            for indicator in content_indicators:
+                if indicator in segment:
+                    return True
+        
+        # Look for typical IDs in user content
+        # Common alphanumeric ID patterns
+        if (re.search(r'/[a-z0-9]{8,}/?$', path) or 
+            re.search(r'/[a-z0-9]{6,}\-[a-z0-9]{6,}/?$', path) or
+            re.search(r'/\d{5,}/?$', path)):
+            return True
+            
+        # Check for query parameters that indicate a discussion
+        query_params = parsed.query.lower()
+        discussion_params = ['threadid', 'postid', 'commentid', 'forumid', 'topicid', 'discussionid']
+        
+        for param in discussion_params:
+            if param in query_params:
+                return True
+                
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking if URL is user-generated content: {e}")
+        return False
+
 @router.post("/tos", response_model=ToSResponse, status_code=status.HTTP_200_OK)
 async def find_tos(request: ToSRequest) -> ToSResponse:
     """
@@ -222,14 +331,19 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         logger.info("Attempting to find ToS via HTML inspection...")
         tos_url = await find_tos_via_html_inspection(url)
         if tos_url:
-            logger.info(f"Found ToS via HTML inspection: {tos_url}")
-            return ToSResponse(
-                url=url,
-                tos_url=tos_url,
-                success=True,
-                message="Terms of Service found via HTML inspection",
-                method_used="html_inspection"
-            )
+            # Validate the ToS URL isn't a user content page
+            if is_likely_user_generated_content(tos_url):
+                logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                # Don't return this result, continue to other methods
+            else:
+                logger.info(f"Found ToS via HTML inspection: {tos_url}")
+                return ToSResponse(
+                    url=url,
+                    tos_url=tos_url,
+                    success=True,
+                    message="Terms of Service found via HTML inspection",
+                    method_used="html_inspection"
+                )
         
         # Use browser approach
         playwright = await async_playwright().start()
@@ -248,110 +362,273 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 # Try DuckDuckGo search
                 try:
                     logger.info("Trying DuckDuckGo search fallback...")
-                    ddg_result = await duckduckgo_search_fallback(domain, page)
-                    if ddg_result:
-                        logger.info(f"Found ToS via DuckDuckGo search: {ddg_result}")
-                        return ToSResponse(
-                            url=url,
-                            tos_url=ddg_result,
-                            success=True,
-                            message="Terms of Service found via DuckDuckGo search",
-                            method_used="duckduckgo_search"
-                        )
+                    tos_url = await duckduckgo_search_fallback(domain, page)
+                    if tos_url:
+                        # Validate the ToS URL isn't a user content page
+                        if is_likely_user_generated_content(tos_url):
+                            logger.warning(f"DuckDuckGo result appears to be user-generated content: {tos_url}")
+                            # Skip this result, continue to other methods
+                        else:
+                            return ToSResponse(
+                                url=url,
+                                tos_url=tos_url,
+                                success=True,
+                                message="Terms of Service found via DuckDuckGo search",
+                                method_used="duckduckgo_search"
+                            )
                 except Exception as e:
-                    logger.error(f"Error with DuckDuckGo search: {e}")
-
+                    logger.warning(f"DuckDuckGo search failed: {e}")
+                
                 # Try Bing search
                 try:
                     logger.info("Trying Bing search fallback...")
-                    bing_result = await bing_search_fallback(domain, page)
-                    if bing_result:
-                                logger.info(f"Found ToS via Bing search: {bing_result}")
-                                return ToSResponse(
-                                    url=url,
-                                    tos_url=bing_result,
-                                    success=True,
-                                    message="Terms of Service found via Bing search",
-                                    method_used="bing_search"
-                                )
+                    tos_url = await bing_search_fallback(domain, page)
+                    if tos_url:
+                        # Validate the ToS URL isn't a user content page
+                        if is_likely_user_generated_content(tos_url):
+                            logger.warning(f"Bing result appears to be user-generated content: {tos_url}")
+                            # Skip this result, continue to other methods
+                        else:
+                            return ToSResponse(
+                                url=url,
+                                tos_url=tos_url,
+                                success=True,
+                                message="Terms of Service found via Bing search",
+                                method_used="bing_search"
+                            )
                 except Exception as e:
-                    logger.error(f"Error with Bing search: {e}")
+                    logger.warning(f"Bing search failed: {e}")
                 
-                # Try Yahoo search
+                # Try Yahoo search as a last resort
                 try:
                     logger.info("Trying Yahoo search fallback...")
-                    yahoo_result = await yahoo_search_fallback(domain, page)
-                    if yahoo_result:
-                        logger.info(f"Found ToS via Yahoo search: {yahoo_result}")
-                        return ToSResponse(
-                            url=url,
-                            tos_url=yahoo_result,
-                            success=True,
-                            message="Terms of Service found via Yahoo search",
-                            method_used="yahoo_search"
-                        )
+                    tos_url = await yahoo_search_fallback(domain, page)
+                    if tos_url:
+                        # Validate the ToS URL isn't a user content page
+                        if is_likely_user_generated_content(tos_url):
+                            logger.warning(f"Yahoo result appears to be user-generated content: {tos_url}")
+                            # Don't return this result, continue to other methods
+                        else:
+                            return ToSResponse(
+                                url=url,
+                                tos_url=tos_url,
+                                success=True,
+                                message="Terms of Service found via Yahoo search",
+                                method_used="yahoo_search"
+                            )
                 except Exception as e:
-                    logger.error(f"Error with Yahoo search: {e}")
+                    logger.warning(f"Yahoo search failed: {e}")
                 
-                # If all searches fail, return navigation failed
+                # All search methods failed
                 return ToSResponse(
                     url=url,
+                    tos_url=None,
                     success=False,
-                    message="Failed to navigate to URL",
-                    method_used="navigation_failed"
+                    message="Could not find Terms of Service via any method",
+                    method_used="all_methods_failed"
                 )
             
-            # Try to find user agreement or customer terms links FIRST for highest priority
-            logger.info("Attempting to find ToS via user/customer terms (highest priority)...")
-            tos_url = await find_user_customer_terms_links(page)
-            if tos_url:
-                logger.info(f"Found ToS via user/customer terms: {tos_url}")
-            return ToSResponse(
+            # Successfully navigated to the page, now analyze it for ToS links
+            logger.info("Successfully navigated to page, analyzing...")
+            
+            # Check if there are "user" or "customer" specific terms links that we should prioritize
+            try:
+                user_agreement_url = await find_user_customer_terms_links(page)
+                if user_agreement_url:
+                    if is_likely_user_generated_content(user_agreement_url):
+                        logger.warning(f"Found user agreement URL appears to be user-generated content: {user_agreement_url}")
+                        # Don't return this result, continue to other methods
+                    else:
+                        logger.info(f"Found high-priority user/customer terms: {user_agreement_url}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=user_agreement_url,
+                            success=True,
+                            message="User agreement/terms found with high priority",
+                            method_used="user_customer_terms"
+                        )
+            except Exception as e:
+                logger.error(f"Error finding user/customer terms: {e}")
+            
+            # Try more comprehensive link scanning
+            logger.info("Scanning for ToS links...")
+            unverified_result = None
+            
+            # Step 1: Find all potential ToS links on the page
+            try:
+                tos_url = await find_all_links_js(page, browser_context)
+                if tos_url:
+                    if is_likely_user_generated_content(tos_url):
+                        logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                        # Save as unverified but continue looking for better results
+                        unverified_result = tos_url
+                    else:
+                        logger.info(f"Found ToS via link scanning: {tos_url}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=tos_url,
+                            success=True,
+                            message="Terms of Service found via link scanning",
+                            method_used="link_scanning"
+                        )
+            except Exception as e:
+                logger.error(f"Error during link scanning: {e}")
+            
+            # Step 2: Try advanced techniques - matching links based on text
+            try:
+                tos_url = await find_matching_link(page, browser_context, unverified_result)
+                if tos_url:
+                    if is_likely_user_generated_content(tos_url):
+                        logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                        # Save as unverified but continue looking for better results
+                        if not unverified_result:
+                            unverified_result = tos_url
+                    else:
+                        logger.info(f"Found ToS via text matching: {tos_url}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=tos_url,
+                            success=True,
+                            message="Terms of Service found via text match scanning",
+                            method_used="text_matching"
+                        )
+            except Exception as e:
+                logger.error(f"Error during text matching: {e}")
+            
+            # Step 3: Try scroll-based techniques
+            try:
+                tos_url = await smooth_scroll_and_click(page, browser_context, unverified_result)
+                if tos_url:
+                    if is_likely_user_generated_content(tos_url):
+                        logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                        # Save as unverified but continue looking for better results
+                        if not unverified_result:
+                            unverified_result = tos_url
+                    else:
+                        logger.info(f"Found ToS via smooth scrolling: {tos_url}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=tos_url,
+                            success=True,
+                            message="Terms of Service found via smooth scrolling",
+                            method_used="smooth_scrolling"
+                        )
+            except Exception as e:
+                logger.error(f"Error during smooth scrolling: {e}")
+            
+            # Step 4: Analyze the page as a whole
+            try:
+                tos_url = await analyze_landing_page(page, browser_context, unverified_result)
+                if tos_url:
+                    if is_likely_user_generated_content(tos_url):
+                        logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                        # Save as unverified but continue looking for better results
+                        if not unverified_result:
+                            unverified_result = tos_url
+                    else:
+                        logger.info(f"Found ToS via page analysis: {tos_url}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=tos_url,
+                            success=True,
+                            message="Terms of Service found via page analysis",
+                            method_used="page_analysis"
+                        )
+            except Exception as e:
+                logger.error(f"Error during page analysis: {e}")
+            
+            # Step 5: Check if we can find ToS via common paths
+            try:
+                logger.info("Trying common ToS paths...")
+                tos_url = await find_tos_via_common_paths(url)
+                if tos_url:
+                    if is_likely_user_generated_content(tos_url):
+                        logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                        # Save as unverified but continue looking for better results
+                        if not unverified_result:
+                            unverified_result = tos_url
+                    else:
+                        logger.info(f"Found ToS via common paths: {tos_url}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=tos_url,
+                            success=True,
+                            message="Terms of Service found via common paths",
+                            method_used="common_paths"
+                        )
+            except Exception as e:
+                logger.error(f"Error checking common paths: {e}")
+            
+            # Step 6: Try to find via privacy policy for domains where they're often linked
+            try:
+                logger.info("Trying to find ToS via privacy policy...")
+                tos_url = await find_tos_via_privacy_policy(page, browser_context)
+                if tos_url:
+                    if is_likely_user_generated_content(tos_url):
+                        logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                        # Save as unverified but continue looking for better results
+                        if not unverified_result:
+                            unverified_result = tos_url
+                    else:
+                        logger.info(f"Found ToS via privacy policy: {tos_url}")
+                        return ToSResponse(
+                            url=url,
+                            tos_url=tos_url,
+                            success=True,
+                            message="Terms of Service found via privacy policy link",
+                            method_used="privacy_policy"
+                        )
+            except Exception as e:
+                logger.error(f"Error finding ToS via privacy policy: {e}")
+            
+            # Step 7: If all else failed but we have an unverified result, use it as a last resort
+            # but only if it doesn't appear to be a UGC link
+            if unverified_result and not is_likely_user_generated_content(unverified_result):
+                logger.info(f"Using unverified result as last resort: {unverified_result}")
+                return ToSResponse(
                     url=url,
-                    tos_url=tos_url,
-                success=True,
-                    message="Terms of Service found via user/customer terms",
-                    method_used="user_terms"
+                    tos_url=unverified_result,
+                    success=True,
+                    message="Terms of Service found (low confidence)",
+                    method_used="unverified_result"
                 )
-                
-            # Try to find ToS via privacy policy check
-            logger.info("Attempting to find ToS via privacy policy...")
-            context = {}  # Create an empty context dictionary
-            tos_url = await find_tos_via_privacy_policy(page, context)
-            if tos_url:
-                logger.info(f"Found ToS via privacy policy check: {tos_url}")
-            return ToSResponse(
-                    url=url,
-                    tos_url=tos_url,
-                success=True,
-                    message="Terms of Service found via privacy policy",
-                    method_used="privacy_policy"
-            )
-        
-            # If we get here, we couldn't find the ToS
-            logger.warning(f"Could not find ToS for URL: {url}")
+            
+            # Nothing found after trying everything
+            logger.warning("Failed to find Terms of Service after trying all methods")
             return ToSResponse(
                 url=url,
+                tos_url=None,
                 success=False,
-                message="Could not find Terms of Service URL",
-                method_used="none"
-               )
-        finally:
-            # Ensure browser resources are cleaned up
-            await browser_context.close()
-            await browser.close()
-            await playwright.stop()
-    except Exception as e:
-        logger.error(f"Error processing request: {str(e)}", exc_info=True)
-        return ToSResponse(
-            url=request.url,
-                success=False,
-            message=f"Error: {str(e)}",
-                method_used="error"
+                message="Could not find Terms of Service via any method",
+                method_used="all_methods_failed"
             )
+        
+        except Exception as e:
+            logger.error(f"Error during ToS search: {e}")
+            return handle_error(url, unverified_result, str(e))
+            
+        finally:
+            # Clean up browser resources
+            try:
+                await browser_context.close()
+                await browser.close()
+                await playwright.stop()
+            except Exception as cleanup_error:
+                logger.error(f"Error during browser cleanup: {cleanup_error}")
+    
+    except Exception as e:
+        logger.error(f"Unexpected error in find_tos: {e}")
+        traceback.print_exc()
+        return ToSResponse(
+            url=url,
+            tos_url=None,
+            success=False,
+            message=f"Unexpected error: {str(e)}",
+            method_used="error"
+        )
     finally:
-        end_time = time.time()
-        logger.info(f"Total processing time: {end_time - start_time:.2f} seconds")
+        execution_time = time.time() - start_time
+        logger.info(f"TOS finder completed in {execution_time:.2f} seconds")
 
 
 async def setup_browser(playwright=None):
@@ -1060,44 +1337,6 @@ async def smooth_scroll_and_click(
         return None, page, unverified_result
 
 
-def is_likely_registration_or_login_page(url: str) -> bool:
-    """
-    Check if a URL is likely a registration, login or authentication page.
-
-    Args:
-        url: URL to check
-
-    Returns:
-        bool: True if URL is likely a registration/login page
-    """
-    url_lower = url.lower()
-
-    # Patterns that indicate registration or login pages
-    suspicious_patterns = [
-        "/register",
-        "/signup",
-        "/login",
-        "/signin",
-        "/registration",
-        "/create-account",
-        "/join",
-        "/auth/",
-        "/openid",
-        "/ap/register",
-        "registration",
-        "signup",
-        "create_account",
-        "createaccount",
-        "authentication",
-        "returnto",
-        "redirect",
-        "callback",
-    ]
-
-    # Check if URL contains any suspicious patterns
-    return any(pattern in url_lower for pattern in suspicious_patterns)
-
-
 async def analyze_landing_page(page, context, unverified_result=None):
     """
     Analyze landing page content to detect mentions of terms of service.
@@ -1633,9 +1872,57 @@ def score_tos_url_by_path_specificity(url):
     try:
         parsed = urlparse(url)
         path = parsed.path.lower()
+        hostname = parsed.netloc.lower()
         
         # Base score
         score = 100
+        
+        # Reject user-generated content platforms outright if path structure suggests a community post
+        # Forum patterns
+        forum_patterns = [
+            r'/r/\w+', # Reddit subreddits
+            r'/t/\w+', # Discourse topics
+            r'/discussion',
+            r'/forum',
+            r'/thread',
+            r'/comment',
+            r'/topic',
+            r'/post',
+            r'/viewtopic',
+            r'/showthread',
+            r'/board',
+            r'/f/',
+            r'/profile/',
+            r'/user/',
+            r'/u/',
+            r'/viewpost',
+            r'/status',
+            r'/tweets'
+        ]
+        
+        for pattern in forum_patterns:
+            if re.search(pattern, path):
+                return 0  # Immediately reject with zero score - this is a discussion, not a ToS
+        
+        # Check for IDs in paths that suggest user content
+        # Common alphanumeric ID patterns
+        if re.search(r'/[a-z0-9]{6,}/?$', path) or re.search(r'/[a-z0-9-]{10,}/?$', path):
+            # Likely a generated content ID - significantly reduce score
+            score -= 80
+        
+        # Look for patterns suggesting this is a blog post/article
+        content_indicators = [
+            'comments', 'article', 'blogpost', 'post-', 'thread-', 'viewpost', 
+            'discussion', 'community', 'forum-', 'question', 'answer', 'response'
+        ]
+        
+        for indicator in content_indicators:
+            if indicator in path:
+                score -= 70
+        
+        # Check for numeric IDs in the URL (often indicates content pages)
+        if re.search(r'/\d+/?$', path) or re.search(r'[?&]id=\d+', parsed.query.lower()):
+            score -= 60
         
         # Preferred general ToS patterns (highest priority)
         if re.search(r'/terms/?$', path) or re.search(r'/tos/?$', path):
@@ -1646,20 +1933,29 @@ def score_tos_url_by_path_specificity(url):
             score += 90
         elif re.search(r'/terms-and-conditions/?$', path):
             score += 85
-        elif re.search(r'/legal/terms/?$', path):
+        elif re.search(r'/legal/terms/?$', path) or re.search(r'/terms-policies/?$', path):
             score += 80
-        elif re.search(r'/user-agreement/?$', path):
+        elif re.search(r'/user-agreement/?$', path) or re.search(r'/useragreement/?$', path):
             score += 75
+        elif re.search(r'/legal/?$', path) and not re.search(r'/legal/.+', path):
+            score += 65
+        elif re.search(r'/policies/?$', path) and not re.search(r'/policies/.+', path):
+            score += 60
         
-        # Reduce score for product-specific or feature-specific ToS
-        # More path segments generally means more specific terms
+        # Look at the path structure
         segments = [s for s in path.split('/') if s]
-        if len(segments) > 2:
-            score -= (len(segments) - 2) * 10
+        
+        # Fewer segments usually means more general/root document
+        if len(segments) <= 2:
+            score += 20
+        else:
+            # Reduce score for more specific paths (deeper in the hierarchy)
+            score -= (len(segments) - 2) * 15
             
         # Penalize paths containing specific features/products
         specific_terms = ['ai', 'api', 'developers', 'premium', 'pro', 'business', 
-                         'enterprise', 'app', 'mobile', 'data', 'privacy', 'cookies']
+                         'enterprise', 'app', 'mobile', 'data', 'privacy', 'cookies', 
+                         'update', 'blog', 'help', 'support', 'faq', 'changes']
         
         for term in specific_terms:
             if term in path:
@@ -1669,17 +1965,17 @@ def score_tos_url_by_path_specificity(url):
         if 'ai' in path or 'artificial-intelligence' in path or 'machine-learning' in path:
             score -= 40
             
-        # Extra boost for paths that suggest user/customer agreement
-        if 'user' in path and ('agreement' in path or 'terms' in path):
+        # Extra boost for paths that suggest official user/customer agreement
+        if ('user' in path and ('agreement' in path or 'terms' in path)) or 'useragreement' in path:
             score += 30
         if 'customer' in path and ('agreement' in path or 'terms' in path):
             score += 30
-            
+        
+        # Normalize score to a sane range    
         return max(0, score)  # Ensure score doesn't go negative
     except Exception as e:
         logger.error(f"Error scoring ToS URL: {e}")
         return 0
-
 
 async def yahoo_search_fallback(domain, page):
     """Search for terms of service using Yahoo Search."""
@@ -1788,6 +2084,29 @@ async def yahoo_search_fallback(domain, page):
                             return false;
                         }
                         
+                        // 5. Filter out forum/discussion content
+                        if (/\/r\/\w+/.test(urlPath) || // Reddit
+                            /\/t\/\w+/.test(urlPath) || // Discourse
+                            urlPath.includes('/discussion/') ||
+                            urlPath.includes('/forum/') ||
+                            urlPath.includes('/thread/') ||
+                            urlPath.includes('/comment/') ||
+                            urlPath.includes('/viewtopic') ||
+                            urlPath.includes('/showthread') ||
+                            urlPath.includes('/profile/') ||
+                            urlPath.includes('/user/')) {
+                            return false;
+                        }
+                        
+                        // 6. Exclude specific content patterns that suggest user-generated content
+                        const contentPatterns = ['comments', 'article', 'blogpost', 'discussion', 
+                                              'community', 'forum', 'question', 'answer'];
+                        for (const pattern of contentPatterns) {
+                            if (urlPath.includes('/' + pattern)) {
+                                return false;
+                            }
+                        }
+                        
                         return true;
                     } catch (e) {
                         return false;
@@ -1851,8 +2170,18 @@ async def yahoo_search_fallback(domain, page):
                     else if (urlLower.includes('terms')) score += 20; // Lower priority for generic terms
                     else if (urlLower.includes('legal')) score += 20;
                     
-                    // Penalize AI or product-specific terms URLs
+                    // Penalize URLs with forum patterns
                     const urlPath = new URL(urlLower).pathname;
+                    if (urlPath.includes('/r/') ||  // Reddit subreddit
+                        urlPath.includes('/comments/') ||  // Reddit comments
+                        urlPath.includes('/discussion/') ||
+                        urlPath.includes('/forum/') ||
+                        urlPath.includes('/thread/') ||
+                        urlPath.includes('/community/')) {
+                        score -= 100;  // Very strong penalty
+                    }
+                    
+                    // Penalize AI or product-specific terms URLs
                     if (urlPath.includes('/ai/')) score -= 30;
                     if (urlPath.includes('/artificial-intelligence/')) score -= 30;
                     if (urlPath.includes('/ai-terms')) score -= 30;
@@ -1892,10 +2221,16 @@ async def yahoo_search_fallback(domain, page):
             # Re-sort based on the combined scores
             search_results.sort(key=lambda x: x["final_score"], reverse=True)
             
-            # Take the highest scoring result
-            best_result = search_results[0]
-            print(f"✅ Best Yahoo ToS result: {best_result['url']} (Score: {best_result['final_score']})")
-            return best_result["url"]
+            # Only consider results with a minimum combined score to avoid completely wrong matches
+            valid_results = [r for r in search_results if r["final_score"] > 50]
+            
+            if valid_results:
+                # Take the highest scoring result
+                best_result = valid_results[0]
+                print(f"✅ Best Yahoo ToS result: {best_result['url']} (Score: {best_result['final_score']})")
+                return best_result["url"]
+            else:
+                print("No valid ToS results found after scoring - all candidates had too low scores")
         
         return None
     except Exception as e:
@@ -2003,6 +2338,29 @@ async def bing_search_fallback(domain, page):
                             return false;
                         }
                         
+                        // 4. Filter out forum/discussion content
+                        if (/\/r\/\w+/.test(urlPath) || // Reddit
+                            /\/t\/\w+/.test(urlPath) || // Discourse
+                            urlPath.includes('/discussion/') ||
+                            urlPath.includes('/forum/') ||
+                            urlPath.includes('/thread/') ||
+                            urlPath.includes('/comment/') ||
+                            urlPath.includes('/viewtopic') ||
+                            urlPath.includes('/showthread') ||
+                            urlPath.includes('/profile/') ||
+                            urlPath.includes('/user/')) {
+                            return false;
+                        }
+                        
+                        // 5. Exclude specific content patterns that suggest user-generated content
+                        const contentPatterns = ['comments', 'article', 'blogpost', 'discussion', 
+                                             'community', 'forum', 'question', 'answer'];
+                        for (const pattern of contentPatterns) {
+                            if (urlPath.includes('/' + pattern)) {
+                                return false;
+                            }
+                        }
+                        
                         return true;
                     } catch (e) {
                         return false;
@@ -2069,8 +2427,18 @@ async def bing_search_fallback(domain, page):
                     else if (urlLower.includes('terms')) score += 20;
                     else if (urlLower.includes('legal')) score += 20;
                     
-                    // Penalize AI or product-specific terms URLs
+                    // Penalize URLs with forum patterns
                     const urlPath = new URL(urlLower).pathname;
+                    if (urlPath.includes('/r/') ||  // Reddit subreddit
+                        urlPath.includes('/comments/') ||  // Reddit comments
+                        urlPath.includes('/discussion/') ||
+                        urlPath.includes('/forum/') ||
+                        urlPath.includes('/thread/') ||
+                        urlPath.includes('/community/')) {
+                        score -= 100;  // Very strong penalty
+                    }
+                    
+                    // Penalize AI or product-specific terms URLs
                     if (urlPath.includes('/ai/')) score -= 30;
                     if (urlPath.includes('/artificial-intelligence/')) score -= 30;
                     if (urlPath.includes('/ai-terms')) score -= 30;
@@ -2110,10 +2478,16 @@ async def bing_search_fallback(domain, page):
             # Re-sort based on the combined scores
             search_results.sort(key=lambda x: x["final_score"], reverse=True)
             
-            # Take the highest scoring result
-            best_result = search_results[0]
-            print(f"✅ Best Bing ToS result: {best_result['url']} (Score: {best_result['final_score']})")
-            return best_result["url"]
+            # Only consider results with a minimum combined score to avoid completely wrong matches
+            valid_results = [r for r in search_results if r["final_score"] > 50]
+            
+            if valid_results:
+                # Take the highest scoring result
+                best_result = valid_results[0]
+                print(f"✅ Best Bing ToS result: {best_result['url']} (Score: {best_result['final_score']})")
+                return best_result["url"]
+            else:
+                print("No valid ToS results found after scoring - all candidates had too low scores")
             
         return None
     except Exception as e:
@@ -2171,6 +2545,32 @@ async def duckduckgo_search_fallback(domain, page):
                         continue;
                     }
                     
+                    // Filter out forum/discussion content
+                    if (/\/r\/\w+/.test(urlPath) || // Reddit
+                        /\/t\/\w+/.test(urlPath) || // Discourse
+                        urlPath.includes('/discussion/') ||
+                        urlPath.includes('/forum/') ||
+                        urlPath.includes('/thread/') ||
+                        urlPath.includes('/comment/') ||
+                        urlPath.includes('/viewtopic') ||
+                        urlPath.includes('/showthread') ||
+                        urlPath.includes('/profile/') ||
+                        urlPath.includes('/user/')) {
+                        continue;  // Skip this URL
+                    }
+                    
+                    // Filter out content patterns
+                    const contentPatterns = ['comments', 'article', 'blogpost', 'discussion', 
+                                         'community', 'forum', 'question', 'answer'];
+                    let isContentPattern = false;
+                    for (const pattern of contentPatterns) {
+                        if (urlPath.includes('/' + pattern)) {
+                            isContentPattern = true;
+                            break;
+                        }
+                    }
+                    if (isContentPattern) continue;
+                    
                     // Score the result
                     let score = 0;
                     const text = link.textContent.trim().toLowerCase();
@@ -2192,6 +2592,16 @@ async def duckduckgo_search_fallback(domain, page):
                     else if (href.includes('tos')) score += 35;
                     else if (href.includes('terms')) score += 20;
                     else if (href.includes('legal')) score += 20;
+                    
+                    // Penalize URLs with forum patterns
+                    if (urlPath.includes('/r/') ||  // Reddit subreddit
+                        urlPath.includes('/comments/') ||  // Reddit comments
+                        urlPath.includes('/discussion/') ||
+                        urlPath.includes('/forum/') ||
+                        urlPath.includes('/thread/') ||
+                        urlPath.includes('/community/')) {
+                        score -= 100;  // Very strong penalty
+                    }
                     
                     // Penalize AI or product-specific terms URLs
                     if (urlPath.includes('/ai/')) score -= 30;
@@ -2246,10 +2656,16 @@ async def duckduckgo_search_fallback(domain, page):
             # Re-sort based on the combined scores
             search_results.sort(key=lambda x: x["final_score"], reverse=True)
             
-            # Take the highest scoring result
-            best_result = search_results[0]
-            print(f"✅ Best DuckDuckGo ToS result: {best_result['url']} (Score: {best_result['final_score']})")
-            return best_result["url"]
+            # Only consider results with a minimum combined score to avoid completely wrong matches
+            valid_results = [r for r in search_results if r["final_score"] > 50]
+            
+            if valid_results:
+                # Take the highest scoring result
+                best_result = valid_results[0]
+                print(f"✅ Best DuckDuckGo ToS result: {best_result['url']} (Score: {best_result['final_score']})")
+                return best_result["url"]
+            else:
+                print("No valid ToS results found after scoring - all candidates had too low scores")
         
         return None
     except Exception as e:
