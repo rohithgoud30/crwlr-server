@@ -1,8 +1,9 @@
 from pydantic import BaseModel, field_validator, HttpUrl
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Literal
 
 class ExtractRequest(BaseModel):
     url: str  # URL to extract text from
+    document_type: Optional[Literal["tos", "pp"]] = None  # Type of legal document to find and extract
     
     @field_validator('url')
     @classmethod
@@ -19,8 +20,9 @@ class ExtractRequest(BaseModel):
 
 
 class ExtractResponse(BaseModel):
-    url: str  # Original URL that was processed
-    success: bool  # Whether the extraction was successful
+    url: str  # The actual document URL
+    document_type: Literal["tos", "pp"]  # Type of document (only "tos" or "pp" allowed)
     text: Optional[str] = None  # Extracted text content
-    message: str  # Status message
-    method_used: str  # Method used for extraction (standard, playwright, or pdf)
+    success: bool  # Indicates if the operation was successful
+    message: str  # Status message or additional information about the processing result
+    method_used: Literal["standard", "playwright", "pdf"]  # Method used for extraction

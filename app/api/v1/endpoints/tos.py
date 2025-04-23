@@ -879,13 +879,27 @@ async def find_matching_link(page, context, unverified_result=None):
 async def click_and_wait_for_navigation(page, element, timeout=2000):
     """Click a link and wait for navigation with shorter timeout."""
     try:
-        async with page.expect_navigation(
-            timeout=timeout, wait_until="domcontentloaded"
-        ):
+        # Store the current URL before clicking
+        current_url = page.url
+        
+        # Use page.expect_navigation for modern Playwright API
+        async with page.expect_navigation(timeout=timeout, wait_until="domcontentloaded") as navigation_info:
             await element.click()
-        return True
+            
+        # Wait for navigation to complete or timeout
+        try:
+            await navigation_info.value
+            return True
+        except Exception as e:
+            print(f"Navigation error: {str(e)}")
+            # Even if navigation times out, still return True if the URL changed
+            new_url = page.url
+            if new_url != current_url:
+                setattr(page, "_last_url", new_url)
+                return True
+            return False
     except Exception as e:
-        print(f"Navigation error: {e}")
+        print(f"Error in click_and_wait_for_navigation: {str(e)}")
         return False
 
 

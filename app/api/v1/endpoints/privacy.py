@@ -13,21 +13,22 @@ from app.models.privacy import PrivacyRequest, PrivacyResponse
 async def click_and_wait_for_navigation(page, element, timeout=2000):
     """Click an element and wait for navigation, with optimized timeout."""
     try:
-        # Create a promise to wait for navigation
-        nav_promise = page.wait_for_navigation(timeout=timeout, wait_until="domcontentloaded")
+        # Store the current URL before clicking
+        current_url = page.url
         
-        # Click the element
-        await element.click()
-        
+        # Use page.wait_for_load_state instead of wait_for_navigation
+        async with page.expect_navigation(timeout=timeout, wait_until="domcontentloaded") as navigation_info:
+            await element.click()
+            
         # Wait for navigation to complete or timeout
         try:
-            await nav_promise
+            await navigation_info.value
             return True
         except Exception as e:
             print(f"Navigation error: {str(e)}")
             # Even if navigation times out, still return True if the URL changed
             new_url = page.url
-            if new_url != getattr(page, "_last_url", None):
+            if new_url != current_url:
                 setattr(page, "_last_url", new_url)
                 return True
             return False
@@ -739,7 +740,9 @@ async def extract_play_store_privacy_link(page):
 
 @router.post("/privacy", response_model=PrivacyResponse)
 async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
-    """Find Privacy Policy page for a given URL."""
+    """
+    Find the Privacy Policy URL for a given website.
+    """
     original_url = request.url
 
     if not original_url:

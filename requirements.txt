@@ -20,6 +20,10 @@ beautifulsoup4==4.12.3
 html2text==2024.2.26
 PyPDF2==3.0.1
 
+# NLP and Text Analysis
+nltk==3.8.1
+textstat==0.7.3
+
 # Web Automation
 playwright==1.42.0
 
@@ -34,3 +38,12 @@ pytest-cov==4.1.0
 
 # Type Hints
 typing-extensions==4.10.0
+
+# Database
+sqlalchemy==2.0.27
+psycopg2-binary==2.9.9
+# NOTE: google-cloud-sql-connector may not be compatible with Python 3.12
+# If cloud deployment is needed, downgrade to Python 3.11
+# google-cloud-sql-connector==1.3.0
+pg8000==1.30.5
+typer==0.9.0

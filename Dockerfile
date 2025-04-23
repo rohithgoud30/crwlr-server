@@ -39,7 +39,12 @@ RUN apt-get update && apt-get install -y \
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Uncomment the google-cloud-sql-connector in requirements.txt for Docker builds
+RUN sed -i 's/# google-cloud-sql-connector==1.3.0/google-cloud-sql-connector==1.3.0/' requirements.txt && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Install NLTK data for text processing
+RUN python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
 
 # Install Playwright and browsers
 RUN pip install playwright && \

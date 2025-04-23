@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Response, HTTPException
+from fastapi import APIRouter, Response, HTTPException, Depends
 from urllib.parse import urlparse, urljoin
 import requests
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
@@ -10,7 +10,21 @@ import logging
 from html2text import html2text
 import io
 import PyPDF2
+from typing import Optional, Union, Dict, List, Tuple
+import random
+import hashlib
+import time
+from functools import lru_cache
+import concurrent.futures
+
 from app.models.extract import ExtractRequest, ExtractResponse
+from app.models.tos import ToSResponse
+from app.models.privacy import PrivacyResponse
+from app.api.v1.endpoints.tos import find_tos
+from app.api.v1.endpoints.privacy import find_privacy_policy
+from app.models.tos import ToSRequest
+from app.models.privacy import PrivacyRequest
+
 # Filter out the XML parsed as HTML warning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -19,6 +33,51 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Enhanced in-memory cache with TTL and size limit
+CACHE = {}
+CACHE_TTL = 3600  # Cache expiry in seconds (1 hour)
+MAX_CACHE_SIZE = 500  # Maximum number of items in cache
+
+# Optimized timeouts
+STANDARD_TIMEOUT = 10  # Reduced from 15 seconds
+PLAYWRIGHT_TIMEOUT = 15000  # Reduced from 20000 ms
+URL_DISCOVERY_TIMEOUT = 8  # Reduced from 10 seconds
+
+# Extraction constants
+MIN_CONTENT_LENGTH = 100  # Minimum characters for valid content
+MAX_PDF_PAGES = 30  # Reduced from 50 pages
+PDF_EXTRACTION_CHUNK_SIZE = 5  # Number of pages to process in parallel
+
+# ThreadPoolExecutor for CPU-bound tasks
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+def get_from_cache(url: str) -> Optional[dict]:
+    """Get cached response if it exists and is not expired"""
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    cached_data = CACHE.get(cache_key)
+    if cached_data and time.time() < cached_data.get("expires_at", 0):
+        logger.info(f"Cache hit for URL: {url}")
+        return cached_data["data"]
+    return None
+
+def add_to_cache(url: str, data: dict):
+    """Add response to cache with expiry time and manage cache size"""
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    CACHE[cache_key] = {
+        "data": data,
+        "expires_at": time.time() + CACHE_TTL
+    }
+    
+    # Prune cache if it exceeds maximum size
+    if len(CACHE) > MAX_CACHE_SIZE:
+        # Remove oldest 20% of entries
+        entries = sorted(CACHE.items(), key=lambda x: x[1].get("expires_at", 0))
+        for i in range(int(MAX_CACHE_SIZE * 0.2)):
+            if i < len(entries):
+                del CACHE[entries[i][0]]
+    
+    logger.info(f"Added to cache: {url}")
 
 def sanitize_url(url: str) -> str:
     """
@@ -33,9 +92,6 @@ def sanitize_url(url: str) -> str:
         
     # Trim whitespace and control characters
     url = url.strip().strip('\r\n\t')
-    
-    # Log the original URL for debugging
-    logger.info(f"Validating URL: {url}")
     
     try:
         # Fix only the most common minor issues
@@ -63,11 +119,275 @@ def sanitize_url(url: str) -> str:
             logger.error(f"Domain lacks valid TLD: {url}")
             return ""
             
-        logger.info(f"URL validated: {url}")
         return url
     except Exception as e:
         logger.error(f"Error validating URL {url}: {str(e)}")
         return ""
+
+async def find_document_url(url: str, document_type: str, original_url: str) -> Tuple[str, bool, str]:
+    """
+    Find appropriate legal document URL with timeout handling.
+    Returns a tuple of (document_url, success, error_message)
+    """
+    try:
+        # Create a timeout for URL discovery to prevent long waits
+        discovery_timeout = asyncio.create_task(asyncio.sleep(URL_DISCOVERY_TIMEOUT))
+        
+        if document_type == "tos":
+            # Find ToS URL
+            tos_request = ToSRequest(url=url)
+            find_task = asyncio.create_task(find_tos(tos_request))
+            
+            done, pending = await asyncio.wait(
+                {find_task, discovery_timeout},
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            for task in pending:
+                task.cancel()
+            
+            if discovery_timeout in done:
+                return "", False, "Timeout while finding Terms of Service URL"
+            
+            tos_response = find_task.result()
+            
+            if not tos_response.success or not tos_response.tos_url:
+                return "", False, f"Failed to find Terms of Service URL: {tos_response.message}"
+            
+            return tos_response.tos_url, True, ""
+            
+        else:  # privacy policy
+            # Find Privacy Policy URL
+            pp_request = PrivacyRequest(url=url)
+            find_task = asyncio.create_task(find_privacy_policy(pp_request))
+            
+            done, pending = await asyncio.wait(
+                {find_task, discovery_timeout},
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            for task in pending:
+                task.cancel()
+            
+            if discovery_timeout in done:
+                return "", False, "Timeout while finding Privacy Policy URL"
+            
+            pp_response = find_task.result()
+            
+            if not pp_response.success or not pp_response.pp_url:
+                return "", False, f"Failed to find Privacy Policy URL: {pp_response.message}"
+            
+            return pp_response.pp_url, True, ""
+        
+    except Exception as e:
+        logger.error(f"Error finding document URL: {str(e)}")
+        return "", False, f"Error finding document URL: {str(e)}"
+
+@router.post("/extract", response_model=ExtractResponse)
+async def extract_text(
+    request: ExtractRequest, 
+    response: Response
+) -> ExtractResponse:
+    """
+    Takes a URL and extracts the text content.
+    
+    If document_type is provided (tos/privacy), it will:
+    1. Find the appropriate legal document URL
+    2. Extract the text content from the URL
+    3. Return both the document URL and the extracted text
+    
+    Otherwise, it extracts content directly from the provided URL.
+    
+    Supports PDF files, standard HTML pages, and JavaScript-heavy sites.
+    """
+    try:
+        original_url = request.url
+        url = sanitize_url(original_url)
+        
+        if not url:
+            response.status_code = 400
+            return ExtractResponse(
+                url=original_url,
+                document_type=request.document_type or "tos",
+                text=None,
+                success=False,
+                message="Invalid URL format",
+                method_used="standard"
+            )
+        
+        document_url = ""
+        document_type = request.document_type or "tos"
+        
+        # Check cache before processing
+        cache_key = f"{url}:{document_type}"
+        cached_result = get_from_cache(cache_key)
+        if cached_result:
+            return ExtractResponse(**cached_result)
+        
+        # Find the legal document URL if document_type is provided
+        if document_type in ["tos", "pp"]:
+            logger.info(f"Finding {document_type} URL for {url}")
+            
+            document_url, success, error_message = await find_document_url(url, document_type, original_url)
+            
+            if not success:
+                return ExtractResponse(
+                    url=original_url,
+                    document_type=document_type,
+                    text=None,
+                    success=False,
+                    message=error_message,
+                    method_used="standard"
+                )
+                
+            # Set the URL to the document URL since it was found
+            extraction_url = document_url
+            url_to_return = document_url
+        else:
+            # If no document_type specified, use the provided URL directly
+            extraction_url = url
+            document_url = url
+            # Default to "tos" as document_type since we need to use a valid Literal value
+            document_type = "tos"
+            url_to_return = url
+        
+        # Check cache again with the resolved document URL
+        doc_cache_key = f"{extraction_url}:{document_type}"
+        cached_doc_result = get_from_cache(doc_cache_key)
+        if cached_doc_result:
+            return ExtractResponse(**cached_doc_result)
+        
+        # Determine if URL is likely a PDF
+        is_pdf = is_pdf_url(extraction_url)
+        
+        # Concurrent extraction strategy
+        # Create tasks for different extraction methods based on URL type
+        tasks = []
+        
+        if is_pdf:
+            # For PDFs, only use PDF extraction
+            tasks.append(asyncio.create_task(extract_pdf(extraction_url, document_type, url_to_return)))
+        else:
+            # For HTML content, try both methods concurrently
+            tasks.append(asyncio.create_task(extract_standard_html(extraction_url, document_type, url_to_return)))
+            tasks.append(asyncio.create_task(extract_with_playwright(extraction_url, document_type, url_to_return)))
+        
+        # Wait for the first successful extraction or all to fail
+        for i, completed_task in enumerate(asyncio.as_completed(tasks)):
+            try:
+                result = await completed_task
+                if result.success and result.text:
+                    # Cancel other tasks as we've got a successful result
+                    for j, task in enumerate(tasks):
+                        if j != i and not task.done():
+                            task.cancel()
+                    
+                    # Cache successful result
+                    add_to_cache(doc_cache_key, result.dict())
+                    return result
+            except Exception as e:
+                logger.warning(f"Extraction task failed: {str(e)}")
+                continue
+        
+        # If all strategies failed
+        return ExtractResponse(
+            url=url_to_return,
+            document_type=document_type,
+            text=None,
+            success=False,
+            message="Failed to extract text content after trying all methods",
+            method_used="standard"
+        )
+            
+    except Exception as e:
+        logger.error(f"Error in extraction: {str(e)}")
+        return ExtractResponse(
+            url=original_url,
+            document_type=request.document_type or "tos",
+            text=None,
+            success=False,
+            message=f"Error in extraction: {str(e)}",
+            method_used="standard"
+        )
+
+async def extract_pdf(extraction_url: str, document_type: str, url_to_return: str) -> ExtractResponse:
+    """Extract text from PDF URL"""
+    logger.info(f"Attempting PDF extraction for: {extraction_url}")
+    try:
+        # Enhanced browser-like headers
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Accept': 'application/pdf,*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        # Download the PDF with reduced timeout
+        pdf_response = requests.get(extraction_url, headers=headers, timeout=STANDARD_TIMEOUT)
+        pdf_response.raise_for_status()
+        
+        # Check if content type is PDF
+        content_type = pdf_response.headers.get('Content-Type', '').lower()
+        if 'application/pdf' in content_type or is_pdf_url(extraction_url):
+            # Extract text from PDF
+            pdf_text = extract_text_from_pdf(pdf_response.content)
+            
+            if pdf_text and len(pdf_text.strip()) > MIN_CONTENT_LENGTH:  # Ensure we got meaningful content
+                return ExtractResponse(
+                    url=url_to_return,
+                    document_type=document_type,
+                    text=pdf_text,
+                    success=True,
+                    message="Successfully extracted text from PDF document",
+                    method_used="pdf"
+                )
+        
+        raise Exception("Not a valid PDF or content extraction failed")
+    except Exception as e:
+        logger.warning(f"PDF extraction failed: {str(e)}")
+        raise
+
+async def extract_standard_html(extraction_url: str, document_type: str, url_to_return: str) -> ExtractResponse:
+    """Extract text using standard requests and BeautifulSoup"""
+    logger.info(f"Attempting standard extraction for: {extraction_url}")
+    try:
+        # Enhanced browser-like headers for HTML content
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        # Use asyncio to make the request with a timeout
+        loop = asyncio.get_event_loop()
+        response_future = loop.run_in_executor(
+            None,
+            lambda: requests.get(extraction_url, headers=headers, timeout=STANDARD_TIMEOUT)
+        )
+        
+        # Wait for the request with a timeout
+        response_data = await asyncio.wait_for(response_future, timeout=STANDARD_TIMEOUT+1)
+        response_data.raise_for_status()
+        
+        # Parse the HTML
+        soup = BeautifulSoup(response_data.text, 'html.parser')
+        
+        # Extract text using optimized method
+        extracted_text = extract_content_from_soup(soup)
+        
+        if extracted_text and len(extracted_text.strip()) > MIN_CONTENT_LENGTH:  # Ensure we got meaningful content
+            return ExtractResponse(
+                url=url_to_return,
+                document_type=document_type,
+                text=extracted_text,
+                success=True,
+                message="Successfully extracted text content using standard method",
+                method_used="standard"
+            )
+        
+        raise Exception("Standard extraction didn't yield sufficient content")
+    except Exception as e:
+        logger.warning(f"Standard extraction failed: {str(e)}")
+        raise
 
 def is_pdf_url(url: str) -> bool:
     """Check if URL likely points to a PDF file based on extension."""
@@ -75,332 +395,158 @@ def is_pdf_url(url: str) -> bool:
     path = parsed_url.path.lower()
     return path.endswith('.pdf')
 
+def process_pdf_page_chunk(reader, start_page, end_page):
+    """Process a chunk of PDF pages in parallel"""
+    text = []
+    for page_num in range(start_page, min(end_page, len(reader.pages))):
+        page = reader.pages[page_num]
+        text.append(page.extract_text())
+    return "\n\n".join(text)
 
+@lru_cache(maxsize=100)
 def extract_text_from_pdf(pdf_content: bytes) -> str:
-    """Extract text from PDF content."""
+    """Extract text from PDF content with caching and parallel processing."""
     try:
         pdf_file = io.BytesIO(pdf_content)
         pdf_reader = PyPDF2.PdfReader(pdf_file)
         
-        text = []
-        for page_num in range(len(pdf_reader.pages)):
-            page = pdf_reader.pages[page_num]
-            text.append(page.extract_text())
+        # Limit to fewer pages for performance if PDF is very large
+        max_pages = min(len(pdf_reader.pages), MAX_PDF_PAGES)
+        
+        if max_pages <= 10:
+            # For small PDFs, extract sequentially
+            text = []
+            for page_num in range(max_pages):
+                page = pdf_reader.pages[page_num]
+                text.append(page.extract_text())
+            return "\n\n".join(text)
+        else:
+            # For larger PDFs, use parallel processing
+            chunks = []
+            chunk_size = PDF_EXTRACTION_CHUNK_SIZE
             
-        return "\n\n".join(text)
+            # Submit parallel tasks for each chunk
+            futures = []
+            with concurrent.futures.ThreadPoolExecutor() as exec:
+                for i in range(0, max_pages, chunk_size):
+                    end = min(i + chunk_size, max_pages)
+                    futures.append(exec.submit(process_pdf_page_chunk, pdf_reader, i, end))
+            
+            # Collect results
+            chunks = [future.result() for future in futures]
+            return "\n\n".join(chunks)
     except Exception as e:
         logger.error(f"Error extracting text from PDF: {str(e)}")
         raise
 
-
-@router.post("/extract", response_model=ExtractResponse)
-async def extract_text(request: ExtractRequest, response: Response) -> ExtractResponse:
-    """
-    Takes a URL (such as a Terms of Service or Privacy Policy URL) and extracts 
-    the text content from the webpage or PDF document.
-    
-    This endpoint uses multiple methods to attempt to extract text:
-    1. PDF extraction for PDF files
-    2. Standard requests + BeautifulSoup for HTML pages
-    3. Headless browser rendering with Playwright for JavaScript-heavy sites
-    """
-    # Sanitize the URL to handle malformed URLs
-    original_url = request.url
-    url = sanitize_url(original_url)
-    
-    if not url:
-        response.status_code = 400
-        return ExtractResponse(
-            url=original_url,
-            success=False,
-            text=None,
-            message="Invalid URL format. The URL appears to be malformed or non-existent.",
-            method_used="url_validation_failed"
-        )
-    
-    logger.info(f"Processing text extraction request for URL: {url}")
-    
-    # Check if URL points to a PDF file
-    if is_pdf_url(url):
-        logger.info(f"Detected PDF URL: {url}")
-        try:
-            # Enhanced browser-like headers
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-                'Accept': 'application/pdf,*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Connection': 'keep-alive',
-            }
-            
-            # Download the PDF
-            pdf_response = requests.get(url, headers=headers, timeout=30)
-            pdf_response.raise_for_status()
-            
-            # Check if content type is PDF
-            content_type = pdf_response.headers.get('Content-Type', '').lower()
-            if 'application/pdf' in content_type or is_pdf_url(url):
-                # Extract text from PDF
-                pdf_text = extract_text_from_pdf(pdf_response.content)
-                
-                return ExtractResponse(
-                    url=original_url,
-                    success=True,
-                    text=pdf_text,
-                    message="Successfully extracted text from PDF document",
-                    method_used="pdf"
-                )
-            else:
-                # Not actually a PDF, continue with regular extraction
-                logger.info(f"URL has .pdf extension but content is not PDF. Content-Type: {content_type}")
-        except Exception as e:
-            logger.error(f"PDF extraction failed: {str(e)}")
-            response.status_code = 500
-            return ExtractResponse(
-                url=original_url,
-                success=False,
-                text=None,
-                message=f"Error extracting text from PDF: {str(e)}",
-                method_used="pdf_failed"
-            )
-    
-    # Try the standard method first for non-PDF URLs
-    try:
-        # Check content type before full extraction
-        head_headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        }
-        
-        head_response = requests.head(url, headers=head_headers, timeout=10, allow_redirects=True)
-        content_type = head_response.headers.get('Content-Type', '').lower()
-        
-        # If it's actually a PDF despite the URL not ending with .pdf
-        if 'application/pdf' in content_type:
-            logger.info(f"Detected PDF content type for URL: {url}")
-            pdf_response = requests.get(url, headers=head_headers, timeout=30)
-            pdf_response.raise_for_status()
-            pdf_text = extract_text_from_pdf(pdf_response.content)
-            
-            return ExtractResponse(
-                url=original_url,
-                success=True,
-                text=pdf_text,
-                message="Successfully extracted text from PDF document (detected by content type)",
-                method_used="pdf"
-            )
-        
-        # Enhanced browser-like headers for HTML content
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Sec-CH-UA': '"Chromium";v="123", "Google Chrome";v="123"',
-            'Sec-CH-UA-Mobile': '?0',
-            'Sec-CH-UA-Platform': '"macOS"',
-        }
-        
-        logger.info(f"Attempting standard extraction from: {url}")
-        response_data = requests.get(url, headers=headers, timeout=30)
-        response_data.raise_for_status()
-        
-        # Check again if the content might be PDF after redirection
-        content_type = response_data.headers.get('Content-Type', '').lower()
-        if 'application/pdf' in content_type:
-            logger.info(f"Detected PDF content type after redirection for URL: {url}")
-            pdf_text = extract_text_from_pdf(response_data.content)
-            
-            return ExtractResponse(
-                url=original_url,
-                success=True,
-                text=pdf_text,
-                message="Successfully extracted text from PDF document (detected after redirection)",
-                method_used="pdf"
-            )
-        
-        # Parse the HTML
-        soup = BeautifulSoup(response_data.text, 'html.parser')
-        
-        # Extract text using standard method
-        extracted_text = extract_content_from_soup(soup)
-        
-        if extracted_text:
-            return ExtractResponse(
-                url=original_url,
-                success=True,
-                text=extracted_text,
-                message="Successfully extracted text content using standard method",
-                method_used="standard"
-            )
-        
-        # If standard extraction returns empty content, try Playwright
-        logger.info("Standard extraction returned no content, trying Playwright")
-    
-    except Exception as e:
-        logger.error(f"Standard extraction failed: {str(e)}")
-        # If standard extraction fails, we'll fall through to the Playwright method
-    
-    # Try extracting with Playwright
-    try:
-        logger.info(f"Attempting extraction with Playwright from: {url}")
-        playwright_text = await extract_with_playwright(url)
-        
-        if playwright_text:
-            return ExtractResponse(
-                url=original_url,
-                success=True,
-                text=playwright_text,
-                message="Successfully extracted text content using JavaScript-enabled browser rendering",
-                method_used="playwright"
-            )
-        else:
-            # Both methods failed
-            response.status_code = 404
-            return ExtractResponse(
-                url=original_url,
-                success=False,
-                text=None,
-                message="Failed to extract meaningful text content from the URL",
-                method_used="all_methods_failed"
-            )
-            
-    except Exception as e:
-        logger.error(f"Playwright extraction failed: {str(e)}")
-        response.status_code = 500
-        return ExtractResponse(
-            url=original_url,
-            success=False,
-            text=None,
-            message=f"Error extracting text: {str(e)}",
-            method_used="all_methods_failed_with_error"
-        )
-
-
 def extract_content_from_soup(soup) -> str:
     """Extract and clean up text content from a BeautifulSoup object."""
-    # Remove script and style elements
-    for script_or_style in soup(['script', 'style', 'header', 'footer', 'nav']):
-        script_or_style.extract()
-    
-    # Try to find the main content
-    main_content = None
-    
-    # Look for common content containers
-    content_candidates = []
-    
-    # Try to find article or main content areas
-    for tag in ['article', 'main', 'div[role="main"]', '.content', '.main-content', '#content', '#main']:
-        elements = soup.select(tag)
-        content_candidates.extend(elements)
-    
-    # If we found potential content containers, use the largest one
-    if content_candidates:
-        main_content = max(content_candidates, key=lambda elem: len(elem.get_text(strip=True)))
-    
-    # If we couldn't find a clear main content, use the body
-    if not main_content or len(main_content.get_text(strip=True)) < 100:
-        main_content = soup.body
-    
-    if not main_content:
-        main_content = soup
-    
-    # Convert HTML to clean text
-    text = html2text(str(main_content))
-    
-    # Post-processing
-    # Remove excessive whitespace and line breaks
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    
-    # Remove URLs that appear as plain text
-    text = re.sub(r'https?://\S+', '', text)
-    
-    return text.strip()
-
-
-async def extract_with_playwright(url) -> str:
-    """Extract text from a webpage using Playwright for JavaScript rendering."""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--disable-gpu',
-                '--disable-infobars',
-                '--window-size=1920,1080',
-                '--disable-extensions',
-            ]
-        )
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-        )
+    try:
+        # Remove script and style elements
+        for script_or_style in soup(['script', 'style', 'header', 'footer', 'nav']):
+            script_or_style.extract()
         
-        page = await context.new_page()
+        # Try to find the main content
+        main_content = None
         
-        try:
-            # Check if URL might be a PDF by doing a head request
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            content_type = response.headers.get('content-type', '')
+        # Look for common content containers - prioritize the most likely containers
+        content_selectors = [
+            'article', 'main', 'div[role="main"]', 
+            '.content', '.main-content', '#content', '#main',
+            '.terms', '.terms-content', '.privacy-policy', '.legal'
+        ]
+        
+        # Try each selector in order of likelihood
+        for selector in content_selectors:
+            elements = soup.select(selector)
+            if elements:
+                # Use the largest matching element
+                main_content = max(elements, key=lambda elem: len(elem.get_text(strip=True)))
+                if len(main_content.get_text(strip=True)) > 500:  # If it has substantial content
+                    break
+        
+        # If we couldn't find a clear main content, use the body
+        if not main_content or len(main_content.get_text(strip=True)) < 500:
+            main_content = soup.body
+        
+        if not main_content:
+            main_content = soup
             
-            if 'application/pdf' in content_type.lower():
-                logger.info(f"Playwright detected PDF content type for URL: {url}")
+        # Use optimized strategy for text extraction based on content size
+        main_text = main_content.get_text(strip=True)
+        if len(main_text) < 5000:
+            # For smaller content, use direct text extraction
+            text = main_content.get_text(separator='\n', strip=True)
+        else:
+            # For larger content, use html2text which is more memory efficient
+            text = html2text(str(main_content))
+        
+        # Post-processing - simplified for performance
+        # Remove excessive whitespace 
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        
+        # Remove URLs that appear as plain text
+        text = re.sub(r'https?://\S+', '', text)
+        
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Error extracting content from soup: {str(e)}")
+        # Return empty string on failure, let the calling function handle it
+        return ""
+
+async def extract_with_playwright(url: str, document_type: str, url_to_return: str) -> ExtractResponse:
+    """Extract text using Playwright for JavaScript-heavy sites"""
+    logger.info(f"Attempting Playwright extraction for: {url}")
+    try:
+        # Use Playwright only when necessary - with optimized settings
+        async with async_playwright() as p:
+            # Launch browser with minimal settings
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions']
+            )
+            
+            context = await browser.new_context(
+                viewport={"width": 1366, "height": 768},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                javascript_enabled=True,
+            )
+            
+            # Set timeout for the entire context
+            context.set_default_timeout(PLAYWRIGHT_TIMEOUT)
+            
+            page = await context.new_page()
+            
+            try:
+                # Set shorter timeouts for faster performance
+                await page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
                 
-                # Use requests to download the PDF directly
-                pdf_response = requests.get(url, timeout=30)
-                pdf_response.raise_for_status()
+                # Quick scroll to load lazy content
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight/2)")
+                await asyncio.sleep(0.5)  # Reduced wait time
                 
-                return extract_text_from_pdf(pdf_response.content)
-            
-            # Continue with normal Playwright extraction for non-PDF content
-            # Wait for the page to be fully loaded
-            await page.wait_for_load_state("networkidle", timeout=60000)
-            
-            # Wait a moment for any delayed JS rendering
-            await page.wait_for_timeout(2000)
-            
-            # Scroll down to load any lazy-loaded content
-            await page.evaluate("""
-                window.scrollTo(0, document.body.scrollHeight * 0.2);
-                setTimeout(() => { window.scrollTo(0, document.body.scrollHeight * 0.4); }, 500);
-                setTimeout(() => { window.scrollTo(0, document.body.scrollHeight * 0.6); }, 1000);
-                setTimeout(() => { window.scrollTo(0, document.body.scrollHeight * 0.8); }, 1500);
-                setTimeout(() => { window.scrollTo(0, document.body.scrollHeight); }, 2000);
-            """)
-            
-            # Wait for scrolling and any triggered content to load
-            await page.wait_for_timeout(3000)
-            
-            # Try to find and click "Accept cookies" buttons to reveal content
-            for selector in [
-                'button:text-matches("accept", "i")', 
-                'button:text-matches("agree", "i")',
-                'button:text-matches("cookie", "i")',
-                'button:text-matches("consent", "i")'
-            ]:
-                try:
-                    buttons = await page.query_selector_all(selector)
-                    for button in buttons:
-                        await button.click()
-                        await page.wait_for_timeout(1000)
-                except:
-                    continue
-            
-            # Get the page content after all processing
-            content = await page.content()
-            
-            # Parse with BeautifulSoup
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # Extract text
-            return extract_content_from_soup(soup)
-            
-        finally:
-            await browser.close() 
+                # Get the page content
+                content = await page.content()
+                
+                # Parse with BeautifulSoup
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # Extract text
+                extracted_text = extract_content_from_soup(soup)
+                
+                if extracted_text and len(extracted_text.strip()) > MIN_CONTENT_LENGTH:
+                    return ExtractResponse(
+                        url=url_to_return,
+                        document_type=document_type,
+                        text=extracted_text,
+                        success=True,
+                        message="Successfully extracted text content using JavaScript-enabled browser rendering",
+                        method_used="playwright"
+                    )
+                    
+                raise Exception("Playwright extraction didn't yield sufficient content")
+            finally:
+                await browser.close()
+    except Exception as e:
+        logger.warning(f"Playwright extraction failed: {str(e)}")
+        raise 

@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from contextlib import asynccontextmanager
 import subprocess
 import os
 import re
@@ -8,10 +9,15 @@ import logging
 
 from app.api.v1.api import api_router, test_router
 from app.core.config import settings
+from app.core.database import create_tables
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Reduce logging for specific libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)  # Hide HTTP client logs
+logging.getLogger("httpcore").setLevel(logging.WARNING)  # Hide HTTP core logs
 
 # Get current branch name for API documentation
 def get_branch_name():
@@ -42,6 +48,26 @@ def get_branch_name():
     except:
         return "main"  # Default to "main" if any error occurs
 
+# Define lifespan context manager for app startup/shutdown events
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Context manager for FastAPI app lifespan.
+    Handles startup and shutdown events.
+    """
+    # Startup: Setup mock database
+    try:
+        create_tables()
+        logger.info("Mock database setup complete")
+    except Exception as e:
+        logger.error(f"Error setting up mock database: {e}")
+    
+    yield  # This is where the app runs
+    
+    # Shutdown: Add any cleanup here if needed
+    # Code after the yield will be executed on shutdown
+    logger.info("Shutting down application")
+
 branch_name = get_branch_name()
 # Ensure we don't have raw template strings in the version
 if "${" in branch_name or "}" in branch_name:
@@ -57,6 +83,7 @@ app = FastAPI(
                 f"Include the `X-API-Key` header with your API key in all requests.",
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     version="1.0.0",
+    lifespan=lifespan,  # Add lifespan context manager
 )
 
 # Add middleware to log requests and headers

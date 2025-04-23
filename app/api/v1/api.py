@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Response
 
-from app.api.v1.endpoints import tos, privacy, extract, summary
+from app.api.v1.endpoints import tos, privacy, extract, summary, crawl, textmining, wordfrequency
 from app.core.auth import get_api_key
 
 # Main API router with authentication
@@ -9,6 +9,9 @@ api_router.include_router(tos.router, tags=["legal"])
 api_router.include_router(privacy.router, tags=["legal"])
 api_router.include_router(extract.router, tags=["content"])
 api_router.include_router(summary.router, tags=["content"])
+api_router.include_router(crawl.router, tags=["crawl"])
+api_router.include_router(textmining.router, tags=["analysis"])
+api_router.include_router(wordfrequency.router, tags=["analysis"])
 
 # Test router without authentication for debugging
 test_router = APIRouter()
