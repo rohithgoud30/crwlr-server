@@ -387,13 +387,13 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 # Don't return this result, continue to other methods
             else:
                 logger.info(f"Found ToS via HTML inspection: {tos_url}")
-                return ToSResponse(
-                    url=url,
-                    tos_url=tos_url,
-                    success=True,
-                    message="Terms of Service found via HTML inspection",
-                    method_used="html_inspection"
-                )
+            return ToSResponse(
+                url=url,
+                tos_url=tos_url,
+                success=True,
+                message="Terms of Service found via HTML inspection",
+                method_used="html_inspection"
+            )
         
         # Use browser approach
         playwright = await async_playwright().start()
@@ -420,15 +420,15 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                             # Skip this result, continue to other methods
                         else:
                             return ToSResponse(
-                                url=url,
+                            url=url,
                                 tos_url=tos_url,
-                                success=True,
-                                message="Terms of Service found via DuckDuckGo search",
-                                method_used="duckduckgo_search"
-                            )
+                            success=True,
+                            message="Terms of Service found via DuckDuckGo search",
+                            method_used="duckduckgo_search"
+                        )
                 except Exception as e:
                     logger.warning(f"DuckDuckGo search failed: {e}")
-                
+
                 # Try Bing search
                 try:
                     logger.info("Trying Bing search fallback...")
@@ -439,13 +439,13 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                             logger.warning(f"Bing result appears to be user-generated content: {tos_url}")
                             # Skip this result, continue to other methods
                         else:
-                            return ToSResponse(
-                                url=url,
+                                return ToSResponse(
+                                    url=url,
                                 tos_url=tos_url,
-                                success=True,
-                                message="Terms of Service found via Bing search",
-                                method_used="bing_search"
-                            )
+                                    success=True,
+                                    message="Terms of Service found via Bing search",
+                                    method_used="bing_search"
+                                )
                 except Exception as e:
                     logger.warning(f"Bing search failed: {e}")
                 
@@ -460,12 +460,12 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                             # Don't return this result, continue to other methods
                         else:
                             return ToSResponse(
-                                url=url,
+                            url=url,
                                 tos_url=tos_url,
-                                success=True,
-                                message="Terms of Service found via Yahoo search",
-                                method_used="yahoo_search"
-                            )
+                            success=True,
+                            message="Terms of Service found via Yahoo search",
+                            method_used="yahoo_search"
+                        )
                 except Exception as e:
                     logger.warning(f"Yahoo search failed: {e}")
                 
@@ -515,9 +515,9 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     else:
                         logger.info(f"Found ToS via link scanning: {tos_url}")
                         return ToSResponse(
-                            url=url,
-                            tos_url=tos_url,
-                            success=True,
+                    url=url,
+                    tos_url=tos_url,
+                success=True,
                             message="Terms of Service found via link scanning",
                             method_used="link_scanning"
                         )
@@ -536,9 +536,9 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     else:
                         logger.info(f"Found ToS via text matching: {tos_url}")
                         return ToSResponse(
-                            url=url,
-                            tos_url=tos_url,
-                            success=True,
+                    url=url,
+                    tos_url=tos_url,
+                success=True,
                             message="Terms of Service found via text match scanning",
                             method_used="text_matching"
                         )
@@ -626,8 +626,8 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                             tos_url=tos_url,
                             success=True,
                             message="Terms of Service found via privacy policy link",
-                            method_used="privacy_policy"
-                        )
+                    method_used="privacy_policy"
+            )
             except Exception as e:
                 logger.error(f"Error finding ToS via privacy policy: {e}")
             
@@ -635,8 +635,8 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
             # but only if it doesn't appear to be a UGC link
             if unverified_result and not is_likely_user_generated_content(unverified_result):
                 logger.info(f"Using unverified result as last resort: {unverified_result}")
-                return ToSResponse(
-                    url=url,
+            return ToSResponse(
+                url=url,
                     tos_url=unverified_result,
                     success=True,
                     message="Terms of Service found (low confidence)",
@@ -651,7 +651,7 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 success=False,
                 message="Could not find Terms of Service via any method",
                 method_used="all_methods_failed"
-            )
+               )
         
         except Exception as e:
             logger.error(f"Error during ToS search: {e}")
@@ -672,10 +672,10 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         return ToSResponse(
             url=url,
             tos_url=None,
-            success=False,
+                success=False,
             message=f"Unexpected error: {str(e)}",
-            method_used="error"
-        )
+                method_used="error"
+            )
     finally:
         execution_time = time.time() - start_time
         logger.info(f"TOS finder completed in {execution_time:.2f} seconds")
@@ -2054,7 +2054,7 @@ async def yahoo_search_fallback(domain, page):
         print("Attempting search engine fallback with Yahoo...")
 
         # Create a search query for the domain with specific site constraint
-        search_query = f'site:{domain} ("terms of service" OR "terms of use" OR "user agreement" OR "legal terms")'
+        search_query = f'{domain} terms of service, terms of use, user agreement, legal terms'
         yahoo_search_url = f"https://search.yahoo.com/search?p={search_query}"
 
         # Navigate to Yahoo search with longer timeout
@@ -2324,7 +2324,7 @@ async def bing_search_fallback(domain, page):
             site_conditions.append(f"site:{d}")
             
         site_query = " OR ".join(site_conditions)
-        search_query = f'({site_query}) ("terms of service" OR "terms of use" OR "user agreement" OR "terms and conditions")'
+        search_query = f'{domain} terms of service, terms of use, user agreement, legal terms'
         bing_search_url = f"https://www.bing.com/search?q={search_query}"
 
         # Navigate to Bing search
@@ -2603,7 +2603,7 @@ async def duckduckgo_search_fallback(domain, page):
         print("Attempting search engine fallback with DuckDuckGo...")
 
         # Create a search query for the domain with specific site constraint
-        search_query = f'site:{domain} ("terms of service" OR "terms of use" OR "user agreement" OR "terms and conditions")'
+        search_query = f'{domain} terms of service, terms of use, user agreement, legal terms'
         
         # Use the lite version which has a simpler interface
         ddg_search_url = f"https://lite.duckduckgo.com/lite?q={search_query}"
@@ -2727,7 +2727,7 @@ async def duckduckgo_search_fallback(domain, page):
                             url: link.href,
                             title: text || url.hostname + url.pathname,
                             description: description,
-                            score: score
+                        score: score
                         });
                     }
                 } catch (e) {
