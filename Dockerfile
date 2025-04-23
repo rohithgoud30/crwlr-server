@@ -41,8 +41,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 # Install dependencies from requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-# Install google-cloud-sql-connector separately
-RUN pip install --no-cache-dir google-cloud-sql-connector==1.2.0
+# Install cloud-sql-python-connector separately with the correct package name
+RUN pip install --no-cache-dir "cloud-sql-python-connector[pg8000]>=1.2.0"
 
 # Install NLTK data for text processing
 RUN python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
