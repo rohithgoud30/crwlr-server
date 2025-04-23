@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=True, 
-        extra="allow"  # Allow extra fields from environment variables
+        extra="ignore"  # Ignore extra fields from environment variables
     )
 
     API_V1_STR: str = "/api/v1"
@@ -66,14 +66,39 @@ class Settings(BaseSettings):
 # Create settings instance
 settings = Settings()
 
+# Try to load database settings directly from environment
+if not settings.DB_USER and os.environ.get("DB_USER"):
+    settings.DB_USER = os.environ.get("DB_USER")
+    logger.info("Loaded DB_USER from environment variables")
+
+if not settings.DB_PASS and os.environ.get("DB_PASS"):
+    settings.DB_PASS = os.environ.get("DB_PASS")
+    logger.info("Loaded DB_PASS from environment variables")
+
+if not settings.DB_NAME and os.environ.get("DB_NAME"):
+    settings.DB_NAME = os.environ.get("DB_NAME")
+    logger.info("Loaded DB_NAME from environment variables")
+
+if not settings.INSTANCE_CONNECTION_NAME and os.environ.get("INSTANCE_CONNECTION_NAME"):
+    settings.INSTANCE_CONNECTION_NAME = os.environ.get("INSTANCE_CONNECTION_NAME")
+    logger.info("Loaded INSTANCE_CONNECTION_NAME from environment variables")
+
+if not settings.DB_HOST and os.environ.get("DB_HOST"):
+    settings.DB_HOST = os.environ.get("DB_HOST")
+    logger.info("Loaded DB_HOST from environment variables")
+
+if not settings.DB_PORT and os.environ.get("DB_PORT"):
+    settings.DB_PORT = os.environ.get("DB_PORT")
+    logger.info("Loaded DB_PORT from environment variables")
+
 # Try to load API keys directly from environment if they're not in settings
 if not settings.GEMINI_API_KEY and os.environ.get("GEMINI_API_KEY"):
     settings.GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-    logger.info("Loaded GEMINI_API_KEY directly from environment variables")
+    logger.info("Loaded GEMINI_API_KEY from environment variables")
 
 if not settings.API_KEY and os.environ.get("API_KEY"):
     settings.API_KEY = os.environ.get("API_KEY")
-    logger.info("Loaded API_KEY directly from environment variables")
+    logger.info("Loaded API_KEY from environment variables")
 
 # Log whether API keys are set (without printing them)
 logger.info(f"GEMINI_API_KEY is {'SET' if settings.GEMINI_API_KEY else 'NOT SET'}")
