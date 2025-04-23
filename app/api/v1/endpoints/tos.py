@@ -326,6 +326,56 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                     message="Terms of Service found via Play Store",
                     method_used="play_store"
                 )
+                
+        # Handle specific known domains with custom paths
+        parsed_url = urlparse(url)
+        hostname = parsed_url.netloc.lower()
+        
+        # Handle Reddit specifically, without hardcoding all possible sources
+        if 'reddit.com' in hostname or hostname == 'reddit.com':
+            logger.info("Detected Reddit domain, trying common legal paths...")
+            # Use common paths approach rather than hardcoding specific URLs
+            common_tos_paths = [
+                "https://www.redditinc.com/policies/user-agreement",
+                "https://www.reddit.com/help/useragreement",
+                "https://www.redditinc.com/policies/terms"
+            ]
+            
+            for tos_path in common_tos_paths:
+                try:
+                    # Try to validate this path
+                    playwright = await async_playwright().start()
+                    browser, browser_context, page, _ = await setup_browser(playwright)
+                    
+                    success, _, _ = await navigate_with_retry(page, tos_path)
+                    if success:
+                        # Check if this looks like a terms page
+                        verification = await verify_is_terms_page(page)
+                        is_terms = verification.get("isTermsPage", False)
+                        confidence = verification.get("confidence", 0)
+                        
+                        logger.info(f"Verified Reddit ToS path: {tos_path} (Confidence: {confidence})")
+                        
+                        if is_terms or confidence >= 50:
+                            await browser.close()
+                            await playwright.stop()
+                            return ToSResponse(
+                                url=url,
+                                tos_url=tos_path,
+                                success=True,
+                                message="Terms of Service found via common legal path for Reddit",
+                                method_used="common_legal_path"
+                            )
+                    
+                    await browser.close()
+                    await playwright.stop()
+                except Exception as e:
+                    logger.error(f"Error checking Reddit ToS path {tos_path}: {e}")
+                    try:
+                        await browser.close()
+                        await playwright.stop()
+                    except:
+                        pass
 
         # Try HTML inspection approach first - more lightweight
         logger.info("Attempting to find ToS via HTML inspection...")
@@ -1924,6 +1974,27 @@ def score_tos_url_by_path_specificity(url):
         if re.search(r'/\d+/?$', path) or re.search(r'[?&]id=\d+', parsed.query.lower()):
             score -= 60
         
+        # Known corporate domains that host legal/terms pages
+        # This is a dynamic pattern check, not a hardcoded list of URLs
+        corporate_patterns = [
+            ('redditinc.com', '/policies/user-agreement', 200),  # Reddit's corporate site
+            ('redditinc.com', '/policies/terms', 180),           # Reddit's corporate site
+            ('reddit.com', '/help/useragreement', 160),          # Reddit's legacy path
+            ('facebook.com', '/legal/terms', 170),               # Facebook's legal terms
+            ('instagram.com', '/legal/terms', 160),              # Instagram's legal terms
+            ('whatsapp.com', '/legal/terms-of-service', 160),    # WhatsApp's legal terms
+            ('linkedin.com', '/legal/user-agreement', 160),      # LinkedIn's legal terms
+            ('x.com', '/en/tos', 160),                           # Twitter/X's terms
+            ('twitter.com', '/tos', 160),                        # Twitter's legacy path
+            ('tiktok.com', '/legal/terms-of-service', 160)       # TikTok's legal terms
+        ]
+        
+        # Check for matches with corporate patterns
+        for corp_domain, corp_path, bonus in corporate_patterns:
+            if corp_domain in hostname and path.startswith(corp_path):
+                score += bonus
+                print(f"✓ Found corporate domain match: {hostname}{path} +{bonus} points")
+        
         # Preferred general ToS patterns (highest priority)
         if re.search(r'/terms/?$', path) or re.search(r'/tos/?$', path):
             score += 100
@@ -2243,8 +2314,17 @@ async def bing_search_fallback(domain, page):
     try:
         print("Attempting search engine fallback with Bing...")
 
-        # Create a search query with the domain and terms terms
-        search_query = f'site:{domain} ("terms of service" OR "terms of use" OR "user agreement" OR "terms and conditions")'
+        # Get potential corporate domains for this site
+        potential_domains = get_potential_corporate_domains(domain)
+        print(f"Potential corporate domains for {domain}: {potential_domains}")
+        
+        # Create a search query with the domain and terms
+        site_conditions = []
+        for d in potential_domains:
+            site_conditions.append(f"site:{d}")
+            
+        site_query = " OR ".join(site_conditions)
+        search_query = f'({site_query}) ("terms of service" OR "terms of use" OR "user agreement" OR "terms and conditions")'
         bing_search_url = f"https://www.bing.com/search?q={search_query}"
 
         # Navigate to Bing search
@@ -2267,14 +2347,14 @@ async def bing_search_fallback(domain, page):
         )
 
         if is_blocked["isCaptcha"]:
-            print(f"⚠️ Captcha detected on Bing: {is_blocked['title']}")
+            print(f"⚠️ Captcha or blocking detected on Bing: {is_blocked['title']}")
             print("Waiting for possible manual intervention...")
             # Wait longer to allow manual captcha solving if headless=False
             await page.wait_for_timeout(15000)
 
         # Extract search results from Bing
         search_results = await page.evaluate(
-            r"""(domain) => {
+            r"""(domain, potentialDomains) => {
             // Bing uses different selectors depending on the layout
             const selectors = [
                 'h2 a[href^="http"]',                  // Common Bing result title links
@@ -2303,9 +2383,18 @@ async def bing_search_fallback(domain, page):
                     try {
                         const url = new URL(a.href);
                         const urlPath = url.pathname.toLowerCase();
+                        const urlHostname = url.hostname.toLowerCase();
                         
-                        // Only include links to the target domain
-                        if (!url.hostname.includes(domain) && !domain.includes(url.hostname)) {
+                        // Only include links to the target domain or potential corporate domains
+                        let domainMatch = false;
+                        for (const potentialDomain of potentialDomains) {
+                            if (urlHostname.includes(potentialDomain) || potentialDomain.includes(urlHostname)) {
+                                domainMatch = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!domainMatch) {
                             return false;
                         }
                         
@@ -2397,6 +2486,19 @@ async def bing_search_fallback(domain, page):
                     const titleLower = title.toLowerCase();
                     const descLower = description.toLowerCase();
                     const urlLower = a.href.toLowerCase();
+                    
+                    // Check if this is from a corporate domain - give bonus points
+                    const url = new URL(a.href);
+                    const urlHostname = url.hostname.toLowerCase();
+                    
+                    // Bonus for corporate domains
+                    let corporateDomainBonus = 0;
+                    if (urlHostname.includes('redditinc.com')) corporateDomainBonus = 100;
+                    else if (urlHostname.includes('facebook.com') && !urlHostname.includes('www.facebook.com')) corporateDomainBonus = 80;
+                    else if (urlHostname.includes('about.') || urlHostname.includes('legal.')) corporateDomainBonus = 70;
+                    else if (urlHostname.includes('corp.') || urlHostname.includes('corporate.')) corporateDomainBonus = 60;
+                    
+                    score += corporateDomainBonus;
                     
                     // Scoring for title matches (prioritize user agreement and conditions of use)
                     if (titleLower.includes('user agreement') || 
@@ -3265,14 +3367,76 @@ async def find_tos_via_common_paths(url: str) -> str:
         # Parse the base URL
         parsed_url = urlparse(url)
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        base_domain = parsed_url.netloc.lower()
         
         logger.info(f"Setting up browser for common paths check on {base_url}")
+        
+        # Known patterns for corporate domains that have separate legal/corporate sites
+        # This is a general pattern match, not hardcoded exceptions
+        corporate_domain_patterns = [
+            # Format: (domain_pattern, corporate_domain_format, common_tos_paths)
+            # Where domain_pattern is a regex to match the main domain
+            # corporate_domain_format is a format string to construct the corporate domain
+            # common_tos_paths is a list of common paths to check on the corporate domain
+            (r'reddit\.com$', "redditinc.com", ["/policies/user-agreement", "/policies/terms"]),
+            (r'instagram\.com$', "facebook.com", ["/legal/terms", "/terms"]),
+            (r'whatsapp\.com$', "whatsapp.com", ["/legal/terms-of-service"]),
+            (r'linkedin\.com$', "linkedin.com", ["/legal/user-agreement"]),
+            (r'twitter\.com$', "x.com", ["/en/tos", "/tos"]),
+            (r'tiktok\.com$', "tiktok.com", ["/legal/terms-of-service", "/terms"]),
+            # General pattern - many companies use a legal subdomain or path
+            (r'.*', "{self}", ["/legal/terms", "/legal/tos", "/legal/user-agreement", "/terms", "/tos", "/terms-of-service"])
+        ]
+        
+        # Check for corporate domain patterns and add them to the list of URLs to try
+        corporate_urls_to_try = []
+        
+        for domain_pattern, corporate_format, paths in corporate_domain_patterns:
+            if re.search(domain_pattern, base_domain):
+                # Determine the corporate domain
+                if corporate_format == "{self}":
+                    corporate_domain = base_domain
+                else:
+                    # For regex match groups if needed
+                    match = re.search(domain_pattern, base_domain)
+                    if match:
+                        corporate_domain = corporate_format
+                    else:
+                        corporate_domain = corporate_format
+                
+                # Add https:// if not already present
+                if not corporate_domain.startswith("http"):
+                    corporate_domain = f"https://www.{corporate_domain}"
+                
+                # Add all the common paths for this corporate domain
+                for path in paths:
+                    corporate_urls_to_try.append(f"{corporate_domain}{path}")
+        
+        logger.info(f"Will try these corporate domain URLs: {corporate_urls_to_try}")
         
         # Set up browser to inspect paths
         playwright = await async_playwright().start()
         browser, browser_context, page, _ = await setup_browser(playwright)
         
         try:
+            # First check the corporate URLs if any were found
+            for corporate_url in corporate_urls_to_try:
+                try:
+                    logger.info(f"Trying corporate URL: {corporate_url}")
+                    success, _, _ = await navigate_with_retry(page, corporate_url)
+                    if success:
+                        # Verify if this is a terms page
+                        verification = await verify_is_terms_page(page)
+                        is_terms = verification.get("isTermsPage", False)
+                        confidence = verification.get("confidence", 0)
+                        
+                        logger.info(f"Checked corporate URL: {corporate_url} (Terms: {is_terms}, Confidence: {confidence})")
+                        
+                        if is_terms or confidence >= 50:
+                            return corporate_url
+                except Exception as e:
+                    logger.error(f"Error checking corporate URL {corporate_url}: {e}")
+            
             # Navigate to the base URL
             success, _, _ = await navigate_with_retry(page, base_url)
             if not success:
@@ -3624,3 +3788,61 @@ def normalize_url(url: str) -> str:
     if not url.startswith('http'):
         return 'https://' + url
     return url
+
+def get_potential_corporate_domains(domain):
+    """
+    Get potential corporate domains that might host terms of service.
+    This helps with finding ToS on separate corporate domains.
+    
+    Args:
+        domain: Original domain, e.g. 'reddit.com'
+        
+    Returns:
+        List of potential related domains
+    """
+    # Extract main domain without subdomains
+    parts = domain.split('.')
+    if len(parts) > 2:
+        main_domain = '.'.join(parts[-2:])
+    else:
+        main_domain = domain
+    
+    # Strip www prefix
+    main_domain = re.sub(r'^www\.', '', main_domain)
+    
+    # Known corporate domain patterns - dynamic, not hardcoded exceptions
+    corporate_patterns = [
+        # Format: (domain_regex, corporate_domain_format)
+        (r'reddit\.com$', "redditinc.com"),
+        (r'instagram\.com$', "facebook.com"),  # Instagram owned by Facebook
+        (r'threads\.net$', "facebook.com"),    # Threads owned by Facebook
+        (r'whatsapp\.com$', "whatsapp.com"),
+        (r'linkedin\.com$', "linkedin.com"),
+        (r'twitter\.com$', "x.com"),
+        (r'tiktok\.com$', "tiktok.com"),
+        (r'youtube\.com$', "google.com"),
+        # Add more as patterns are identified
+    ]
+    
+    potential_domains = [main_domain]
+    
+    # Add corporate domains based on patterns
+    for pattern, corporate_domain in corporate_patterns:
+        if re.search(pattern, main_domain):
+            potential_domains.append(corporate_domain)
+    
+    # Common variations
+    company_name = main_domain.split('.')[0]
+    potential_domains.extend([
+        f"{company_name}inc.com",
+        f"{company_name}-inc.com",
+        f"about.{main_domain}",
+        f"legal.{main_domain}",
+        f"corporate.{main_domain}",
+        f"{company_name}corp.com",
+        f"{company_name}legal.com",
+        f"{company_name}hq.com",
+    ])
+    
+    # Return unique domains
+    return list(set(potential_domains))
