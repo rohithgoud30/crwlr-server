@@ -1,4 +1,4 @@
-from typing import List, Union, Any
+from typing import List, Union, Any, Optional
 
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -6,7 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", case_sensitive=True
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=True, 
+        extra="allow"  # Allow extra fields from environment variables
     )
 
     API_V1_STR: str = "/api/v1"
@@ -14,16 +15,16 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     
     # API Keys
-    GEMINI_API_KEY: str = ""
-    API_KEY: str = ""
+    GEMINI_API_KEY: Optional[str] = None
+    API_KEY: Optional[str] = None
     
     # Database Settings
-    DB_USER: str = ""
-    DB_PASS: str = ""
-    DB_NAME: str = "crwlr"
-    INSTANCE_CONNECTION_NAME: str = ""
-    DB_HOST: str = ""
-    DB_PORT: str = "5432"
+    DB_USER: Optional[str] = None
+    DB_PASS: Optional[str] = None
+    DB_NAME: Optional[str] = "crwlr"
+    INSTANCE_CONNECTION_NAME: Optional[str] = None
+    DB_HOST: Optional[str] = None
+    DB_PORT: Optional[str] = "5432"
     
     # BACKEND_CORS_ORIGINS is a comma-separated list of origins
     BACKEND_CORS_ORIGINS: Union[List[str], str] = []
