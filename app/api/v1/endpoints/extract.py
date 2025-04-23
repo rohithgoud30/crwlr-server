@@ -372,7 +372,7 @@ async def extract_standard_html(extraction_url: str, document_type: str, url_to_
         soup = BeautifulSoup(response_data.text, 'html.parser')
         
         # Extract text using optimized method
-        extracted_text = extract_content_from_soup(soup, extraction_url)
+        extracted_text = extract_content_from_soup(soup)
         
         if extracted_text and len(extracted_text.strip()) > MIN_CONTENT_LENGTH:  # Ensure we got meaningful content
             return ExtractResponse(
@@ -439,12 +439,9 @@ def extract_text_from_pdf(pdf_content: bytes) -> str:
         logger.error(f"Error extracting text from PDF: {str(e)}")
         raise
 
-def extract_content_from_soup(soup, url="") -> str:
+def extract_content_from_soup(soup) -> str:
     """Extract and clean up text content from a BeautifulSoup object."""
     try:
-        # Check if the URL is from Facebook
-        is_facebook = "facebook.com" in url.lower() if url else False
-        
         # Remove script and style elements
         for script_or_style in soup(['script', 'style', 'header', 'footer', 'nav']):
             script_or_style.extract()
@@ -459,17 +456,6 @@ def extract_content_from_soup(soup, url="") -> str:
             '.terms', '.terms-content', '.privacy-policy', '.legal'
         ]
         
-        # Add Facebook-specific selectors if it's a Facebook URL
-        if is_facebook:
-            facebook_selectors = [
-                'div.xeuugli',
-                'div._1xgd',
-                'div[data-pagelet="MainFeed"]',
-                '#globalContainer',
-                'div.x1qjc9v5'
-            ]
-            content_selectors = facebook_selectors + content_selectors
-        
         # Try each selector in order of likelihood
         for selector in content_selectors:
             elements = soup.select(selector)
@@ -479,30 +465,7 @@ def extract_content_from_soup(soup, url="") -> str:
                 if len(main_content.get_text(strip=True)) > 500:  # If it has substantial content
                     break
         
-        # If we couldn't find a clear main content, try alternative extraction methods
-        if not main_content or len(main_content.get_text(strip=True)) < 500:
-            # For Facebook, try extracting from all paragraphs
-            if is_facebook:
-                paragraphs = soup.find_all('p')
-                if paragraphs and len(paragraphs) > 5:  # Ensure there are enough paragraphs
-                    # Join all paragraphs with substantial content
-                    text = '\n\n'.join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 15])
-                    if len(text) > 500:  # If we extracted enough content
-                        return text
-                
-                # Try extracting from div elements with substantial text
-                divs = soup.find_all('div')
-                text_divs = [div for div in divs if len(div.get_text(strip=True)) > 100 and len(div.find_all('div')) < 5]
-                if text_divs:
-                    # Use the largest text div
-                    main_content = max(text_divs, key=lambda elem: len(elem.get_text(strip=True)))
-                    if len(main_content.get_text(strip=True)) > 500:
-                        # Process this main content below
-                        pass
-                    else:
-                        main_content = None
-        
-        # If we still couldn't find content, use the body
+        # If we couldn't find a clear main content, use the body
         if not main_content or len(main_content.get_text(strip=True)) < 500:
             main_content = soup.body
         
@@ -511,27 +474,6 @@ def extract_content_from_soup(soup, url="") -> str:
             
         # Use optimized strategy for text extraction based on content size
         main_text = main_content.get_text(strip=True)
-        
-        # For Facebook, use a more aggressive approach to extract text
-        if is_facebook and len(main_text) < 1000:
-            # Try to get all text from the document instead
-            text = soup.get_text(separator='\n', strip=True)
-            
-            # Filter out short lines that are likely navigation or UI elements
-            lines = text.split('\n')
-            relevant_lines = [line for line in lines if len(line) > 40 or (len(line) > 15 and line.endswith('.'))]
-            
-            if relevant_lines:
-                text = '\n'.join(relevant_lines)
-                if len(text) > 500:
-                    # Post-processing
-                    # Remove excessive whitespace 
-                    text = re.sub(r'\n\s*\n', '\n\n', text)
-                    # Remove URLs that appear as plain text
-                    text = re.sub(r'https?://\S+', '', text)
-                    return text.strip()
-        
-        # Standard extraction path
         if len(main_text) < 5000:
             # For smaller content, use direct text extraction
             text = main_content.get_text(separator='\n', strip=True)
@@ -576,63 +518,12 @@ async def extract_with_playwright(url: str, document_type: str, url_to_return: s
             page = await context.new_page()
             
             try:
-                # Extend timeout for complex pages
-                longer_timeout = PLAYWRIGHT_TIMEOUT * 1.5
-                await page.goto(url, wait_until="networkidle", timeout=longer_timeout)
+                # Set shorter timeouts for faster performance
+                await page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
                 
-                # Detect if this is a Facebook page
-                is_facebook = "facebook.com" in url.lower()
-                
-                # Special handling for Facebook
-                if is_facebook:
-                    # Wait for specific Facebook content to load
-                    logger.info("Applying Facebook-specific extraction strategy")
-                    
-                    # Wait longer for Facebook's dynamic content to load
-                    await asyncio.sleep(2)
-                    
-                    # Check if this is the AI Terms page
-                    is_ai_terms = "ai-terms" in url.lower() or "ai/terms" in url.lower()
-                    if is_ai_terms:
-                        logger.info("Detected Facebook AI Terms page - applying specialized extraction")
-                        # Special handling for AI Terms page
-                        await page.evaluate("""
-                            // Attempt to expand any collapsed sections
-                            document.querySelectorAll('button, [role="button"]').forEach(btn => {
-                                if (btn.textContent.includes('See more') || 
-                                    btn.textContent.includes('Read more') ||
-                                    btn.textContent.includes('Expand')) {
-                                    btn.click();
-                                }
-                            });
-                        """)
-                        await asyncio.sleep(1)  # Wait for expansions
-                    
-                    # Full page scroll with multiple pauses to ensure all content loads
-                    for scroll_pos in [0.3, 0.6, 1.0]:
-                        await page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {scroll_pos})")
-                        await asyncio.sleep(0.5)
-                    
-                    # Try to locate and interact with content containers specific to Facebook
-                    for selector in [
-                        "div[role='main']", 
-                        "article", 
-                        ".xeuugli", # Facebook legal content class
-                        "._1xgd", # Another Facebook content class
-                        "#content",
-                        ".legal-content"
-                    ]:
-                        try:
-                            elements = await page.query_selector_all(selector)
-                            if elements and len(elements) > 0:
-                                logger.info(f"Found Facebook content container: {selector}")
-                                break
-                        except Exception:
-                            continue
-                else:
-                    # Quick scroll to load lazy content for non-Facebook sites
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight/2)")
-                    await asyncio.sleep(0.5)  # Reduced wait time
+                # Quick scroll to load lazy content
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight/2)")
+                await asyncio.sleep(0.5)  # Reduced wait time
                 
                 # Get the page content
                 content = await page.content()
@@ -640,43 +531,8 @@ async def extract_with_playwright(url: str, document_type: str, url_to_return: s
                 # Parse with BeautifulSoup
                 soup = BeautifulSoup(content, 'html.parser')
                 
-                # For Facebook, try additional content extraction strategies
-                if is_facebook:
-                    extracted_text = ""
-                    
-                    # First try specific Facebook content containers
-                    for selector in [
-                        "div.xeuugli", # Facebook legal content class
-                        "div._1xgd", # Another Facebook content class
-                        "div[role='main']",
-                        "article", 
-                        "#content", 
-                        ".legal-content"
-                    ]:
-                        elements = soup.select(selector)
-                        if elements:
-                            # Use the largest matching element
-                            main_content = max(elements, key=lambda elem: len(elem.get_text(strip=True)))
-                            potential_text = main_content.get_text(separator='\n', strip=True)
-                            if len(potential_text) > MIN_CONTENT_LENGTH:
-                                extracted_text = potential_text
-                                logger.info(f"Extracted Facebook content using selector: {selector}")
-                                break
-                    
-                    # If specific selectors didn't work, try paragraph extraction
-                    if not extracted_text or len(extracted_text) < MIN_CONTENT_LENGTH:
-                        paragraphs = soup.find_all('p')
-                        if paragraphs:
-                            extracted_text = '\n\n'.join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 15])
-                            logger.info("Extracted Facebook content using paragraph tags")
-                            
-                    # If paragraph extraction didn't work, try all text extraction
-                    if not extracted_text or len(extracted_text) < MIN_CONTENT_LENGTH:
-                        # Fall back to standard extraction
-                        extracted_text = extract_content_from_soup(soup, url)
-                else:
-                    # Standard extraction for non-Facebook sites
-                    extracted_text = extract_content_from_soup(soup, url)
+                # Extract text
+                extracted_text = extract_content_from_soup(soup)
                 
                 if extracted_text and len(extracted_text.strip()) > MIN_CONTENT_LENGTH:
                     return ExtractResponse(
