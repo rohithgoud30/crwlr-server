@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Response
 
-from app.api.v1.endpoints import tos, privacy, extract, summary, crawl, textmining, wordfrequency
+from app.api.v1.endpoints import tos, privacy, extract, summary, crawl, textmining, wordfrequency, health
 from app.core.auth import get_api_key
 
 # Main API router with authentication
@@ -15,6 +15,9 @@ api_router.include_router(wordfrequency.router, tags=["analysis"])
 
 # Test router without authentication for debugging
 test_router = APIRouter()
+
+# Health router - no authentication required
+test_router.include_router(health.router, tags=["system"])
 
 @test_router.get("/test", tags=["test"])
 async def test_endpoint():
