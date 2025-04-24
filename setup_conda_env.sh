@@ -5,7 +5,7 @@
 
 # Configuration
 ENV_NAME="crwlr"
-PYTHON_VERSION="3.12"  # From pyproject.toml
+PYTHON_VERSION="3.11"  # Changed from 3.12 to 3.11 for better compatibility with cloud-sql-python-connector
 
 echo "======================================================"
 echo "  CRWLR Conda Environment Setup"

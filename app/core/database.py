@@ -1,10 +1,14 @@
 import os
 import logging
+import warnings
 from typing import Optional
 from sqlalchemy import create_engine, MetaData, Column, Table, String, DateTime, Text, ForeignKey, Enum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import text, func
 from sqlalchemy.exc import SQLAlchemyError
+
+# Filter out CryptographyDeprecationWarning related to not_valid_after
+warnings.filterwarnings('ignore', category=Warning, module='google.cloud.sql.connector.instance')
 
 from app.core.config import settings
 
