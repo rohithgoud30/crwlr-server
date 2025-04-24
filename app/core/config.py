@@ -23,14 +23,6 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     API_KEY: Optional[str] = None
     
-    # Database Settings
-    DB_USER: Optional[str] = None
-    DB_PASS: Optional[str] = None
-    DB_NAME: Optional[str] = "crwlr"
-    INSTANCE_CONNECTION_NAME: Optional[str] = None
-    DB_HOST: Optional[str] = None
-    DB_PORT: Optional[str] = "5432"
-    
     # BACKEND_CORS_ORIGINS is a comma-separated list of origins
     BACKEND_CORS_ORIGINS: Union[List[str], str] = []
 

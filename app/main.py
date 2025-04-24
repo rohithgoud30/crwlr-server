@@ -55,12 +55,12 @@ async def lifespan(app: FastAPI):
     Context manager for FastAPI app lifespan.
     Handles startup and shutdown events.
     """
-    # Startup: Setup mock database
+    # Startup: Initialize database
     try:
         create_tables()
-        logger.info("Mock database setup complete")
+        logger.info("Database tables setup complete")
     except Exception as e:
-        logger.error(f"Error setting up mock database: {e}")
+        logger.error(f"Error setting up database tables: {e}")
     
     yield  # This is where the app runs
     

@@ -135,6 +135,55 @@ gcloud run services update crwlr-server --platform managed --region us-east4 --s
 
 Without a valid API key, all API endpoints will return a 401 Unauthorized error.
 
+## Database Setup
+
+CRWLR uses a PostgreSQL database to store users, documents, and submissions. The database schema includes:
+
+- **users**: User accounts with clerk_user_id, email, name, and role
+- **documents**: Document data with URL, document_type (ToS or Privacy Policy), retrieved content, and analysis
+- **submissions**: Records of URL processing requests with status tracking and relations to users and documents
+
+### Database Configuration
+
+CRWLR connects to a PostgreSQL database instance. You need the following environment variables in your `.env` file:
+
+```
+DB_USER=postgres
+DB_PASS=your_password
+DB_NAME=postgres
+DB_HOST=your-db-host-ip
+DB_PORT=5432
+```
+
+For Google Cloud SQL, also include:
+
+```
+INSTANCE_CONNECTION_NAME=your-project:region:instance-name
+```
+
+To initialize the database:
+
+```bash
+./init_db.sh
+```
+
+The initialization process:
+
+1. Drops existing tables if they exist
+2. Creates the `pgcrypto` extension for UUID generation
+3. Creates the `DocumentType` enum type for categorizing documents
+4. Creates all database tables with the correct relationships
+
+### Database Schema
+
+The database uses UUID primary keys and maintains proper relationships between tables:
+
+- **users** table: Stores user information with authentication details
+- **documents** table: Stores document content, metadata, and analysis results
+- **submissions** table: Tracks document processing requests and their status
+
+All tables include created_at and updated_at timestamps for tracking record history.
+
 ## Project Structure
 
 ```
