@@ -762,7 +762,7 @@ async def navigate_with_retry(page, url, max_retries=2):
                 await page.wait_for_timeout(delay)
 
             logger.info(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
-            
+
             # Simulate human pre-navigation behavior
             if attempt == 0:
                 # Sometimes move the mouse around first (simulating human pre-click behavior)
@@ -864,9 +864,9 @@ async def detect_anti_bot_patterns(page):
                 const results = {
                     isAntiBot: false,
                     detections: [],
-                    url: window.location.href,
-                    title: document.title
-                };
+                url: window.location.href,
+                title: document.title
+            };
                 
                 // 1. Check for Cloudflare
                 if (
@@ -993,9 +993,9 @@ async def detect_anti_bot_patterns(page):
                 results.hasRecaptchaAPI = typeof window.grecaptcha !== 'undefined';
                 
                 return results;
-            }"""
+    }"""
         )
-        
+
         # Process detection results
         if anti_bot_detection["isAntiBot"]:
             logger.warning(f"Detected anti-bot protection: {', '.join(anti_bot_detection['detections'])}")
@@ -1687,7 +1687,7 @@ async def smooth_scroll_and_click(
                 // Check all link elements
                 document.querySelectorAll('a[href]').forEach(link => {
                     const text = link.textContent.trim().toLowerCase();
-                    const href = link.href.toLowerCase();
+                        const href = link.href.toLowerCase();
                     
                     // Skip javascript, mailto, etc.
                     if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) {
@@ -2049,7 +2049,7 @@ async def smooth_scroll_and_click(
                 requestAnimationFrame(smoothScroll);
             });
         }""")
-
+        
         print("✅ Reached the bottom of the page.")
 
         # If we found a high score link but couldn't navigate to it, use it as fallback
@@ -3837,14 +3837,149 @@ def is_play_store_url(url: str) -> bool:
     return "play.google.com" in url or "play.app.goo.gl" in url
 
 async def find_app_store_tos(url: str) -> str:
-    """Find Terms of Service URL for an App Store app."""
-    # Implementation would go here
-    return None
+    """
+    Find Terms of Service URL for an App Store app.
+    First extract privacy policy link, then use the developer's base URL to find ToS.
+    """
+    try:
+        logger.info(f"Finding ToS for App Store URL: {url}")
+        
+        # Set up browser
+        playwright = await async_playwright().start()
+        browser, browser_context, page, _ = await setup_browser(playwright)
+        
+        try:
+            # Navigate to the App Store URL
+            success, _, _ = await navigate_with_retry(page, url)
+            if not success:
+                logger.warning(f"Failed to navigate to App Store URL: {url}")
+                return None
+            
+            # First extract the privacy policy link
+            privacy_link = await extract_app_store_privacy_link(page)
+            if not privacy_link:
+                logger.warning("Could not find privacy policy link in App Store")
+                return None
+            
+            logger.info(f"Found privacy policy link: {privacy_link}")
+            
+            # Get the base domain from the privacy policy URL
+            parsed_url = urlparse(privacy_link)
+            base_domain = parsed_url.netloc
+            
+            # Remove 'www.' prefix if present
+            if base_domain.startswith('www.'):
+                base_domain = base_domain[4:]
+            
+            logger.info(f"Extracted base domain from privacy policy: {base_domain}")
+            
+            # Now search for ToS using this domain
+            search_query = f"{base_domain} terms of service"
+            logger.info(f"Searching for ToS with query: {search_query}")
+            
+            # Try DuckDuckGo search first
+            tos_url = await duckduckgo_search_fallback(search_query, page)
+            if tos_url:
+                logger.info(f"Found ToS via DuckDuckGo: {tos_url}")
+                return tos_url
+            
+            # Try Bing search as backup
+            tos_url = await bing_search_fallback(search_query, page)
+            if tos_url:
+                logger.info(f"Found ToS via Bing: {tos_url}")
+                return tos_url
+            
+            # Try Yahoo search as last resort
+            tos_url = await yahoo_search_fallback(search_query, page)
+            if tos_url:
+                logger.info(f"Found ToS via Yahoo: {tos_url}")
+                return tos_url
+            
+            logger.warning("Could not find ToS for App Store app")
+            return None
+        
+        finally:
+            # Clean up browser resources
+            await browser_context.close()
+            await browser.close()
+            await playwright.stop()
+    
+    except Exception as e:
+        logger.error(f"Error finding App Store ToS: {e}")
+        return None
+
 
 async def find_play_store_tos(url: str) -> str:
-    """Find Terms of Service URL for a Google Play Store app."""
-    # Implementation would go here
-    return None
+    """
+    Find Terms of Service URL for a Google Play Store app.
+    First extract privacy policy link, then use the developer's base URL to find ToS.
+    """
+    try:
+        logger.info(f"Finding ToS for Play Store URL: {url}")
+        
+        # Set up browser
+        playwright = await async_playwright().start()
+        browser, browser_context, page, _ = await setup_browser(playwright)
+        
+        try:
+            # Navigate to the Play Store URL
+            success, _, _ = await navigate_with_retry(page, url)
+            if not success:
+                logger.warning(f"Failed to navigate to Play Store URL: {url}")
+                return None
+            
+            # First extract the privacy policy link
+            privacy_link = await extract_play_store_privacy_link(page)
+            if not privacy_link:
+                logger.warning("Could not find privacy policy link in Play Store")
+                return None
+            
+            logger.info(f"Found privacy policy link: {privacy_link}")
+            
+            # Get the base domain from the privacy policy URL
+            parsed_url = urlparse(privacy_link)
+            base_domain = parsed_url.netloc
+            
+            # Remove 'www.' prefix if present
+            if base_domain.startswith('www.'):
+                base_domain = base_domain[4:]
+            
+            logger.info(f"Extracted base domain from privacy policy: {base_domain}")
+            
+            # Now search for ToS using this domain
+            search_query = f"{base_domain} terms of service"
+            logger.info(f"Searching for ToS with query: {search_query}")
+            
+            # Try DuckDuckGo search first
+            tos_url = await duckduckgo_search_fallback(search_query, page)
+            if tos_url:
+                logger.info(f"Found ToS via DuckDuckGo: {tos_url}")
+                return tos_url
+            
+            # Try Bing search as backup
+            tos_url = await bing_search_fallback(search_query, page)
+            if tos_url:
+                logger.info(f"Found ToS via Bing: {tos_url}")
+                return tos_url
+            
+            # Try Yahoo search as last resort
+            tos_url = await yahoo_search_fallback(search_query, page)
+            if tos_url:
+                logger.info(f"Found ToS via Yahoo: {tos_url}")
+                return tos_url
+            
+            logger.warning("Could not find ToS for Play Store app")
+            return None
+        
+        finally:
+            # Clean up browser resources
+            await browser_context.close()
+            await browser.close()
+            await playwright.stop()
+    
+    except Exception as e:
+        logger.error(f"Error finding Play Store ToS: {e}")
+        return None
 
 def normalize_url(url: str) -> str:
     """Normalize URL to handle common variations"""
