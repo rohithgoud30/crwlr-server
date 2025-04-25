@@ -604,7 +604,8 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
 
 async def setup_browser(playwright=None):
     """
-    Setup browser with optimized configurations for performance.
+    Setup browser with optimized configurations for performance and anti-bot detection.
+    Implements more human-like behavior to avoid common bot detection mechanisms.
     """
     if not playwright:
         playwright = await async_playwright().start()
@@ -612,62 +613,132 @@ async def setup_browser(playwright=None):
         # Use random user agent
         user_agent = random.choice(USER_AGENTS)
 
-        # Get headless setting from environment or default to True for performance
-        # Set to False only for debugging when needed
-        headless = True
+        # Get headless setting - use False for better bot avoidance
+        # We wanted to use "new" headless mode but it's causing an error
+        headless = False
 
         print(f"Browser headless mode: {headless}")
 
-        # Launch browser with optimized settings
+        # Launch browser with optimized settings for bot-detection evasion
         browser = await playwright.chromium.launch(
-            headless=headless,  # Set to True for better performance
+            headless=headless,  # Use boolean False instead of string "new"
+            # channel="chrome" parameter may not be supported in all environments
+            # so we'll remove it to ensure compatibility
             args=[
                 "--no-sandbox",
+                # Removed telltale flags that make detection easier
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu",
+                # Don't disable GPU as it's a tell for bot detection
+                # "--disable-gpu",
                 "--disable-infobars",
-                "--window-size=1920,1080",  # Maximum window size for better rendering
-                "--disable-extensions",
-                "--disable-features=site-per-process",  # For memory optimization
+                "--window-size=1366,768",  # Common screen resolution
+                # Don't disable extensions as it's a tell for bot detection
+                # "--disable-extensions",
+                "--disable-automation",  # Helps avoid automation detection
             ],
             chromium_sandbox=False,
-            slow_mo=20,  # Reduced delay for better performance
+            slow_mo=random.randint(10, 30),  # Randomized slight delay for more human-like behavior
         )
 
-        # Create context with optimized settings
+        # Create context with human-like settings
         context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080},  # Maximum viewport size
+            viewport={"width": 1366, "height": 768},  # Common viewport size
             user_agent=user_agent,
             locale="en-US",
             timezone_id="America/New_York",
+            device_scale_factor=1,  # Important for WebGL/Canvas fingerprinting
+            is_mobile=False,
+            has_touch=False,
             extra_http_headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
-                "DNT": "1",
-                "Connection": "keep-alive",
+                "Sec-Ch-Ua": '"Chromium";v="116", "Not)A;Brand";v="24", "Google Chrome";v="116"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
                 "Upgrade-Insecure-Requests": "1",
+                "Connection": "keep-alive",
             },
         )
 
-        # Add minimal stealth script
+        # Add comprehensive stealth script to override navigator properties
         await context.add_init_script(
             """
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            () => {
+                // Override webdriver property
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                
+                // Add fake plugins/languages for more human-like fingerprint
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        {
+                            name: 'Chrome PDF Plugin',
+                            description: 'Portable Document Format',
+                            filename: 'internal-pdf-viewer',
+                            length: 1
+                        },
+                        {
+                            name: 'Chrome PDF Viewer',
+                            description: '',
+                            filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                            length: 1
+                        },
+                        {
+                            name: 'Native Client',
+                            description: '',
+                            filename: 'internal-nacl-plugin',
+                            length: 1
+                        }
+                    ]
+                });
+                
+                // Fix languages
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+                
+                // Hide automation-related properties
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+                );
+                
+                // Modify window.chrome presence
+                if (window.chrome === undefined) {
+                    window.chrome = {
+                        runtime: {},
+                        loadTimes: function() {},
+                        app: {},
+                        csi: function() {},
+                    };
+                }
+                
+                // Prevent iframe detection technique
+                try {
+                    Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+                        get: function() {
+                            return window;
+                        }
+                    });
+                } catch (e) {}
+            }
         """
         )
 
         # Create a page
         page = await context.new_page()
 
-        # Random delay function with shorter times for performance
+        # Random delay function with variable timing
         async def random_delay(min_ms=100, max_ms=300):
+            # More variable delay than the original
             delay = random.randint(min_ms, max_ms)
             await page.wait_for_timeout(delay)
 
-        # Set reasonable timeouts
-        page.set_default_timeout(10000)  # Reduced timeout
+        # Set reasonable timeouts - not too short, which would indicate automation
+        page.set_default_timeout(15000)  # 15 seconds is more human-like
 
         return browser, context, page, random_delay
 
@@ -679,25 +750,74 @@ async def setup_browser(playwright=None):
 
 
 async def navigate_with_retry(page, url, max_retries=2):
-    """Navigate to URL with optimized retry logic."""
+    """
+    Navigate to URL with optimized retry logic and human-like behaviors to avoid bot detection.
+    """
     for attempt in range(max_retries):
         try:
-            # Add shorter random delay between attempts
+            # Add varying delay between attempts to appear more human-like
             if attempt > 0:
-                delay = random.randint(200, 300)  # Reduced delay for better performance
+                delay = random.randint(500, 1500)  # More human-like pause between retries
                 logger.info(f"Waiting {delay/1000}s before retry {attempt+1}...")
                 await page.wait_for_timeout(delay)
 
             logger.info(f"Navigation attempt {attempt+1}/{max_retries} to {url}")
+            
+            # Simulate human pre-navigation behavior
+            if attempt == 0:
+                # Sometimes move the mouse around first (simulating human pre-click behavior)
+                if random.random() < 0.7:  # 70% chance
+                    x, y = random.randint(100, 700), random.randint(100, 500)
+                    await page.mouse.move(x, y, steps=random.randint(3, 7))
+                    
+                # Occasionally pause like a human would
+                if random.random() < 0.3:  # 30% chance
+                    await page.wait_for_timeout(random.randint(200, 800))
 
-            # Optimized navigation strategy with shorter timeout
-            response = await page.goto(url, timeout=3000, wait_until="domcontentloaded")  # Reduced timeout to 3 seconds
+            # Use a more human-like navigation approach
+            response = await page.goto(
+                url, 
+                timeout=15000,  # Longer timeout like a human would have
+                wait_until=random.choice(["domcontentloaded", "networkidle"])  # Vary the navigation completion criteria
+            )
+            
+            # After navigation, perform some natural human-like behaviors
+            await page.wait_for_timeout(random.randint(300, 700))  # Pause briefly after page loads
+            
+            # Occasionally resize window slightly (human behavior)
+            if random.random() < 0.2:  # 20% chance
+                current_viewport = await page.evaluate("""() => { 
+                    return { width: window.innerWidth, height: window.innerHeight } 
+                }""")
+                new_width = current_viewport['width'] + random.randint(-20, 20)
+                new_height = current_viewport['height'] + random.randint(-10, 10)
+                await page.set_viewport_size({"width": new_width, "height": new_height})
+            
+            # Add a small scroll after loading
+            if random.random() < 0.8:  # 80% chance
+                # Scroll down slightly first like a human scanning the page
+                scroll_y = random.randint(100, 300)
+                await page.evaluate(f"window.scrollBy(0, {scroll_y})")
+                # Brief pause after scrolling
+                await page.wait_for_timeout(random.randint(70, 150))
 
-            # Quick check for anti-bot measures
+            # Check for anti-bot measures
             is_anti_bot, patterns = await detect_anti_bot_patterns(page)
             if is_anti_bot:
                 if attempt < max_retries - 1:
                     logger.warning(f"Detected anti-bot protection, trying alternative approach...")
+                    
+                    # If we encounter anti-bot protection, try to scroll naturally and wait
+                    # This sometimes helps with Cloudflare and similar protections
+                    await page.evaluate("""() => {
+                        const scrollDown = () => {
+                            window.scrollBy(0, Math.floor(Math.random() * 30) + 5);
+                        };
+                        for (let i = 0; i < 20; i++) {
+                            setTimeout(scrollDown, i * (Math.floor(Math.random() * 20) + 5));
+                        }
+                    }""")
+                    await page.wait_for_timeout(3000)  # Wait for potential verification to complete
                     continue
                 else:
                     logger.warning("All navigation attempts blocked by anti-bot protection")
@@ -718,40 +838,238 @@ async def navigate_with_retry(page, url, max_retries=2):
 
 async def detect_anti_bot_patterns(page):
     """
-    Optimized anti-bot detection that runs faster.
+    Advanced anti-bot detection with comprehensive checks for various protection systems.
+    Detects Cloudflare, reCAPTCHA, hCaptcha, DataDome, PerimeterX and other common anti-bot systems.
     """
     try:
-        # Quick way to check for common anti-bot patterns without complex DOM operations
-        anti_bot_patterns = await page.evaluate(
+        # Comprehensive check looking for multiple anti-bot protection systems
+        anti_bot_detection = await page.evaluate(
             """() => {
-                // Optimize: Only check the head and first parts of the body
-                const firstPartOfHtml = document.head.innerHTML + 
-                                      document.body.innerHTML.substring(0, 5000);
-                const html = firstPartOfHtml.toLowerCase();
+                // Helper function to check if an element exists but is potentially hidden from simple queries
+                const elementExists = (selector) => {
+                    try {
+                        return document.querySelector(selector) !== null;
+                    } catch (e) {
+                        return false;
+                    }
+                };
                 
-                // Check for common anti-bot keywords with faster string checks
-                const isCloudflare = html.indexOf('cloudflare') !== -1 && 
-                                  (html.indexOf('security check') !== -1 || 
-                                   html.indexOf('challenge') !== -1);
-                const isRecaptcha = html.indexOf('recaptcha') !== -1;
-                const isHcaptcha = html.indexOf('hcaptcha') !== -1;
-                const isBotDetection = html.indexOf('bot detection') !== -1 || 
-                                    (html.indexOf('please wait') !== -1 && 
-                                     html.indexOf('redirecting') !== -1);
+                // Helper to check if text appears in page source
+                const sourceContains = (text) => {
+                    const html = document.documentElement.outerHTML.toLowerCase();
+                    return html.includes(text);
+                };
                 
-            return {
-                isAntiBot: isCloudflare || isRecaptcha || isHcaptcha || isBotDetection,
-                url: window.location.href,
-                title: document.title
-            };
-    }"""
+                // Check for common bot detection systems
+                const results = {
+                    isAntiBot: false,
+                    detections: [],
+                    url: window.location.href,
+                    title: document.title
+                };
+                
+                // 1. Check for Cloudflare
+                if (
+                    sourceContains('cloudflare') && 
+                    (sourceContains('security check') || sourceContains('challenge') || sourceContains('jschl-answer'))
+                ) {
+                    results.isAntiBot = true;
+                    results.detections.push('cloudflare');
+                }
+                
+                // 2. Check for reCAPTCHA 
+                if (
+                    elementExists('.g-recaptcha') || 
+                    elementExists('iframe[src*="recaptcha"]') ||
+                    sourceContains('grecaptcha') ||
+                    window.grecaptcha
+                ) {
+                    results.isAntiBot = true;
+                    results.detections.push('recaptcha');
+                }
+                
+                // 3. Check for hCaptcha
+                if (
+                    elementExists('.h-captcha') || 
+                    elementExists('iframe[src*="hcaptcha"]') ||
+                    sourceContains('hcaptcha') ||
+                    window.hcaptcha
+                ) {
+                    results.isAntiBot = true;
+                    results.detections.push('hcaptcha');
+                }
+                
+                // 4. Check for DataDome
+                if (
+                    sourceContains('datadome') || 
+                    window._dd_s ||
+                    document.cookie.includes('datadome')
+                ) {
+                    results.isAntiBot = true;
+                    results.detections.push('datadome');
+                }
+                
+                // 5. Check for PerimeterX
+                if (
+                    sourceContains('perimeterx') || 
+                    sourceContains('px-captcha') ||
+                    document.cookie.includes('_px')
+                ) {
+                    results.isAntiBot = true;
+                    results.detections.push('perimeterx');
+                }
+                
+                // 6. Check for Akamai Bot Manager
+                if (
+                    sourceContains('akamai') && 
+                    sourceContains('bot') &&
+                    document.cookie.includes('ak_bmsc')
+                ) {
+                    results.isAntiBot = true;
+                    results.detections.push('akamai');
+                }
+                
+                // 7. Check for common WAFs (Web Application Firewalls)
+                if (sourceContains('waf') && (sourceContains('block') || sourceContains('denied'))) {
+                    results.isAntiBot = true;
+                    results.detections.push('waf');
+                }
+                
+                // 8. Check for IP blocking messages
+                if (
+                    sourceContains('access denied') || 
+                    sourceContains('blocked') || 
+                    sourceContains('your ip has been') ||
+                    sourceContains('automated access')
+                ) {
+                    results.isAntiBot = true;
+                    results.detections.push('ip_block');
+                }
+                
+                // 9. Check for rate limiting
+                if (
+                    sourceContains('rate limit') || 
+                    sourceContains('too many requests') || 
+                    sourceContains('try again later')
+                ) {
+                    results.isAntiBot = true;
+                    results.detections.push('rate_limit');
+                }
+                
+                // 10. Check for common fingerprinting scripts
+                if (
+                    sourceContains('fingerprintjs') || 
+                    sourceContains('tmx.js') ||
+                    (window.document.FingerprintJS || window.fingerprintjs)
+                ) {
+                    // This alone doesn't mean we're blocked, but tracking is present
+                    results.detections.push('fingerprinting');
+                }
+                
+                // 11. Check for suspicious redirections indicating challenge pages
+                if (document.location.pathname.includes('/cdn-cgi/') && sourceContains('challenge')) {
+                    results.isAntiBot = true;
+                    results.detections.push('cdn_challenge');
+                }
+                
+                // 12. Check for unusual layout that might indicate a challenge page
+                if (document.body && document.body.children.length < 5 && document.querySelectorAll('iframe').length > 0) {
+                    // Very simple page with iframes often indicates a challenge
+                    if (!results.isAntiBot) {
+                        results.detections.push('suspicious_layout');
+                    }
+                }
+                
+                // Check if the page has JS challenges or timers (common in anti-bot systems)
+                const hasJSChallenge = sourceContains('challenge') && sourceContains('timeout');
+                if (hasJSChallenge) {
+                    results.isAntiBot = true;
+                    results.detections.push('js_challenge');
+                }
+                
+                // Get meta information about the page for better analysis
+                results.contentLength = document.documentElement.innerHTML.length;
+                results.numElements = document.getElementsByTagName('*').length;
+                results.hasRecaptchaAPI = typeof window.grecaptcha !== 'undefined';
+                
+                return results;
+            }"""
         )
-
-        if anti_bot_patterns["isAntiBot"]:
-            logger.warning(f"Detected anti-bot protection")
-            logger.info(f"Anti-bot page URL: {anti_bot_patterns['url']}")
-            logger.info(f"Anti-bot page title: {anti_bot_patterns['title']}")
-            return True, ["bot_protection"]
+        
+        # Process detection results
+        if anti_bot_detection["isAntiBot"]:
+            logger.warning(f"Detected anti-bot protection: {', '.join(anti_bot_detection['detections'])}")
+            logger.info(f"Anti-bot page URL: {anti_bot_detection['url']}")
+            logger.info(f"Anti-bot page title: {anti_bot_detection['title']}")
+            
+            # Check for specific anti-bot systems to handle specially
+            patterns = anti_bot_detection.get("detections", [])
+            
+            # If Cloudflare detected, we might need special handling
+            if "cloudflare" in patterns:
+                logger.warning("Cloudflare protection detected - may need to wait longer")
+            
+            # If CAPTCHA detected, might need human intervention
+            if "recaptcha" in patterns or "hcaptcha" in patterns:
+                logger.warning("CAPTCHA detected - may require manual solving")
+            
+            return True, patterns
+        
+        # Additional browser/environment fingerprinting detection
+        fingerprinting_detected = await page.evaluate("""() => {
+            const detections = [];
+            
+            // Check for canvas fingerprinting
+            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            let canvasFingerprinting = false;
+            HTMLCanvasElement.prototype.toDataURL = function(type) {
+                canvasFingerprinting = true;
+                return originalToDataURL.apply(this, arguments);
+            };
+            
+            // Force a single execution of any queued fingerprinting
+            setTimeout(() => {}, 50);
+            
+            // Check for WebRTC IP detection
+            if (window.RTCPeerConnection || window.webkitRTCPeerConnection) {
+                detections.push('webrtc_detection');
+            }
+            
+            // Check for navigator fingerprinting
+            const navigatorProps = [
+                'userAgent', 'appVersion', 'platform', 'language', 'languages',
+                'hardwareConcurrency', 'deviceMemory', 'vendor', 'appName',
+                'plugins', 'mimeTypes'
+            ];
+            
+            const navigatorAccessed = navigatorProps.filter(prop => {
+                try {
+                    if (navigator[prop]) return true;
+                } catch(e) {
+                    return false;
+                }
+            });
+            
+            if (navigatorAccessed.length > 5) {
+                detections.push('navigator_profiling');
+            }
+            
+            // Restore original canvas function
+            HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
+            
+            if (canvasFingerprinting) {
+                detections.push('canvas_fingerprinting');
+            }
+            
+            return detections;
+        }""")
+        
+        # If fingerprinting detected but no anti-bot yet, this is a hint but not conclusive
+        if fingerprinting_detected and len(fingerprinting_detected) > 0:
+            logger.info(f"Detected fingerprinting techniques: {', '.join(fingerprinting_detected)}")
+            # Only mark as anti-bot if we have multiple aggressive fingerprinting techniques
+            if len(fingerprinting_detected) >= 2:
+                return True, fingerprinting_detected
 
         return False, []
     except Exception as e:
@@ -1124,19 +1442,123 @@ async def find_matching_link(page, context, unverified_result=None):
         return None, page, unverified_result
 
 
-async def click_and_wait_for_navigation(page, element, timeout=2000):
-    """Click a link and wait for navigation with shorter timeout."""
+async def click_and_wait_for_navigation(page, element, timeout=3000):
+    """
+    Click a link with human-like behavior and wait for navigation.
+    Implements natural mouse movement and randomized delays between actions.
+    """
     try:
         # Store the current URL before clicking
         current_url = page.url
         
+        # Get element position and dimensions for natural click
+        bound_box = await element.bounding_box()
+        if not bound_box:
+            print("Element not visible or has no bounding box")
+            return False
+            
+        # Calculate a random position within the element (slightly off-center)
+        center_x = bound_box['x'] + bound_box['width'] / 2
+        center_y = bound_box['y'] + bound_box['height'] / 2
+        
+        # Add slight randomness to click position (more human-like)
+        click_x = center_x + random.randint(-int(bound_box['width']/4), int(bound_box['width']/4))
+        click_y = center_y + random.randint(-int(bound_box['height']/4), int(bound_box['height']/4))
+        
+        # Make sure we're still within the element
+        click_x = max(bound_box['x'] + 2, min(click_x, bound_box['x'] + bound_box['width'] - 2))
+        click_y = max(bound_box['y'] + 2, min(click_y, bound_box['y'] + bound_box['height'] - 2))
+        
+        # Get current mouse position
+        current_mouse = await page.evaluate("""
+            () => {
+                return { 
+                    x: window.mouseX || 100, 
+                    y: window.mouseY || 100 
+                }
+            }
+        """)
+        
+        start_x = current_mouse.get('x', 100)
+        start_y = current_mouse.get('y', 100)
+        
+        # Human-like mouse movement (bezier curve) to the element
+        await page.evaluate("""
+            (startX, startY, endX, endY) => {
+                // Store mouse position globally
+                window.mouseX = startX;
+                window.mouseY = startY;
+                
+                // Create bezier curve for natural movement
+                function bezier(t, p0, p1, p2, p3) {
+                    const cX = 3 * (p1 - p0);
+                    const bX = 3 * (p2 - p1) - cX;
+                    const aX = p3 - p0 - cX - bX;
+                    
+                    return aX * Math.pow(t, 3) + bX * Math.pow(t, 2) + cX * t + p0;
+                }
+                
+                // Create control points with randomness for human curve
+                const ctrlX1 = startX + (endX - startX) * (0.3 + Math.random() * 0.2);
+                const ctrlY1 = startY + (endY - startY) * (0.1 + Math.random() * 0.2);
+                const ctrlX2 = startX + (endX - startX) * (0.7 + Math.random() * 0.2);
+                const ctrlY2 = startY + (endY - startY) * (0.8 + Math.random() * 0.2);
+                
+                const numSteps = Math.floor(Math.random() * 10) + 10; // 10-20 steps
+                const duration = Math.floor(Math.random() * 400) + 300; // 300-700ms
+                
+                // Simulate the mouse movement
+                for (let i = 0; i <= numSteps; i++) {
+                    setTimeout(() => {
+                        const t = i / numSteps;
+                        const x = bezier(t, startX, ctrlX1, ctrlX2, endX);
+                        const y = bezier(t, startY, ctrlY1, ctrlY2, endY);
+                        
+                        // Update stored position
+                        window.mouseX = x;
+                        window.mouseY = y;
+                        
+                        // Dispatch a mousemove event if this was a real browser
+                        const evt = new MouseEvent('mousemove', {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: x,
+                            clientY: y
+                        });
+                        document.elementFromPoint(x, y)?.dispatchEvent(evt);
+                    }, (duration / numSteps) * i);
+                }
+            }
+        """, start_x, start_y, click_x, click_y)
+        
+        # Small random delay before clicking (like a real user hesitating)
+        await page.wait_for_timeout(random.randint(70, 220))
+        
+        # Move the mouse to the actual click position
+        await page.mouse.move(click_x, click_y)
+        
+        # Small delay between positioning and clicking
+        await page.wait_for_timeout(random.randint(30, 100))
+        
         # Use page.expect_navigation for modern Playwright API
         async with page.expect_navigation(timeout=timeout, wait_until="domcontentloaded") as navigation_info:
-            await element.click()
+            # Click with a randomized delay (simulates how long mouse button is pressed)
+            await page.mouse.down()
+            await page.wait_for_timeout(random.randint(20, 70))  # Random press duration
+            await page.mouse.up()
             
         # Wait for navigation to complete or timeout
         try:
             await navigation_info.value
+            
+            # After successful navigation, add human-like behavior
+            await page.wait_for_timeout(random.randint(200, 500))  # Pause to "look" at the new page
+            
+            # Occasionally do a small scroll after navigation (like a human would)
+            if random.random() < 0.7:  # 70% chance
+                scroll_y = random.randint(80, 250)
+                await page.evaluate(f"window.scrollBy(0, {scroll_y})")
+                
             return True
         except Exception as e:
             print(f"Navigation error: {str(e)}")
@@ -1155,9 +1577,10 @@ async def smooth_scroll_and_click(
     page, context, unverified_result=None, step=200, delay=30
 ):
     """
-    Smooth scroll through the page to find ToS links.
+    Smooth scroll through the page using human-like patterns to find ToS links.
+    Implements natural scrolling with variable speed and occasional pauses to mimic human browsing.
     """
-    print("🔃 Starting smooth scroll with strong term matching...")
+    print("🔃 Starting human-like smooth scroll to find terms links...")
     high_score_footer_link = None
     
     try:
@@ -1180,6 +1603,22 @@ async def smooth_scroll_and_click(
             came_from_app_store = context.get("came_from_app_store", False)
             came_from_play_store = context.get("came_from_play_store", False)
         
+        # Human-like behavior: Move the mouse to a random position before scrolling
+        viewport_size = await page.evaluate("""() => {
+            return {
+                width: window.innerWidth,
+                height: window.innerHeight
+            }
+        }""")
+        
+        # Random mouse position within viewport
+        mouse_x = random.randint(100, viewport_size['width'] - 100)
+        mouse_y = random.randint(100, viewport_size['height'] - 100)
+        await page.mouse.move(mouse_x, mouse_y, steps=random.randint(3, 8))
+        
+        # Brief random pause before interaction
+        await page.wait_for_timeout(random.randint(200, 600))
+        
         # Try to find the footer first as it often contains ToS links
         footer_selector = await page.evaluate("""
             () => {
@@ -1190,17 +1629,65 @@ async def smooth_scroll_and_click(
         
         if footer_selector:
             print(f"Found footer with selector: {footer_selector}")
-            # Just scroll to the footer and look for ToS links there
-            await page.evaluate(f"document.querySelector('{footer_selector}').scrollIntoView()")
-            await page.wait_for_timeout(500)  # Short wait for any animations
+            # Scroll to the footer with a natural human-like scrolling pattern
+            await page.evaluate(f"""() => {{
+                // Get the element position
+                const footer = document.querySelector('{footer_selector}');
+                if (!footer) return;
+                
+                const footerTop = footer.getBoundingClientRect().top + window.scrollY;
+                const startY = window.scrollY;
+                const distance = footerTop - startY;
+                
+                // Natural easing function for human-like scrolling
+                const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+                
+                // Set up scrolling animation with variable speeds
+                const duration = {random.randint(800, 1500)};  // Random duration
+                const startTime = Date.now();
+                
+                return new Promise(resolve => {{
+                    function scrollStep() {{
+                        const elapsed = Date.now() - startTime;
+                        const progress = Math.min(elapsed / duration, 1);
+                        const easedProgress = easeOutCubic(progress);
+                        
+                        // Calculate new position with slight random variation (like human jitter)
+                        const currentY = startY + (distance * easedProgress);
+                        const jitter = progress < 1 ? Math.random() * 2 - 1 : 0; // Small random movement
+                        
+                        window.scrollTo(0, currentY + jitter);
+                        
+                        if (progress < 1) {{
+                            // Add slight randomness to scroll timing
+                            setTimeout(scrollStep, Math.random() * 10 + 10);
+                        }} else {{
+                            // Small pause at the end of scrolling
+                            setTimeout(resolve, {random.randint(300, 600)});
+                        }}
+                    }}
+                    
+                    // Occasionally add a brief pause during scrolling (like a human getting distracted)
+                    if (Math.random() < 0.3) {{
+                        setTimeout(scrollStep, {random.randint(200, 800)});
+                    }} else {{
+                        scrollStep();
+                    }}
+                }});
+            }}""")
+            
+            # Additional human-like pause after scrolling to footer
+            await page.wait_for_timeout(random.randint(500, 900))
         
-        # Get all links that match ToS patterns
+        # Get all links that match ToS patterns with a more comprehensive search
         links = await page.evaluate("""
             () => {
                 const links = [];
+                
+                // Check all link elements
                 document.querySelectorAll('a[href]').forEach(link => {
                     const text = link.textContent.trim().toLowerCase();
-                        const href = link.href.toLowerCase();
+                    const href = link.href.toLowerCase();
                     
                     // Skip javascript, mailto, etc.
                     if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) {
@@ -1232,11 +1719,34 @@ async def smooth_scroll_and_click(
                     if (href.includes('legal/terms')) score += 40;
                     if (href.includes('agreement')) score += 30;
                     
+                    // Add bonus for links in footer area
+                    if (link.closest('footer, [id*="foot"], [class*="foot"]')) {
+                        score += 40;
+                    }
+                    
+                    // Add bonus for links at bottom of page
+                    const rect = link.getBoundingClientRect();
+                    const pageHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+                    const linkPosition = rect.top + window.scrollY;
+                    if (linkPosition > (pageHeight * 0.7)) {
+                        score += 20;
+                    }
+                    
                     if (score >= 60) {
+                        // Get extra info about the link's position for more natural clicking
+                        const rect = link.getBoundingClientRect();
                         links.push({
                             text: text,
                             href: link.href,
-                            score: score
+                            score: score,
+                            x: rect.left + (rect.width / 2),
+                            y: rect.top + (rect.height / 2),
+                            width: rect.width,
+                            height: rect.height,
+                            isVisible: rect.height > 0 && rect.width > 0 && 
+                                       rect.top >= 0 && rect.left >= 0 &&
+                                       rect.bottom <= window.innerHeight && 
+                                       rect.right <= window.innerWidth
                         });
                     }
                 });
@@ -1283,15 +1793,263 @@ async def smooth_scroll_and_click(
         # Sort links by score
         filtered_links.sort(key=lambda x: x['score'], reverse=True)
         
-        # If we have links, return the best one without navigating
+        # If we have links, try to click on the best one with natural mouse movement
         if filtered_links:
-            best_link = filtered_links[0]['href']
-            best_score = filtered_links[0]['score']
+            best_link = filtered_links[0]
+            best_link_url = best_link['href']
+            best_score = best_link['score']
             
-            # Skip full-page scrolling since we already found high-confidence links
-            print(f"Returning best link without navigation: {best_link} (Score: {best_score})")
-            return best_link, page, unverified_result
+            print(f"Found best link: {best_link['text']} - {best_link_url} (Score: {best_score})")
+            
+            # If the link isn't visible in viewport, scroll to it first with natural movement
+            if not best_link.get('isVisible', False):
+                print("Link not visible in viewport, scrolling to it with natural movement...")
+                
+                # Get link position
+                link_x = best_link.get('x', 0)
+                link_y = best_link.get('y', 0)
+                
+                # Natural scroll to the element
+                await page.evaluate(f"""() => {{
+                    const targetY = {link_y};
+                    const viewportHeight = window.innerHeight;
+                    const targetScroll = Math.max(0, targetY - (viewportHeight / 2));
+                    
+                    // Get current scroll position
+                    const startY = window.scrollY;
+                    const distance = targetScroll - startY;
+                    
+                    // Natural easing function
+                    const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+                    
+                    // Set up scrolling animation
+                    const duration = {random.randint(600, 1200)};
+                    const startTime = Date.now();
+                    
+                    return new Promise(resolve => {{
+                        function step() {{
+                            const elapsed = Date.now() - startTime;
+                            const progress = Math.min(elapsed / duration, 1);
+                            const easedProgress = easeOutCubic(progress);
+                            
+                            // Add slight "human" jitter
+                            const jitter = progress < 1 ? (Math.random() * 2 - 1) : 0;
+                            window.scrollTo(0, startY + (distance * easedProgress) + jitter);
+                            
+                            if (progress < 1) {{
+                                requestAnimationFrame(step);
+                            }} else {{
+                                setTimeout(resolve, {random.randint(200, 500)});
+                            }}
+                        }}
+                        
+                        step();
+                    }});
+                }}""")
+                
+                # Pause briefly after scrolling
+                await page.wait_for_timeout(random.randint(300, 700))
+            
+            # Move mouse to the link with human-like motion
+            if 'x' in best_link and 'y' in best_link:
+                # Start from current mouse position
+                current_pos = await page.evaluate("() => { return { x: window.mouseX || 100, y: window.mouseY || 100 } }")
+                start_x = current_pos.get('x', 100)
+                start_y = current_pos.get('y', 100)
+                
+                # Target is center of element with slight randomness
+                target_x = best_link['x'] + random.randint(-5, 5)
+                target_y = best_link['y'] + random.randint(-3, 3)
+                
+                # Human-like mouse movement with bezier curve
+                await page.evaluate(f"""(startX, startY, endX, endY) => {{
+                    // Store mouse position globally for tracking
+                    window.mouseX = startX;
+                    window.mouseY = startY;
+                    
+                    // Create bezier curve for human-like movement
+                    function bezier(t, p0, p1, p2, p3) {{
+                        const cX = 3 * (p1 - p0);
+                        const bX = 3 * (p2 - p1) - cX;
+                        const aX = p3 - p0 - cX - bX;
+                        
+                        return aX * Math.pow(t, 3) + bX * Math.pow(t, 2) + cX * t + p0;
+                    }}
+                    
+                    // Create control points with some randomness for natural curve
+                    const ctrlX1 = startX + (endX - startX) * (0.3 + Math.random() * 0.2);
+                    const ctrlY1 = startY + (endY - startY) * (0.1 + Math.random() * 0.2);
+                    const ctrlX2 = startX + (endX - startX) * (0.7 + Math.random() * 0.2);
+                    const ctrlY2 = startY + (endY - startY) * (0.8 + Math.random() * 0.2);
+                    
+                    const duration = {random.randint(500, 900)};
+                    const steps = {random.randint(12, 20)};
+                    
+                    // Simulate the mouse movement in steps
+                    return new Promise(resolve => {{
+                        for (let i = 0; i <= steps; i++) {{
+                            setTimeout(() => {{
+                                const t = i / steps;
+                                const x = bezier(t, startX, ctrlX1, ctrlX2, endX);
+                                const y = bezier(t, startY, ctrlY1, ctrlY2, endY);
+                                
+                                // Update stored position
+                                window.mouseX = x;
+                                window.mouseY = y;
+                                
+                                // If this was a real browser with mouse events
+                                const evt = new MouseEvent('mousemove', {{
+                                    bubbles: true,
+                                    cancelable: true,
+                                    clientX: x,
+                                    clientY: y
+                                }});
+                                document.elementFromPoint(x, y)?.dispatchEvent(evt);
+                                
+                                if (i === steps) resolve();
+                            }}, (duration / steps) * i);
+                        }}
+                    }});
+                }}""", start_x, start_y, target_x, target_y)
+                
+                # Small pause before clicking like a human would
+                await page.wait_for_timeout(random.randint(70, 150))
+                
+                # Click the element (using mouse position from above)
+                try:
+                    # Find the element to click
+                    elements = await page.query_selector_all(f"a[href='{best_link_url}']")
+                    if elements and len(elements) > 0:
+                        # Use the appropriate element
+                        element = elements[0]
+                        # Click with random offset from center and natural delay
+                        await element.click({
+                            "position": {
+                                "x": random.randint(5, int(best_link.get('width', 10) - 5)),
+                                "y": random.randint(3, int(best_link.get('height', 10) - 3))
+                            },
+                            "delay": random.randint(20, 100)  # Human-like click duration
+                        })
+                        
+                        # Wait for navigation to complete
+                        await page.wait_for_load_state("domcontentloaded")
+                        
+                        # Give the page time to settle
+                        await page.wait_for_timeout(random.randint(500, 1000))
+                        
+                        # Return the URL we navigated to
+                        current_url = page.url
+                        print(f"✅ Successfully clicked and navigated to: {current_url}")
+                        return current_url, page, unverified_result
+                    else:
+                        print(f"Element for URL {best_link_url} not found, returning URL without navigation")
+                        return best_link_url, page, unverified_result
+                except Exception as e:
+                    print(f"Error clicking link: {e}")
+                    # Return the URL even if we couldn't click it
+                    return best_link_url, page, unverified_result
+            
+            # If we can't access coordinates, just return the URL without clicking
+            print(f"Returning best link without navigation: {best_link_url} (Score: {best_score})")
+            return best_link_url, page, unverified_result
         
+        # If no high-confidence links found, try scrolling through the page naturally
+        print("No high-confidence links found, performing natural scroll through page...")
+        
+        # Scroll down with natural, human-like pattern
+        await page.evaluate("""() => {
+            return new Promise(resolve => {
+                // Get document height
+                const docHeight = Math.max(
+                    document.body.scrollHeight, 
+                    document.documentElement.scrollHeight
+                );
+                const viewHeight = window.innerHeight;
+                const scrollDistance = docHeight - viewHeight;
+                
+                // Start position
+                let startTime = null;
+                const duration = 3000 + Math.random() * 2000; // Random duration between 3-5s
+                
+                // Create random pauses
+                const pausePoints = [];
+                const numberOfPauses = Math.floor(Math.random() * 3) + 1; // 1-3 pauses
+                
+                for (let i = 0; i < numberOfPauses; i++) {
+                    pausePoints.push({
+                        position: Math.random() * 0.8 + 0.1, // 10%-90% of the scroll
+                        duration: Math.random() * 800 + 400 // 400-1200ms pause
+                    });
+                }
+                
+                // Sort pause points
+                pausePoints.sort((a, b) => a.position - b.position);
+                
+                // Variable to track if we're in a pause
+                let isPausing = false;
+                let currentPauseIdx = 0;
+                
+                // Scroll function with natural motion
+                function smoothScroll(timestamp) {
+                    if (!startTime) startTime = timestamp;
+                    const elapsed = timestamp - startTime;
+                    
+                    // Check if we should pause
+                    if (currentPauseIdx < pausePoints.length) {
+                        const currentPause = pausePoints[currentPauseIdx];
+                        const pausePosition = currentPause.position * duration;
+                        
+                        if (elapsed >= pausePosition && !isPausing) {
+                            isPausing = true;
+                            setTimeout(() => {
+                                isPausing = false;
+                                currentPauseIdx++;
+                                requestAnimationFrame(smoothScroll);
+                            }, currentPause.duration);
+                            return;
+                        }
+                    }
+                    
+                    if (isPausing) return;
+                    
+                    // Calculate progress with easing
+                    const progress = Math.min(elapsed / duration, 1);
+                    
+                    // Easing function for natural movement
+                    // Slight acceleration at start, constant speed in middle, deceleration at end
+                    let easedProgress;
+                    if (progress < 0.2) {
+                        // Accelerating from zero velocity (ease-in)
+                        easedProgress = progress * progress * 5;
+                    } else if (progress > 0.8) {
+                        // Decelerating to zero velocity (ease-out)
+                        const t = (progress - 0.8) * 5;
+                        easedProgress = 0.8 + (1 - (1 - t) * (1 - t)) * 0.2;
+                    } else {
+                        // Constant speed
+                        easedProgress = 0.2 + (progress - 0.2) * 0.75;
+                    }
+                    
+                    // Add slight random jitter for more natural feel
+                    const jitter = (progress < 1) ? (Math.random() * 2 - 1) * 2 : 0;
+                    
+                    // Do the scroll
+                    window.scrollTo(0, easedProgress * scrollDistance + jitter);
+                    
+                    // Continue animation or resolve
+                    if (progress < 1) {
+                        requestAnimationFrame(smoothScroll);
+                    } else {
+                        // Final delay to look at content at bottom
+                        setTimeout(resolve, 1000);
+                    }
+                }
+                
+                // Start animation
+                requestAnimationFrame(smoothScroll);
+            });
+        }""")
+
         print("✅ Reached the bottom of the page.")
 
         # If we found a high score link but couldn't navigate to it, use it as fallback
@@ -1958,7 +2716,7 @@ async def yahoo_search_fallback(query, page):
                             if (link.includes('/RU=')) {
                                 try {
                                     // Extract the actual URL from Yahoo's redirect
-                                    const match = /\/RU=([^\/]+)\//.exec(link);
+                                    const match = /\/RU=([^\\/]+)\//.exec(link);
                                     if (match && match[1]) {
                                         link = decodeURIComponent(match[1]);
                                     }
@@ -2170,12 +2928,12 @@ async def bing_search_fallback(query, page):
                         // Filter out articles/blog posts by checking URL patterns
                         
                         // 1. Filter out date patterns (YYYY/MM/DD) commonly used in news/blog URLs
-                        if (/\/\d{4}\/\d{1,2}\/\d{1,2}\//.test(urlPath)) {
+                        if (/\\/\\d{4}\\/\\d{1,2}\\//.test(urlPath)) {
                             return false;
                         }
                         
                         // 2. Filter out URLs with long numeric IDs (often articles)
-                        if (/\/\d{5,}/.test(urlPath)) {
+                        if (/\\/\\d{5,}/.test(urlPath)) {
                             return false;
                         }
                         
