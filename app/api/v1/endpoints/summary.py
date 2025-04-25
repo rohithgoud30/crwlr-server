@@ -154,11 +154,18 @@ async def generate_summary(request: SummaryRequest, response: Response) -> Summa
         else:
             # Default to using the original value
             doc_type_full = doc_type
+            
+        # Include company name if available
+        company_reference = ""
+        if hasattr(request, 'company_name') and request.company_name:
+            company_name = request.company_name
+            company_reference = f" for {company_name}"
+            logger.info(f"Including company name in summary: {company_name}")
         
         # Construct the prompt
         prompt = f"""100-WORD SUMMARY
 
-Write a concise, factual 100-word summary of the {doc_type_full} for the company described. Focus on the company policies and practices without referencing external services, other companies, or general industry practices.
+Write a concise, factual 100-word summary of the {doc_type_full}{company_reference}. Focus on the company policies and practices without referencing external services, other companies, or general industry practices.
 
 Requirements:
 - Exactly 100 words (±10)
@@ -174,7 +181,7 @@ Provide a direct, factual, and company-specific summary.
 
 ONE-SENTENCE SUMMARY
 
-Write a single sentence (maximum 40 words) summarizing the most important aspect of the {doc_type_full} for the company described. Focus on the company policies and practices without referencing external services, other companies, or general industry practices.
+Write a single sentence (maximum 40 words) summarizing the most important aspect of the {doc_type_full}{company_reference}. Focus on the company policies and practices without referencing external services, other companies, or general industry practices.
 
 Requirements:
 - One clear, direct sentence

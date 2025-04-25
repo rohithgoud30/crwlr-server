@@ -45,12 +45,33 @@ async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type:
     Performs summary, word frequency, and text mining analyses in parallel.
     Returns a tuple of (summary_response, word_freq_response, text_mining_response)
     """
+    # Extract company name from URL if it's in the query string
+    company_name = None
+    try:
+        if "?company=" in doc_url:
+            base_url, query = doc_url.split("?", 1)
+            params = query.split("&")
+            for param in params:
+                if param.startswith("company="):
+                    company_name = param.split("=", 1)[1]
+                    # Remove company parameter from URL for other services
+                    doc_url = base_url
+                    logger.info(f"Extracted company name from URL: {company_name}")
+                    break
+    except Exception as e:
+        logger.warning(f"Error extracting company name from URL: {e}")
+    
     # Create all the requests
     summary_request = SummaryRequest(
         url=doc_url,
         text=extracted_text,
         document_type=doc_type
     )
+    
+    # Add company name to summary request if available
+    if company_name:
+        summary_request.company_name = company_name
+        logger.info(f"Added company name to summary request: {company_name}")
     
     word_freq_request = WordFrequencyRequest(
         url=doc_url,
@@ -360,22 +381,13 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 response.success = False
                 response.message = "Bot verification page detected - unable to access actual content"
                 return response
-        
-        # Perform analysis in parallel
-        analyses = await perform_parallel_analysis(tos_url, extracted_text, "tos")
-        
-        # Set response fields
-        one_sentence_summary = analyses[0].one_sentence_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
-        hundred_word_summary = analyses[0].hundred_word_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
-        word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
-        text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
-        
-        # Get the domain for company info extraction
+                
+        # Extract company name and logo URL right after content extraction
+        # This way we can include the company name in the summary process
         parsed_url = urlparse(request.url)
         domain = parsed_url.netloc
         
         # Extract company name and try to get the logo URL
-        # First try to get company info
         company_name = ""
         logo_url = DEFAULT_LOGO_URL
         try:
@@ -450,6 +462,19 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 logger.error(f"Error in final company name extraction: {e}")
                 company_name = request.url.capitalize()
                 logger.info(f"Emergency fallback: Using URL as company name")
+        
+        # Now create a modified summary request that includes the company name
+        # This is done by modifying the tos_url to include context
+        summary_context_url = f"{tos_url}?company={company_name}"
+        
+        # Perform analysis in parallel with the company name context
+        analyses = await perform_parallel_analysis(summary_context_url, extracted_text, "tos")
+        
+        # Set response fields
+        one_sentence_summary = analyses[0].one_sentence_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
+        hundred_word_summary = analyses[0].hundred_word_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
+        word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
+        text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
         
         response.one_sentence_summary = one_sentence_summary
         response.hundred_word_summary = hundred_word_summary
@@ -538,22 +563,13 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 response.success = False
                 response.message = "Bot verification page detected - unable to access actual content"
                 return response
-        
-        # Perform analysis in parallel
-        analyses = await perform_parallel_analysis(pp_url, extracted_text, "pp")
-        
-        # Set response fields
-        one_sentence_summary = analyses[0].one_sentence_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
-        hundred_word_summary = analyses[0].hundred_word_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
-        word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
-        text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
-        
-        # Get the domain for company info extraction
+                
+        # Extract company name and logo URL right after content extraction
+        # This way we can include the company name in the summary process
         parsed_url = urlparse(request.url)
         domain = parsed_url.netloc
         
         # Extract company name and try to get the logo URL
-        # First try to get company info
         company_name = ""
         logo_url = DEFAULT_LOGO_URL
         try:
@@ -628,6 +644,19 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 logger.error(f"Error in final company name extraction: {e}")
                 company_name = request.url.capitalize()
                 logger.info(f"Emergency fallback: Using URL as company name")
+                
+        # Now create a modified summary request that includes the company name
+        # This is done by modifying the pp_url to include context
+        summary_context_url = f"{pp_url}?company={company_name}"
+        
+        # Perform analysis in parallel with the company name context
+        analyses = await perform_parallel_analysis(summary_context_url, extracted_text, "pp")
+        
+        # Set response fields
+        one_sentence_summary = analyses[0].one_sentence_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
+        hundred_word_summary = analyses[0].hundred_word_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
+        word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
+        text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
         
         response.one_sentence_summary = one_sentence_summary
         response.hundred_word_summary = hundred_word_summary

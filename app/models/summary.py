@@ -8,6 +8,7 @@ class SummaryRequest(BaseModel):
     document_type: Literal["tos", "pp"]  # Type of document (only "tos" or "pp" allowed)
     text: Optional[str] = None
     extract_response: Optional[ExtractResponse] = None  # Results from extract endpoint if available
+    company_name: Optional[str] = None  # Company name for more realistic summaries
 
 class SummaryResponse(BaseModel):
     url: Optional[str] = None  # The actual document URL, now optional
