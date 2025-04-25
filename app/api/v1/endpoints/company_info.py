@@ -375,7 +375,7 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             default_company_name = domain.split('.')[0].capitalize() if domain else extract_company_name_from_domain(url.split('/')[0])
         except:
             # Final fallback - extract something usable from the URL
-            default_company_name = url.split('/')[-1].capitalize() if url else "Company"
+            default_company_name = url.split('/')[-1].capitalize() if url else "C"
             
         return default_company_name, default_logo_url, False, f"Playwright extraction error: {str(e)}"
     
@@ -614,7 +614,7 @@ async def extract_company_info(url: str) -> tuple:
             default_company_name = extract_company_name_from_domain(domain)
         except:
             # Final fallback - extract something usable from the URL
-            default_company_name = url.split('/')[-1].capitalize() if url else "Company"
+            default_company_name = url.split('/')[-1].capitalize() if url else "C"
         
         return default_company_name, default_logo_url, False, f"Error: {str(e)}"
 
@@ -630,7 +630,7 @@ def extract_company_name_from_domain(domain: str) -> str:
     try:
         # Handle empty domain
         if not domain:
-            return "Company"
+            return "C"
             
         # Remove www. if present
         if domain.startswith('www.'):
@@ -642,7 +642,7 @@ def extract_company_name_from_domain(domain: str) -> str:
             
         # Handle IP addresses or localhost
         if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', domain) or domain.startswith('localhost'):
-            return "Local Company"
+            return "Local"
             
         # Handle domains with port
         if ':' in domain:
@@ -651,9 +651,9 @@ def extract_company_name_from_domain(domain: str) -> str:
         # Simply use the first part of the domain
         company = domain.split('.')[0]
         
-        # Handle very short names (add "Company" suffix)
+        # Handle very short names
         if len(company) <= 2:
-            return f"{company.upper()} Company"
+            return company.upper()
             
         # Format company name (capitalize first letter of each word)
         company_name = string.capwords(company.replace('-', ' ').replace('_', ' '))
@@ -664,8 +664,8 @@ def extract_company_name_from_domain(domain: str) -> str:
         # Never return Unknown Company - use a placeholder derived from the input if possible
         if domain and len(domain) > 0:
             first_char = domain[0].upper()
-            return f"{first_char} Company"
-        return "Company"
+            return first_char
+        return "C"
 
 def extract_company_name(soup: BeautifulSoup) -> str:
     """
@@ -854,7 +854,7 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
             if len(domain_parts) >= 2:
                 company_name = domain_parts[0].split('/')[-1].capitalize()
             else:
-                company_name = url.split('/')[-1].capitalize()
+                company_name = url.split('/')[-1].capitalize() if url else "C"
         
         return CompanyInfoResponse(
             url=url,
