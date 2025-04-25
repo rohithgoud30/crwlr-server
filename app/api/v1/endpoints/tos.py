@@ -1,5 +1,5 @@
 import random
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qs
 import re
 import traceback
 import time
@@ -26,7 +26,58 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
 ]
 
-# Priorities for exact match terms
+def generate_random_user_agent():
+    """
+    Generate a single random user agent string.
+    
+    Returns:
+        str: A realistic user agent string
+    """
+    # Randomly choose browser type
+    browser = random.choice(["chrome", "firefox", "safari", "edge"])
+    
+    # OS options
+    os_options = {
+        "windows": ["Windows NT 10.0", "Windows NT 11.0"],
+        "mac": ["Macintosh; Intel Mac OS X 10_15_7", "Macintosh; Intel Mac OS X 11_0_0"],
+        "linux": ["X11; Linux x86_64", "X11; Ubuntu; Linux x86_64"]
+    }
+    
+    # Simple version ranges
+    version_ranges = {
+        "chrome": list(range(120, 138)),
+        "firefox": list(range(115, 138)),
+        "safari": list(range(16, 21)),
+        "edge": list(range(120, 138))
+    }
+    
+    # Select platform
+    if browser in ["chrome", "firefox", "edge"]:
+        platform = random.choice(["windows", "mac", "linux"])
+    else:  # Safari only on Mac
+        platform = "mac"
+    
+    # Build the user agent string
+    if browser == "chrome":
+        chrome_version = f"{random.choice(version_ranges['chrome'])}.0.{random.randint(1000, 9999)}.{random.randint(10, 999)}"
+        ua = f"Mozilla/5.0 ({random.choice(os_options[platform])}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version} Safari/537.36"
+    
+    elif browser == "firefox":
+        firefox_version = f"{random.choice(version_ranges['firefox'])}.0"
+        ua = f"Mozilla/5.0 ({random.choice(os_options[platform])}; rv:{firefox_version}) Gecko/20100101 Firefox/{firefox_version}"
+    
+    elif browser == "safari":
+        webkit_version = f"605.1.{random.randint(1, 15)}"
+        safari_version = f"{random.choice(version_ranges['safari'])}.0"
+        ua = f"Mozilla/5.0 ({random.choice(os_options['mac'])}) AppleWebKit/{webkit_version} (KHTML, like Gecko) Version/{safari_version} Safari/{webkit_version}"
+    
+    elif browser == "edge":
+        chrome_version = f"{random.choice(version_ranges['chrome'])}.0.{random.randint(1000, 9999)}.{random.randint(10, 999)}"
+        edge_version = f"{random.choice(version_ranges['edge'])}.0.{random.randint(100, 999)}.{random.randint(10, 99)}"
+        ua = f"Mozilla/5.0 ({random.choice(os_options[platform])}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version} Safari/537.36 Edg/{edge_version}"
+    
+    return ua
+
 exactMatchPriorities = {
     "terms of service": 100,
     "terms of use": 95,
@@ -327,65 +378,43 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                 search_query = f"{domain} terms of service, terms of use, user agreement, legal terms"
                 logger.info(f"Using search query: {search_query}")
                 
-                # Try DuckDuckGo search
+                # Use the consensus approach across all search engines
                 try:
-                    logger.info("Trying DuckDuckGo search fallback...")
-                    tos_url = await duckduckgo_search_fallback(search_query, page)
+                    logger.info("Running consensus search across all search engines...")
+                    tos_url, search_results, consensus_links = await consensus_search_fallback(search_query, page)
+                    
                     if tos_url:
                         # Validate the ToS URL isn't a user content page
                         if is_likely_user_generated_content(tos_url):
-                            logger.warning(f"DuckDuckGo result appears to be user-generated content: {tos_url}")
-                            # Skip this result, continue to other methods
+                            logger.warning(f"Consensus search result appears to be user-generated content: {tos_url}")
+                            # Continue to other methods
                         else:
-                            return ToSResponse(
-                            url=url,
-                                tos_url=tos_url,
-                            success=True,
-                            message="Terms of Service found via DuckDuckGo search",
-                            method_used="duckduckgo_search"
-                        )
-                except Exception as e:
-                    logger.warning(f"DuckDuckGo search failed: {e}")
-
-                # Try Bing search
-                try:
-                    logger.info("Trying Bing search fallback...")
-                    tos_url = await bing_search_fallback(search_query, page)
-                    if tos_url:
-                        # Validate the ToS URL isn't a user content page
-                        if is_likely_user_generated_content(tos_url):
-                            logger.warning(f"Bing result appears to be user-generated content: {tos_url}")
-                            # Skip this result, continue to other methods
-                        else:
-                                return ToSResponse(
-                                    url=url,
-                                tos_url=tos_url,
-                                    success=True,
-                                    message="Terms of Service found via Bing search",
-                                    method_used="bing_search"
-                                )
-                except Exception as e:
-                    logger.warning(f"Bing search failed: {e}")
-                
-                # Try Yahoo search as a last resort
-                try:
-                    logger.info("Trying Yahoo search fallback...")
-                    tos_url = await yahoo_search_fallback(search_query, page)
-                    if tos_url:
-                        # Validate the ToS URL isn't a user content page
-                        if is_likely_user_generated_content(tos_url):
-                            logger.warning(f"Yahoo result appears to be user-generated content: {tos_url}")
-                            # Don't return this result, continue to other methods
-                        else:
+                            # Get consensus details for better logging
+                            consensus_count = 1
+                            engines_found = []
+                            
+                            for url, count, score in consensus_links:
+                                if url == normalize_url(tos_url):
+                                    consensus_count = count
+                                    # Find which search engines found this URL
+                                    engines_found = [
+                                        engine for engine, result_url in search_results.items() 
+                                        if normalize_url(result_url) == url
+                                    ]
+                                    break
+                            
+                            consensus_msg = f"Found by {consensus_count} search engines: {', '.join(engines_found)}" if engines_found else ""
+                            
+                            logger.info(f"Found ToS via consensus search: {tos_url} {consensus_msg}")
                             return ToSResponse(
                                 url=url,
-                                    tos_url=tos_url,
+                                tos_url=tos_url,
                                 success=True,
-                                message="Terms of Service found via Yahoo search",
-                                method_used="yahoo_search"
+                                message=f"Terms of Service found via consensus search {consensus_msg}",
+                                method_used="consensus_search"
                             )
                 except Exception as e:
-                    logger.warning(f"Yahoo search failed: {e}")
+                    logger.warning(f"Consensus search failed: {e}")
                 
                 # All search methods failed
                 return ToSResponse(
@@ -518,31 +547,68 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                 search_query = f"{domain_name} terms of service, terms of use, user agreement, legal terms"
                 logger.info(f"Using search query: {search_query}")
                 
-                # Try different search engines with the single query
-                tos_url = await duckduckgo_search_fallback(search_query, page)
+                # Try consensus search with domain name
+                logger.info("Running consensus search with domain name...")
+                tos_url, search_results, consensus_links = await consensus_search_fallback(search_query, page)
+                
                 if tos_url and not is_likely_user_generated_content(tos_url):
-                    logger.info(f"Found ToS via direct search: {tos_url}")
+                    # Get consensus details for better logging
+                    consensus_count = 1
+                    engines_found = []
+                    
+                    for url, count, score in consensus_links:
+                        if url == normalize_url(tos_url):
+                            consensus_count = count
+                            # Find which search engines found this URL
+                            engines_found = [
+                                engine for engine, result_url in search_results.items() 
+                                if normalize_url(result_url) == url
+                            ]
+                            break
+                    
+                    consensus_msg = f"Found by {consensus_count} search engines: {', '.join(engines_found)}" if engines_found else ""
+                    
+                    logger.info(f"Found ToS via domain consensus search: {tos_url} {consensus_msg}")
                     return ToSResponse(
                         url=url,
                         tos_url=tos_url,
                         success=True,
-                        message="Terms of Service found via direct search approach",
-                        method_used="direct_search"
+                        message=f"Terms of Service found via domain consensus search {consensus_msg}",
+                        method_used="domain_consensus_search"
                     )
                 
                 # Try with company name if domain search fails
                 company_search_query = f"{company_name} terms of service, terms of use, user agreement, legal terms"
                 logger.info(f"Using company search query: {company_search_query}")
                 
-                tos_url = await duckduckgo_search_fallback(company_search_query, page)
+                # Try consensus search with company name
+                logger.info("Running consensus search with company name...")
+                tos_url, search_results, consensus_links = await consensus_search_fallback(company_search_query, page)
+                
                 if tos_url and not is_likely_user_generated_content(tos_url):
-                    logger.info(f"Found ToS via company search: {tos_url}")
+                    # Get consensus details for better logging
+                    consensus_count = 1
+                    engines_found = []
+                    
+                    for url, count, score in consensus_links:
+                        if url == normalize_url(tos_url):
+                            consensus_count = count
+                            # Find which search engines found this URL
+                            engines_found = [
+                                engine for engine, result_url in search_results.items() 
+                                if normalize_url(result_url) == url
+                            ]
+                            break
+                    
+                    consensus_msg = f"Found by {consensus_count} search engines: {', '.join(engines_found)}" if engines_found else ""
+                    
+                    logger.info(f"Found ToS via company consensus search: {tos_url} {consensus_msg}")
                     return ToSResponse(
                         url=url,
                         tos_url=tos_url,
                         success=True,
-                        message="Terms of Service found via company name search",
-                        method_used="company_search"
+                        message=f"Terms of Service found via company consensus search {consensus_msg}",
+                        method_used="company_consensus_search"
                     )
                 
                 logger.warning("Direct search approach failed to find ToS URL")
@@ -629,53 +695,62 @@ async def setup_browser(playwright=None):
     if not playwright:
         playwright = await async_playwright().start()
     try:
-        # Use random user agent
-        user_agent = random.choice(USER_AGENTS)
+        # Generate a random user agent
+        user_agent = generate_random_user_agent()
+        logger.info(f"Using user agent: {user_agent}")
+        
+        # Extract browser type for client hints
+        browser_type = "chrome"  # Default
+        if "Firefox" in user_agent:
+            browser_type = "firefox"
+        elif "Safari" in user_agent and "Chrome" not in user_agent:
+            browser_type = "safari"
+        elif "Edg/" in user_agent:
+            browser_type = "edge"
+            
+        # Determine platform from user agent
+        platform = "Windows"  # Default
+        if "Macintosh" in user_agent:
+            platform = "macOS"
+        elif "Linux" in user_agent:
+            platform = "Linux"
+            
+        # Determine if mobile
+        is_mobile = "Mobile" in user_agent or "Android" in user_agent
 
         # Get headless setting - use False for better bot avoidance
-        # We wanted to use "new" headless mode but it's causing an error
         headless = False
         
         print(f"Browser headless mode: {headless}")
 
         # Launch browser with optimized settings for bot-detection evasion
         browser = await playwright.chromium.launch(
-            headless=headless,  # Use boolean False instead of string "new"
-            # channel="chrome" parameter may not be supported in all environments
-            # so we'll remove it to ensure compatibility
+            headless=headless,
             args=[
                 "--no-sandbox",
-                # Removed telltale flags that make detection easier
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                # Don't disable GPU as it's a tell for bot detection
-                # "--disable-gpu",
                 "--disable-infobars",
-                "--window-size=1366,768",  # Common screen resolution
-                # Don't disable extensions as it's a tell for bot detection
-                # "--disable-extensions",
-                "--disable-automation",  # Helps avoid automation detection
+                "--window-size=1366,768",
+                "--disable-automation",
             ],
             chromium_sandbox=False,
             slow_mo=random.randint(10, 30),  # Randomized slight delay for more human-like behavior
         )
 
-        # Create context with human-like settings
+        # Create context with human-like settings and consistent client hints
         context = await browser.new_context(
-            viewport={"width": 1366, "height": 768},  # Common viewport size
+            viewport={"width": 1366, "height": 768},
             user_agent=user_agent,
             locale="en-US",
             timezone_id="America/New_York",
-            device_scale_factor=1,  # Important for WebGL/Canvas fingerprinting
-            is_mobile=False,
-            has_touch=False,
+            device_scale_factor=1,
+            is_mobile=is_mobile,
+            has_touch=is_mobile,
             extra_http_headers={
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
-                "Sec-Ch-Ua": '"Chromium";v="116", "Not)A;Brand";v="24", "Google Chrome";v="116"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
                 "Upgrade-Insecure-Requests": "1",
                 "Connection": "keep-alive",
             },
@@ -688,7 +763,7 @@ async def setup_browser(playwright=None):
                 // Override webdriver property
                 Object.defineProperty(navigator, 'webdriver', { get: () => false });
                 
-                // Add fake plugins/languages for more human-like fingerprint
+                // Add fake plugins for more human-like fingerprint
                 Object.defineProperty(navigator, 'plugins', {
                     get: () => [
                         {
@@ -725,7 +800,7 @@ async def setup_browser(playwright=None):
                     originalQuery(parameters)
                 );
                 
-                // Modify window.chrome presence
+                // Add chrome object if not present
                 if (window.chrome === undefined) {
                     window.chrome = {
                         runtime: {},
@@ -744,7 +819,7 @@ async def setup_browser(playwright=None):
                     });
                 } catch (e) {}
             }
-        """
+            """
         )
 
         # Create a page
@@ -2621,6 +2696,12 @@ def score_tos_url_by_path_specificity(url):
     url = url.lower()
     score = 0
     
+    # Parse the URL
+    parsed_url = urlparse(url)
+    hostname = parsed_url.netloc
+    path = parsed_url.path.strip('/')
+    path_parts = path.split('/')
+    
     # Check for paths that often contain terms of service
     path_patterns = [
         ('/terms', 100),
@@ -2646,19 +2727,77 @@ def score_tos_url_by_path_specificity(url):
         if pattern in url:
             score += pattern_score
     
-    # Prefer URLs with fewer path segments after the term
-    # /terms is better than /terms/something-else
-    path_parts = urlparse(url).path.strip('/').split('/')
-    if len(path_parts) > 0 and any(term in path_parts[0] for term in ['term', 'tos', 'legal', 'agreement']):
-        score += max(0, 50 - (len(path_parts) - 1) * 10)
+    # NEW: Give higher scores for policy-specific domains/subdomains
+    # If hostname contains policy-related keywords
+    policy_domains = ['policy', 'policies', 'legal', 'terms', 'tos', 'privacy']
+    for keyword in policy_domains:
+        if keyword in hostname:
+            score += 70  # Significant boost for policy-specific domains
     
-    # Check for query parameters - prefer URLs without them
-    if '?' in url:
+    # NEW: Analyze domain structure - company main domains are more authoritative than subdomains
+    domain_parts = hostname.split('.')
+    
+    # NEW: Detect if this is a PDF - may contain official policy document
+    if path.endswith('.pdf'):
+        # PDF of terms is usually authoritative but less user-friendly
+        score += 40
+    
+    # NEW: Detect policy domain pattern like policies.example.com or legal.example.com
+    if len(domain_parts) > 2 and domain_parts[0] in policy_domains:
+        score += 60
+    
+    # NEW: Consider URL "cleanliness" - shorter URLs are often more authoritative main policy pages
+    if len(path_parts) <= 2:
+        score += 30  # Boost for concise URLs like example.com/terms
+    
+    # NEW: Boost for root domain policy pages vs subdomain policies
+    # E.g., example.com/terms vs subdomain.example.com/terms
+    if len(domain_parts) == 2 or (len(domain_parts) == 3 and domain_parts[0] == 'www'):
+        score += 40
+    
+    # NEW: Don't penalize language parameters in URLs
+    query_params = parse_qs(parsed_url.query)
+    has_only_language_params = True
+    
+    # Common language/localization parameter names
+    language_params = ['hl', 'lang', 'locale', 'language', 'l']
+    
+    for param in query_params:
+        if param.lower() not in language_params:
+            has_only_language_params = False
+            break
+    
+    # Prefer URLs without query parameters, but don't penalize language parameters
+    if parsed_url.query and not has_only_language_params:
         score -= 30
+    elif parsed_url.query and has_only_language_params:
+        # No penalty for language params, actually a small boost as it suggests localized official content
+        score += 10
     
     # Check for fragments - prefer URLs without them
-    if '#' in url:
+    if parsed_url.fragment:
         score -= 20
+    
+    # NEW: More sophisticated path analysis
+    # Analyze if the path is specifically about terms vs other policies
+    terms_keywords = ['term', 'tos', 'service', 'agreement', 'condition']
+    privacy_keywords = ['privacy', 'data', 'cookie', 'gdpr']
+    
+    # Count term-specific keywords in path
+    term_keyword_count = sum(1 for part in path_parts for keyword in terms_keywords if keyword in part)
+    privacy_keyword_count = sum(1 for part in path_parts for keyword in privacy_keywords if keyword in part)
+    
+    # We're looking for terms, not privacy policies
+    if term_keyword_count > 0:
+        score += term_keyword_count * 25
+    if privacy_keyword_count > 0 and term_keyword_count == 0:
+        # If it's just a privacy policy without terms, reduce score
+        score -= privacy_keyword_count * 15
+    
+    # NEW: Handle the special case of top-level paths
+    # For example: example.com/terms is likely more relevant than example.com/product/terms
+    if len(path_parts) == 1 and any(keyword in path_parts[0] for keyword in terms_keywords):
+        score += 40  # Big boost for top-level terms paths
     
     return score
 
@@ -3099,6 +3238,7 @@ async def bing_search_fallback(query, page):
     except Exception as e:
         print(f"Error in Bing search fallback: {e}")
         return None
+
 
 
 async def duckduckgo_search_fallback(search_query, page):
@@ -4033,3 +4173,163 @@ async def find_tos_via_html_inspection(url: str) -> str:
     except Exception as e:
         logger.error(f"Error during HTML inspection: {e}")
         return None
+
+
+async def consensus_search_fallback(search_query, page):
+    """
+    Runs searches across all search engines and identifies consensus results.
+    
+    This function runs searches on Bing, Yahoo, and DuckDuckGo,
+    then analyzes the results to find URLs that appear in multiple search engines.
+    Links that appear in multiple search engines are likely to be more relevant.
+    
+    Args:
+        search_query: Search query string for finding ToS
+        page: Playwright page to use for searches
+        
+    Returns:
+        Tuple of (best_url, search_results_dict, consensus_links)
+        - best_url: The most likely ToS URL based on consensus
+        - search_results_dict: Dictionary of all search results by engine
+        - consensus_links: List of URLs that appeared in multiple search engines with counts
+    """
+    print(f"Running consensus search across all search engines for: {search_query}")
+    
+    # Dictionary to store all results by search engine
+    all_results = {}
+    
+    # Run all search engines in sequence
+    try:
+        print("Trying Bing search...")
+        bing_url = await bing_search_fallback(search_query, page)
+        if bing_url:
+            all_results["bing"] = bing_url
+            print(f"Bing result: {bing_url}")
+    except Exception as e:
+        print(f"Error in Bing search: {e}")
+    
+    try:
+        print("Trying Yahoo search...")
+        yahoo_url = await yahoo_search_fallback(search_query, page)
+        if yahoo_url:
+            all_results["yahoo"] = yahoo_url
+            print(f"Yahoo result: {yahoo_url}")
+    except Exception as e:
+        print(f"Error in Yahoo search: {e}")
+    
+    try:
+        print("Trying DuckDuckGo search...")
+        ddg_url = await duckduckgo_search_fallback(search_query, page)
+        if ddg_url:
+            all_results["duckduckgo"] = ddg_url
+            print(f"DuckDuckGo result: {ddg_url}")
+    except Exception as e:
+        print(f"Error in DuckDuckGo search: {e}")
+    
+    # Check if we have any results
+    if not all_results:
+        print("No results found from any search engine")
+        return None, {}, []
+    
+    # Normalize all URLs for comparison
+    normalized_results = {}
+    for engine, url in all_results.items():
+        normalized_results[engine] = normalize_url(url)
+    
+    # Extract the domain being searched for
+    search_domain = None
+    domain_match = re.search(r'^(\S+?)(?:\s|$)', search_query)
+    if domain_match:
+        search_domain = domain_match.group(1).lower()
+        # Clean up domain (remove https://, www., etc.)
+        search_domain = re.sub(r'^https?://(www\.)?', '', search_domain)
+        # Remove trailing slash and path
+        search_domain = search_domain.split('/')[0]
+        print(f"Extracted search domain: {search_domain}")
+    
+    # Count occurrences of each URL
+    url_counts = {}
+    for engine, url in normalized_results.items():
+        url_counts[url] = url_counts.get(url, 0) + 1
+    
+    # Create detailed analysis for each URL
+    url_analysis = []
+    
+    for url, count in url_counts.items():
+        # Basic ToS score
+        tos_score = score_tos_url_by_path_specificity(url)
+        
+        # Domain match analysis - prioritize URLs from the exact domain we're searching for
+        url_domain = urlparse(url).netloc.lower()
+        url_domain_clean = re.sub(r'^www\.', '', url_domain)
+        
+        domain_match_score = 0
+        if search_domain and search_domain in url_domain_clean:
+            # If exact domain match
+            if search_domain == url_domain_clean:
+                domain_match_score = 100
+            # If subdomain match like policies.example.com for example.com
+            elif url_domain_clean.endswith(f".{search_domain}"):
+                domain_match_score = 80
+            # If domain appears in URL as a path component, lower score
+            elif search_domain in urlparse(url).path.lower():
+                domain_match_score = 30
+        
+        # URL path analysis - look for indicators of main terms page vs product-specific terms
+        path = urlparse(url).path.lower()
+        path_parts = path.strip('/').split('/')
+        
+        # Analyze path for generality (higher score for more general terms)
+        generality_score = 0
+        
+        # Detect common product-specific terms patterns
+        product_terms = False
+        if len(path_parts) > 1:
+            # Check for patterns like /product/terms or /service/terms
+            for part in path_parts[:-1]:  # Check all parts except the last one
+                if part not in ['terms', 'tos', 'legal', 'policies']:
+                    product_terms = True
+                    break
+        
+        # Main terms usually have simpler paths
+        if not product_terms and len(path_parts) <= 2:
+            generality_score += 40
+        
+        # Root domain TOS pages get priority
+        if not product_terms and (len(path_parts) == 1 or path == '/terms'):
+            generality_score += 30
+        
+        # Add all analysis factors to the detailed list
+        url_analysis.append({
+            'url': url,
+            'consensus_count': count,  # How many engines agree
+            'tos_score': tos_score,  # Score from path specificity function
+            'domain_match_score': domain_match_score,  # How well domain matches search query
+            'generality_score': generality_score,  # How general/main the terms page is
+            'final_score': count + (tos_score * 0.5) + domain_match_score + generality_score
+        })
+    
+    # Sort URLs by final score
+    url_analysis.sort(key=lambda x: x['final_score'], reverse=True)
+    
+    # Create the consensus links list in the expected format for compatibility with calling code
+    consensus_links = [(item['url'], item['consensus_count'], item['tos_score']) for item in url_analysis]
+    
+    # Print analysis of top results
+    print(f"Found {len(url_analysis)} unique URLs across all search engines")
+    for i, item in enumerate(url_analysis[:5]):
+        print(f"Candidate #{i+1}: {item['url']}")
+        print(f"  Score breakdown: Consensus ({item['consensus_count']}), ToS ({item['tos_score']}), Domain match ({item['domain_match_score']}), Generality ({item['generality_score']})")
+        print(f"  Final score: {item['final_score']}")
+        
+        # List which engines found this URL
+        engines_found = [engine for engine, norm_url in normalized_results.items() if norm_url == item['url']]
+        print(f"  Found by: {', '.join(engines_found)}")
+    
+    # Return the URL with highest final score
+    if url_analysis:
+        best_url = url_analysis[0]['url']
+        print(f"Best result: {best_url} (Final score: {url_analysis[0]['final_score']})")
+        return best_url, all_results, consensus_links
+    
+    return None, all_results, consensus_links
