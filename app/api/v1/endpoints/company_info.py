@@ -176,7 +176,6 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
     Extract company info using Playwright as a fallback
     Returns (company_name, logo_url, success, message)
     """
-    default_logo_url = "/placeholder.svg?height=48&width=48"
     playwright = None
     browser = None
     context = None
@@ -199,7 +198,7 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         
         if not response.ok:
             logger.warning(f"Failed to load page with status: {response.status}")
-            return default_company_name, default_logo_url, False, f"Failed to load page: HTTP {response.status}"
+            return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Failed to load page: HTTP {response.status}"
         
         # Add human-like interaction - scroll down smoothly
         await page.evaluate("""
@@ -358,10 +357,10 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             verify_response = await page.request.head(logo_url, timeout=5000)
             if not verify_response.ok:
                 logger.warning(f"Logo URL validation failed: {verify_response.status}")
-                logo_url = default_logo_url
+                logo_url = "/placeholder.svg?height=48&width=48"
         except Exception as e:
             logger.warning(f"Error validating logo URL: {e}")
-            logo_url = default_logo_url
+            logo_url = "/placeholder.svg?height=48&width=48"
         
         return company_name, logo_url, True, "Successfully extracted company information with Playwright"
     
@@ -378,7 +377,7 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             # Final fallback - extract something usable from the URL
             default_company_name = url.split('/')[-1].capitalize() if url else "C"
             
-        return default_company_name, default_logo_url, False, f"Playwright extraction error: {str(e)}"
+        return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
     
     finally:
         # Clean up Playwright resources
@@ -399,9 +398,6 @@ async def extract_company_info(url: str) -> tuple:
     
     Returns a tuple of (company_name, logo_url, success, message)
     """
-    # Set default values
-    default_logo_url = "/placeholder.svg?height=48&width=48"
-    
     try:
         # Validate and normalize the URL
         sanitized_url = sanitize_url(url)
@@ -409,7 +405,7 @@ async def extract_company_info(url: str) -> tuple:
             # If sanitization fails, extract name from original URL
             domain = urlparse(url).netloc if url else url.split('/')[0]
             company_name = extract_company_name_from_domain(domain) if domain else url.split('/')[-1].capitalize()
-            return company_name, default_logo_url, False, f"Invalid URL '{url}'"
+            return company_name, "/placeholder.svg?height=48&width=48", False, f"Invalid URL '{url}'"
             
         normalized_url = normalize_url(sanitized_url)
         
@@ -420,7 +416,7 @@ async def extract_company_info(url: str) -> tuple:
         company_name = extract_company_name_from_domain(domain)
         
         # Initialize with defaults
-        logo_url = default_logo_url
+        logo_url = "/placeholder.svg?height=48&width=48"
         success = False
         message = "Initialization"
         
@@ -595,10 +591,10 @@ async def extract_company_info(url: str) -> tuple:
                     logo_test = requests.head(logo_url, timeout=5)
                     if logo_test.status_code >= 400:
                         logger.warning(f"Logo URL returned error: {logo_test.status_code}")
-                        logo_url = default_logo_url
+                        logo_url = "/placeholder.svg?height=48&width=48"
                 except Exception as e:
                     logger.warning(f"Error verifying logo URL: {e}")
-                    logo_url = default_logo_url
+                    logo_url = "/placeholder.svg?height=48&width=48"
             
         except Exception as e:
             logger.warning(f"BeautifulSoup extraction failed: {e}. Falling back to Playwright.")
@@ -617,7 +613,7 @@ async def extract_company_info(url: str) -> tuple:
             # Final fallback - extract something usable from the URL
             default_company_name = url.split('/')[-1].capitalize() if url else "C"
         
-        return default_company_name, default_logo_url, False, f"Error: {str(e)}"
+        return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Error: {str(e)}"
 
 def extract_company_name_from_domain(domain: str) -> str:
     """Extract company name from domain.
@@ -738,7 +734,6 @@ def extract_logo_url(soup: BeautifulSoup, domain: str) -> str:
     Returns:
         Logo URL or default logo URL if not found
     """
-    default_logo_url = "/placeholder.svg?height=48&width=48"
     base_url = f"https://{domain}"
     
     # Look for schema.org Organization logo first (most accurate)
@@ -817,10 +812,6 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
     """
     url = request.url
     
-    # Default values
-    default_logo_url = "/placeholder.svg?height=48&width=48"
-    logo_url = default_logo_url
-    
     try:
         # Get the domain
         parsed_url = urlparse(url)
@@ -861,7 +852,7 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
         return CompanyInfoResponse(
             url=url,
             company_name=company_name,
-            logo_url=logo_url,
+            logo_url="/placeholder.svg?height=48&width=48",
             success=False,
             message=f"Error extracting company info: {str(e)}"
         ) 
