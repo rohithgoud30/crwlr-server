@@ -369,15 +369,14 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         # Always extract a company name from the domain
         try:
             domain = urlparse(url).netloc if url else ""
-            if domain.startswith('www.'):
-                domain = domain[4:]
-            # Just use the first part of the domain directly
-            default_company_name = domain.split('.')[0].capitalize() if domain else url.split('/')[0].capitalize()
+            if domain:
+                return extract_company_name_from_domain(domain), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
+            else:
+                # If no domain can be extracted, use the URL directly
+                return url.capitalize(), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
         except:
             # Final fallback - extract something usable from the URL
-            default_company_name = url.split('/')[-1].capitalize() if url else "Company"
-            
-        return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
+            return url.split('/')[-1].capitalize(), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
     
     finally:
         # Clean up Playwright resources
@@ -605,15 +604,25 @@ async def extract_company_info(url: str) -> tuple:
         
     except Exception as e:
         logger.error(f"Error extracting company info: {e}")
-        # Return names derived from domain even in error case
-        try:
-            domain = urlparse(normalized_url).netloc if 'normalized_url' in locals() else urlparse(url).netloc
-            default_company_name = extract_company_name_from_domain(domain)
-        except:
-            # Final fallback - extract something usable from the URL
-            default_company_name = url.split('/')[-1].capitalize() if url else "Company"
         
-        return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Error: {str(e)}"
+        # Even in error case, extract company name from domain
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+            if domain:
+                company_name = extract_company_name_from_domain(domain)
+            else:
+                # Parse domain from URL if possible
+                if '/' in url:
+                    domain_part = url.split('/')[0]
+                    company_name = domain_part.capitalize()
+                else:
+                    company_name = url.capitalize()
+        except:
+            # Final fallback - use URL directly
+            company_name = url.capitalize()
+        
+        return company_name, "/placeholder.svg?height=48&width=48", False, f"Error extracting company info: {str(e)}"
 
 def extract_company_name_from_domain(domain: str) -> str:
     """Extract company name from domain.
@@ -625,10 +634,11 @@ def extract_company_name_from_domain(domain: str) -> str:
         Capitalized company name
     """
     try:
-        # Handle empty domain
-        if not domain:
-            return "Company"
-            
+        # Check for empty domain
+        if not domain or domain.strip() == "":
+            logger.warning("Empty domain provided to extract_company_name_from_domain")
+            return "Unknown"
+        
         # Remove www. if present
         if domain.startswith('www.'):
             domain = domain[4:]
@@ -644,43 +654,19 @@ def extract_company_name_from_domain(domain: str) -> str:
         # Handle domains with port
         if ':' in domain:
             domain = domain.split(':', 1)[0]
-            
-        # Special cases for well-known domains
-        known_domains = {
-            "facebook.com": "Facebook",
-            "fb.com": "Facebook",
-            "instagram.com": "Instagram",
-            "whatsapp.com": "WhatsApp",
-            "meta.com": "Meta",
-            "google.com": "Google",
-            "youtube.com": "YouTube",
-            "twitter.com": "Twitter",
-            "x.com": "Twitter",
-            "amazon.com": "Amazon",
-            "apple.com": "Apple",
-            "netflix.com": "Netflix",
-            "microsoft.com": "Microsoft",
-            "linkedin.com": "LinkedIn",
-            "github.com": "GitHub",
-            "reddit.com": "Reddit",
-            "tiktok.com": "TikTok",
-            "snapchat.com": "Snapchat",
-            "airbnb.com": "Airbnb",
-            "uber.com": "Uber",
-            "lyft.com": "Lyft",
-            "paypal.com": "PayPal",
-            "walmart.com": "Walmart",
-            "ebay.com": "eBay"
-        }
-        
-        # Check if this is a known domain
-        for known_domain, company_name in known_domains.items():
-            if domain.endswith(known_domain):
-                return company_name
         
         # Simply use the first part of the domain
-        company = domain.split('.')[0]
+        if '.' in domain:
+            company = domain.split('.')[0]
+        else:
+            # If no dots, use the whole domain
+            company = domain
         
+        # Skip very short or empty company names
+        if not company or company.strip() == "":
+            logger.warning(f"Empty company name extracted from domain: {domain}")
+            return domain.capitalize()
+            
         # Handle very short names (just use as is, capitalized)
         if len(company) <= 2:
             return company.upper()
@@ -692,21 +678,11 @@ def extract_company_name_from_domain(domain: str) -> str:
     except Exception as e:
         logger.error(f"Error extracting company name from domain {domain}: {e}")
         
-        # Fallback company name extraction - use domain parts
+        # Always use the domain as fallback
         try:
-            # Get raw domain name without www and tld
-            domain_parts = domain.split('.')
-            if domain.startswith('www.') and len(domain_parts) >= 3:
-                return domain_parts[1].capitalize()
-            elif len(domain_parts) >= 2:
-                return domain_parts[0].capitalize()
-            else:
-                return domain.capitalize()
+            return domain.capitalize()
         except:
-            # Just use first character if possible
-            if domain and len(domain) > 0:
-                return domain[0].upper()
-            return "Company"
+            return "Unknown"
 
 def extract_company_name(soup: BeautifulSoup) -> str:
     """
@@ -847,17 +823,33 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
         CompanyInfoResponse with extracted company name and logo_url
     """
     url = request.url
+    logo_url = "/placeholder.svg?height=48&width=48"  # Default fallback
+    
+    # If the request includes a logo_url, use it instead of the placeholder
+    if hasattr(request, 'logo_url') and request.logo_url:
+        logo_url = request.logo_url
     
     try:
         # Get the domain
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
         
+        # If domain is empty, try to add a protocol and parse again
+        if not domain:
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+                parsed_url = urlparse(url)
+                domain = parsed_url.netloc
+        
         # Extract company name directly from domain
         company_name = extract_company_name_from_domain(domain)
         
-        # Use Google's favicon service for logo
-        logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+        # Log the extraction for debugging
+        logger.info(f"Extracted company name '{company_name}' from domain '{domain}'")
+        
+        # Use Google's favicon service for logo if no custom one was provided
+        if not hasattr(request, 'logo_url') or not request.logo_url:
+            logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
         
         return CompanyInfoResponse(
             url=url,
@@ -868,27 +860,45 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
         )
             
     except Exception as e:
-        logging.error(f"Error extracting company info: {str(e)}")
+        logger.error(f"Error extracting company info: {str(e)}")
         
         # Even in error case, extract company name from domain
         try:
             parsed_url = urlparse(url)
             domain = parsed_url.netloc
-            company_name = extract_company_name_from_domain(domain)
-        except:
-            # Final fallback - extract something usable from the URL
-            domain_parts = url.split('.')
-            if len(domain_parts) >= 2:
-                company_name = domain_parts[0].split('/')[-1].capitalize()
+            
+            if domain:
+                company_name = extract_company_name_from_domain(domain)
+                logger.info(f"Fallback: Extracted company name '{company_name}' from domain '{domain}'")
             else:
-                company_name = url.split('/')[-1].capitalize()
-                if not company_name or len(company_name) < 1:
-                    company_name = "Company"
+                # Parse domain from URL if possible
+                if '/' in url:
+                    domain_part = url.split('/')[0]
+                    company_name = domain_part.capitalize()
+                    logger.info(f"Fallback: Using domain part '{domain_part}' as company name")
+                else:
+                    company_name = url.capitalize()
+                    logger.info(f"Fallback: Using URL '{url}' as company name")
+        except Exception as inner_e:
+            # Final fallback - use URL directly
+            company_name = url.capitalize()
+            logger.error(f"Error in fallback company name extraction: {str(inner_e)}")
+            logger.info(f"Final fallback: Using URL '{url}' as company name")
         
-        return CompanyInfoResponse(
-            url=url,
-            company_name=company_name,
-            logo_url="/placeholder.svg?height=48&width=48",
-            success=False,
-            message=f"Error extracting company info: {str(e)}"
-        ) 
+        # Use the provided logo URL if available, otherwise use placeholder
+        if hasattr(request, 'logo_url') and request.logo_url:
+            return CompanyInfoResponse(
+                url=url,
+                company_name=company_name,
+                logo_url=request.logo_url,  # Use the provided logo URL
+                success=False,
+                message=f"Error extracting company info: {str(e)}"
+            )
+        else:
+            return CompanyInfoResponse(
+                url=url,
+                company_name=company_name,
+                logo_url=logo_url,  # This will be either a favicon or placeholder
+                success=False,
+                message=f"Error extracting company info: {str(e)}"
+            ) 

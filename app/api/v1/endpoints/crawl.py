@@ -15,7 +15,7 @@ from app.api.v1.endpoints.extract import extract_text
 from app.api.v1.endpoints.summary import generate_summary
 from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analyze_text_frequency
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
-from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain
+from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
 
 from app.models.tos import ToSRequest
@@ -26,6 +26,7 @@ from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse
 from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMiningResults
 from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse
 from app.models.database import DocumentCreate, SubmissionCreate
+from app.models.company_info import CompanyInfoRequest
 
 from app.crud.document import document_crud
 from app.crud.submission import submission_crud
@@ -378,43 +379,77 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         company_name = ""
         logo_url = DEFAULT_LOGO_URL
         try:
-            # Use the extract_company_info function from company_info module
-            company_info_result = await extract_company_info(request.url)
-            if company_info_result[2]:  # Check if extraction was successful
-                company_name = company_info_result[0]
-                logo_url = company_info_result[1]
+            # Create a request that includes the URL and any logo URL from the request
+            request_info = CompanyInfoRequest(url=request.url)
+            
+            # Add the logo URL if it's available in the request
+            if hasattr(request, 'logo_url') and request.logo_url:
+                request_info.logo_url = request.logo_url
                 
-                # Extra validation for company name
-                if not company_name or "log in" in company_name.lower() or "sign up" in company_name.lower():
-                    # Fall back to domain name
-                    company_name = extract_company_name_from_domain(domain)
-                
+            # Send the request to get_company_info function directly
+            company_info_response = await get_company_info(request_info)
+            
+            if company_info_response.success:
+                company_name = company_info_response.company_name
+                logo_url = company_info_response.logo_url
                 logger.info(f"Successfully extracted company info: {company_name}, {logo_url}")
             else:
                 # Fall back to domain extraction if company info extraction failed
                 company_name = extract_company_name_from_domain(domain)
+                logger.info(f"Company info extraction failed, using domain-based name: {company_name}")
                 
-                # Try to get a logo from Google's favicon service
-                try:
-                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-                    # Test if logo exists with a head request
-                    response_head = requests.head(logo_url, timeout=5)
-                    if response_head.status_code != 200:
+                # Check if we have a logo URL
+                if company_info_response.logo_url and company_info_response.logo_url != DEFAULT_LOGO_URL:
+                    logo_url = company_info_response.logo_url
+                else:
+                    # Try to get a logo from Google's favicon service
+                    try:
+                        logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+                        # Test if logo exists with a head request
+                        response_head = requests.head(logo_url, timeout=5)
+                        if response_head.status_code != 200:
+                            logo_url = DEFAULT_LOGO_URL
+                    except Exception as e:
+                        logger.warning(f"Failed to get logo from favicon service for {domain}: {e}")
                         logo_url = DEFAULT_LOGO_URL
-                except Exception as e:
-                    logger.warning(f"Failed to get logo from favicon service for {domain}: {e}")
-                    logo_url = DEFAULT_LOGO_URL
         except Exception as e:
             logger.warning(f"Error extracting company info: {e}")
             # Fall back to simple domain-based extraction
             company_name = extract_company_name_from_domain(domain)
+            logger.info(f"Exception in company info extraction, using domain-based name: {company_name}")
             logo_url = DEFAULT_LOGO_URL
         
         # Final safety check - ensure we have a company name
         if not company_name or company_name.strip() == "":
-            # Use the improved extract_company_name_from_domain method from company_info
-            company_name = extract_company_name_from_domain(domain)
-            logger.info(f"Using fallback company name from domain: {company_name}")
+            # Try direct domain extraction as a last resort
+            try:
+                # Parse the URL directly
+                parsed_url = urlparse(request.url)
+                domain = parsed_url.netloc
+                
+                # If domain is empty, try to add a protocol and parse again
+                if not domain:
+                    if not request.url.startswith(('http://', 'https://')):
+                        fixed_url = 'https://' + request.url
+                        parsed_url = urlparse(fixed_url)
+                        domain = parsed_url.netloc
+                
+                if domain:
+                    company_name = extract_company_name_from_domain(domain)
+                    logger.info(f"Final fallback: Using domain {domain} to extract company name: {company_name}")
+                else:
+                    # Use parts of the URL if domain extraction failed
+                    parts = request.url.split('/')
+                    if len(parts) > 0:
+                        company_name = parts[0].capitalize()
+                        logger.info(f"Final fallback: Using URL part {parts[0]} as company name")
+                    else:
+                        company_name = request.url.capitalize()
+                        logger.info(f"Final fallback: Using entire URL as company name")
+            except Exception as e:
+                logger.error(f"Error in final company name extraction: {e}")
+                company_name = request.url.capitalize()
+                logger.info(f"Emergency fallback: Using URL as company name")
         
         response.one_sentence_summary = one_sentence_summary
         response.hundred_word_summary = hundred_word_summary
@@ -522,43 +557,77 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         company_name = ""
         logo_url = DEFAULT_LOGO_URL
         try:
-            # Use the extract_company_info function from company_info module
-            company_info_result = await extract_company_info(request.url)
-            if company_info_result[2]:  # Check if extraction was successful
-                company_name = company_info_result[0]
-                logo_url = company_info_result[1]
+            # Create a request that includes the URL and any logo URL from the request
+            request_info = CompanyInfoRequest(url=request.url)
+            
+            # Add the logo URL if it's available in the request
+            if hasattr(request, 'logo_url') and request.logo_url:
+                request_info.logo_url = request.logo_url
                 
-                # Extra validation for company name
-                if not company_name or "log in" in company_name.lower() or "sign up" in company_name.lower():
-                    # Fall back to domain name
-                    company_name = extract_company_name_from_domain(domain)
-                
+            # Send the request to get_company_info function directly
+            company_info_response = await get_company_info(request_info)
+            
+            if company_info_response.success:
+                company_name = company_info_response.company_name
+                logo_url = company_info_response.logo_url
                 logger.info(f"Successfully extracted company info: {company_name}, {logo_url}")
             else:
                 # Fall back to domain extraction if company info extraction failed
                 company_name = extract_company_name_from_domain(domain)
+                logger.info(f"Company info extraction failed, using domain-based name: {company_name}")
                 
-                # Try to get a logo from Google's favicon service
-                try:
-                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-                    # Test if logo exists with a head request
-                    response_head = requests.head(logo_url, timeout=5)
-                    if response_head.status_code != 200:
+                # Check if we have a logo URL
+                if company_info_response.logo_url and company_info_response.logo_url != DEFAULT_LOGO_URL:
+                    logo_url = company_info_response.logo_url
+                else:
+                    # Try to get a logo from Google's favicon service
+                    try:
+                        logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+                        # Test if logo exists with a head request
+                        response_head = requests.head(logo_url, timeout=5)
+                        if response_head.status_code != 200:
+                            logo_url = DEFAULT_LOGO_URL
+                    except Exception as e:
+                        logger.warning(f"Failed to get logo from favicon service for {domain}: {e}")
                         logo_url = DEFAULT_LOGO_URL
-                except Exception as e:
-                    logger.warning(f"Failed to get logo from favicon service for {domain}: {e}")
-                    logo_url = DEFAULT_LOGO_URL
         except Exception as e:
             logger.warning(f"Error extracting company info: {e}")
             # Fall back to simple domain-based extraction
             company_name = extract_company_name_from_domain(domain)
+            logger.info(f"Exception in company info extraction, using domain-based name: {company_name}")
             logo_url = DEFAULT_LOGO_URL
         
         # Final safety check - ensure we have a company name
         if not company_name or company_name.strip() == "":
-            # Use the improved extract_company_name_from_domain method from company_info
-            company_name = extract_company_name_from_domain(domain)
-            logger.info(f"Using fallback company name from domain: {company_name}")
+            # Try direct domain extraction as a last resort
+            try:
+                # Parse the URL directly
+                parsed_url = urlparse(request.url)
+                domain = parsed_url.netloc
+                
+                # If domain is empty, try to add a protocol and parse again
+                if not domain:
+                    if not request.url.startswith(('http://', 'https://')):
+                        fixed_url = 'https://' + request.url
+                        parsed_url = urlparse(fixed_url)
+                        domain = parsed_url.netloc
+                
+                if domain:
+                    company_name = extract_company_name_from_domain(domain)
+                    logger.info(f"Final fallback: Using domain {domain} to extract company name: {company_name}")
+                else:
+                    # Use parts of the URL if domain extraction failed
+                    parts = request.url.split('/')
+                    if len(parts) > 0:
+                        company_name = parts[0].capitalize()
+                        logger.info(f"Final fallback: Using URL part {parts[0]} as company name")
+                    else:
+                        company_name = request.url.capitalize()
+                        logger.info(f"Final fallback: Using entire URL as company name")
+            except Exception as e:
+                logger.error(f"Error in final company name extraction: {e}")
+                company_name = request.url.capitalize()
+                logger.info(f"Emergency fallback: Using URL as company name")
         
         response.one_sentence_summary = one_sentence_summary
         response.hundred_word_summary = hundred_word_summary

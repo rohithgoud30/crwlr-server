@@ -4,6 +4,7 @@ from typing import Optional
 class CompanyInfoRequest(BaseModel):
     """Request model for company information extraction"""
     url: str = Field(..., description="URL of the website to extract company information from")
+    logo_url: Optional[str] = Field(None, description="Optional custom logo URL to use")
 
 class CompanyInfoResponse(BaseModel):
     """Response model for company information extraction"""
