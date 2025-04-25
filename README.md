@@ -220,6 +220,25 @@ app/
 
 - `GET /api/v1/health`: Returns the health status of the API
 
+### Company Information Extraction
+
+- `POST /api/v1/extract-company-info`: Extracts company name and logo URL from a given website
+  - Request body: `{ "url": "example.com" }`
+  - Extracts company name from website title or falls back to domain name
+  - Extracts logo URL using multiple methods (schema.org, meta tags, header images)
+  - Falls back to Google's favicon service if no logo is found
+  - Uses placeholder image (`/placeholder.svg?height=48&width=48`) when extraction fails
+  - Response format:
+    ```json
+    {
+      "url": "https://example.com",
+      "company_name": "Example Company",
+      "logo_url": "https://example.com/logo.png",
+      "success": true,
+      "message": "Successfully extracted company information"
+    }
+    ```
+
 ### Terms of Service Finder
 
 - `POST /api/v1/tos`: Finds the Terms of Service page URL for a given website

@@ -1,23 +1,21 @@
 # Company Information API
 
-The Company Information API extracts a company's name and logo URL from a website using BeautifulSoup, with fallbacks to reliable defaults.
+This document outlines the Company Information API endpoint which extracts company name and logo URL from websites.
 
 ## Endpoint
 
-`POST /api/v1/extract-company-info`
-
-## Authentication
-
-Requires API key authentication via the `X-API-Key` header.
-
-## Default Values
-
-- **Default Logo URL**: `/placeholder.svg?height=48&width=48`
-- **Default Company Name**: Capitalized domain name (e.g., "example.com" → "Example")
-
-These defaults are used when extraction fails or when the extracted values are invalid.
+- **URL**: `POST /api/v1/extract-company-info`
+- **Authentication**: Required - API key via `X-API-Key` header
 
 ## Request Format
+
+The request should be in JSON format with the following structure:
+
+| Parameter | Type   | Required | Description                                                |
+| --------- | ------ | -------- | ---------------------------------------------------------- |
+| url       | string | Yes      | The URL of the website to extract company information from |
+
+Example:
 
 ```json
 {
@@ -25,13 +23,19 @@ These defaults are used when extraction fails or when the extracted values are i
 }
 ```
 
-### Parameters
-
-| Parameter | Type   | Required | Description                                     |
-| --------- | ------ | -------- | ----------------------------------------------- |
-| url       | string | Yes      | Website URL to extract company information from |
-
 ## Response Format
+
+The response is in JSON format with the following structure:
+
+| Field        | Type    | Description                                     |
+| ------------ | ------- | ----------------------------------------------- |
+| url          | string  | The original URL provided in the request        |
+| company_name | string  | The extracted company name                      |
+| logo_url     | string  | The URL of the company logo                     |
+| success      | boolean | Indicates whether the extraction was successful |
+| message      | string  | A message describing the result or error        |
+
+Example successful response:
 
 ```json
 {
@@ -39,102 +43,106 @@ These defaults are used when extraction fails or when the extracted values are i
   "company_name": "Example Company",
   "logo_url": "https://example.com/logo.png",
   "success": true,
-  "message": "Successfully extracted company information"
+  "message": "Successfully extracted company information with BeautifulSoup"
 }
 ```
 
-### Response Fields
+## Company Name Extraction
 
-| Field        | Type    | Description                                     |
-| ------------ | ------- | ----------------------------------------------- |
-| url          | string  | The original URL provided in the request        |
-| company_name | string  | Extracted company name                          |
-| logo_url     | string  | URL to the company's logo                       |
-| success      | boolean | Whether the extraction was successful           |
-| message      | string  | Descriptive message about the extraction result |
+The API employs multiple methods to extract the company name:
 
-## Extraction Methods
+1. Extracts from the page title tag
+2. Cleans common suffixes like "- Home" or "| Official Website"
+3. If the domain name matches part of the title, uses the title
+4. Otherwise, limits to the first 50 characters of the title
+5. Falls back to capitalizing the domain name if no title is found
 
-The endpoint uses multiple methods to extract information:
+## Logo URL Extraction
 
-### Company Name Extraction
+The API uses a cascading approach to find the best company logo:
 
-1. Extracts from the HTML title tag (with cleanup of common suffixes)
-2. Falls back to the domain name if no title is found (e.g., "example.com" → "Example")
+1. Checks structured data (JSON-LD) for Organization logo
+2. Looks for meta tags with 'logo' in the property/name
+3. Checks for OpenGraph image
+4. Searches for logo images in the header/navigation
+5. Uses common CSS selectors for logos
+6. Falls back to favicon
+7. If all else fails, uses Google's favicon service
 
-### Logo Extraction (in order of priority)
+## Default Values
 
-1. Meta tags with "logo" in property/name
-2. OpenGraph image (`meta property="og:image"`)
-3. Schema.org structured data with logo property
-4. Common logo class/id patterns in HTML (e.g., `img.logo`, `.logo img`, etc.)
-5. Favicon (`link rel="icon"` or `rel="shortcut icon"`)
-6. Google's favicon service as last resort (`https://www.google.com/s2/favicons?domain=example.com&sz=128`)
-7. Default placeholder logo: `/placeholder.svg?height=48&width=48`
+When extraction fails:
+
+- For company name: Capitalizes the domain name (e.g., "example.com" → "Example")
+- For logo URL: Uses the placeholder image `/placeholder.svg?height=48&width=48`
 
 ## Error Handling
 
-If extraction fails, the API falls back to defaults:
+The API is designed to be robust and will:
 
-- Default company name: Capitalized domain name (e.g., "example.com" → "Example")
-- Default logo URL: `/placeholder.svg?height=48&width=48`
+1. Handle invalid or malformed URLs
+2. Validate and sanitize URLs before processing
+3. Verify the existence of extracted logo URLs
+4. Fall back to default values when extraction fails
+5. Return detailed error messages in the response
 
 ## Example Usage
 
 ### cURL
 
 ```bash
-curl -X POST "https://your-api-url/api/v1/extract-company-info" \
-     -H "Content-Type: application/json" \
-     -H "X-API-Key: your_api_key_here" \
-     -d '{"url": "https://www.python.org"}'
+curl -X 'POST' \
+  'https://api.example.com/api/v1/extract-company-info' \
+  -H 'accept: application/json' \
+  -H 'X-API-Key: your_api_key_here' \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com"}'
 ```
 
 ### Python
 
 ```python
 import requests
+import json
 
-api_url = "https://your-api-url/api/v1/extract-company-info"
+url = "https://api.example.com/api/v1/extract-company-info"
 headers = {
-    "Content-Type": "application/json",
-    "X-API-Key": "your_api_key_here"
+    "X-API-Key": "your_api_key_here",
+    "Content-Type": "application/json"
 }
 data = {
-    "url": "https://www.python.org"
+    "url": "https://example.com"
 }
 
-response = requests.post(api_url, json=data, headers=headers)
-result = response.json()
-print(f"Company Name: {result['company_name']}")
-print(f"Logo URL: {result['logo_url']}")
+response = requests.post(url, headers=headers, json=data)
+print(json.dumps(response.json(), indent=2))
 ```
 
 ### JavaScript
 
 ```javascript
-fetch('https://your-api-url/api/v1/extract-company-info', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-API-Key': 'your_api_key_here',
-  },
-  body: JSON.stringify({
-    url: 'https://www.python.org',
-  }),
-})
-  .then((response) => response.json())
-  .then((data) => {
-    console.log(`Company Name: ${data.company_name}`)
-    console.log(`Logo URL: ${data.logo_url}`)
-  })
-  .catch((error) => console.error('Error:', error))
+const fetchCompanyInfo = async () => {
+  const response = await fetch(
+    'https://api.example.com/api/v1/extract-company-info',
+    {
+      method: 'POST',
+      headers: {
+        'X-API-Key': 'your_api_key_here',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: 'https://example.com',
+      }),
+    }
+  )
+
+  const data = await response.json()
+  console.log(data)
+}
+
+fetchCompanyInfo()
 ```
 
-## Integration with Other Endpoints
+## Integration with Document Processing
 
-This endpoint complements the existing document extraction system:
-
-- The `/crawl-tos` and `/crawl-pp` endpoints now save documents with company names and logos
-- Use this endpoint to manually extract company info from any website
-- All endpoints use the same default logo URL (`/placeholder.svg?height=48&width=48`) for consistency
+This endpoint complements the document extraction system by providing company metadata that can be associated with Terms of Service and Privacy Policy documents. The extracted company name and logo URL can be stored alongside document content for a more complete representation of the document source.

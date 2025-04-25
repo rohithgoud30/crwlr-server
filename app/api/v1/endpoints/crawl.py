@@ -3,13 +3,14 @@ import logging
 import asyncio
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
+from urllib.parse import urlparse
 
 from app.api.v1.endpoints.tos import find_tos
 from app.api.v1.endpoints.privacy import find_privacy_policy
 from app.api.v1.endpoints.extract import extract_text
-from app.api.v1.endpoints.summary import generate_summary
-from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint
-from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining
+from app.api.v1.endpoints.summary import generate_summary, generate_one_sentence_summary, generate_hundred_word_summary
+from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, get_word_frequencies
+from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, extract_text_mining_metrics
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
@@ -158,50 +159,53 @@ async def save_document_to_db(
     word_frequencies,
     raw_text=None,
 ):
+    """Save document to database and create a submission record."""
     try:
         # Set default logo URL
         default_logo_url = "/placeholder.svg?height=48&width=48"
+        
+        # Extract company name from URL
+        domain = urlparse(url).netloc
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        company_name = domain.split('.')[0].capitalize()
+        
+        # Initialize with default logo URL
         logo_url = default_logo_url
         
-        # Extract company name from original URL
-        from urllib.parse import urlparse
+        # Try to extract a better logo URL using Google's favicon service
         try:
-            parsed_url = urlparse(url)
-            domain_parts = parsed_url.netloc.split('.')
-            if len(domain_parts) >= 2:
-                company_name = domain_parts[-2].capitalize()
-                # Try to get logo using Google's favicon service
-                try:
-                    logo_url = f"https://www.google.com/s2/favicons?domain={parsed_url.netloc}&sz=128"
-                except Exception as e:
-                    logger.error(f"Error generating logo URL: {e}")
-                    logo_url = default_logo_url
-            else:
-                company_name = url
-                logo_url = default_logo_url
-            
-            logger.info(f"Extracted company name: {company_name}, Logo URL: {logo_url}")
+            logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+            logger.info(f"Using logo URL: {logo_url} for domain: {domain}")
         except Exception as e:
-            logger.error(f"Error extracting company name from URL: {e}")
-            company_name = url
+            logger.warning(f"Failed to generate logo URL, using default: {e}")
             logo_url = default_logo_url
         
-        # Convert word_frequencies and text_mining_metrics to JSON-serializable format if needed
-        if isinstance(word_frequencies, list) and word_frequencies:
-            serializable_word_freqs = [
-                {"word": wf.word, "frequency": wf.frequency} if hasattr(wf, "word") else wf 
-                for wf in word_frequencies
-            ]
-        else:
-            serializable_word_freqs = word_frequencies
-            
+        logger.info(f"Using company name: {company_name} and logo URL: {logo_url}")
+        
+        # Handle serialization of word frequencies
+        serializable_word_freqs = []
+        try:
+            if isinstance(word_frequencies, list):
+                serializable_word_freqs = [
+                    wf.dict() if hasattr(wf, "dict") and callable(getattr(wf, "dict")) else wf
+                    for wf in word_frequencies
+                ]
+            else:
+                serializable_word_freqs = word_frequencies
+        except Exception as e:
+            logger.error(f"Error serializing word frequencies: {e}")
+            serializable_word_freqs = []
+        
+        # Handle serialization of text mining metrics
+        serializable_text_mining = {}
         if isinstance(text_mining_metrics, dict):
             serializable_text_mining = text_mining_metrics
         elif hasattr(text_mining_metrics, "dict") and callable(getattr(text_mining_metrics, "dict")):
             serializable_text_mining = text_mining_metrics.dict()
         else:
             serializable_text_mining = text_mining_metrics
-            
+        
         # Check if a document with this URL already exists
         existing_doc = await document_crud.get_by_retrieved_url(doc_url, doc_type)
         
@@ -237,6 +241,56 @@ async def save_document_to_db(
     except Exception as e:
         logger.error(f"Error saving document to database: {e}")
         raise
+
+async def find_tos_url(url: str) -> str:
+    """
+    Wrapper function to find Terms of Service URL for a given website URL.
+    
+    Args:
+        url: The website URL to search for Terms of Service
+        
+    Returns:
+        The URL of the Terms of Service page, or None if not found
+    """
+    logger.info(f"Looking for Terms of Service URL for: {url}")
+    
+    # Create ToS request
+    tos_request = ToSRequest(url=url)
+    
+    # Call find_tos endpoint function
+    response = await find_tos(tos_request)
+    
+    if response.success:
+        logger.info(f"Found Terms of Service URL: {response.tos_url}")
+        return response.tos_url
+    else:
+        logger.warning(f"Could not find Terms of Service URL for {url}: {response.message}")
+        return None
+
+async def find_privacy_policy_url(url: str) -> str:
+    """
+    Wrapper function to find Privacy Policy URL for a given website URL.
+    
+    Args:
+        url: The website URL to search for Privacy Policy
+        
+    Returns:
+        The URL of the Privacy Policy page, or None if not found
+    """
+    logger.info(f"Looking for Privacy Policy URL for: {url}")
+    
+    # Create Privacy Policy request
+    pp_request = PrivacyRequest(url=url)
+    
+    # Call find_privacy_policy endpoint function
+    response = await find_privacy_policy(pp_request)
+    
+    if response.success:
+        logger.info(f"Found Privacy Policy URL: {response.pp_url}")
+        return response.pp_url
+    else:
+        logger.warning(f"Could not find Privacy Policy URL for {url}: {response.message}")
+        return None
 
 @router.post("/crawl-tos", response_model=CrawlTosResponse)
 async def crawl_tos(request: CrawlTosRequest):
@@ -443,3 +497,28 @@ async def crawl_privacy_policy(request: CrawlPrivacyRequest):
         logger.error(f"Unexpected error during Privacy Policy crawling: {e}")
         response.message = f"Unexpected error: {str(e)}"
         return response 
+
+async def extract_text_from_url(url: str) -> str:
+    """
+    Wrapper function to extract text from a URL.
+    
+    Args:
+        url: The URL to extract text from
+        
+    Returns:
+        The extracted text from the URL
+    """
+    logger.info(f"Extracting text from URL: {url}")
+    
+    # Create extract request
+    extract_request = ExtractRequest(url=url)
+    
+    # Call extract_text endpoint function
+    response = await extract_text(extract_request, Response())
+    
+    if response.success:
+        logger.info(f"Successfully extracted text from URL: {url}")
+        return response.text
+    else:
+        logger.warning(f"Failed to extract text from URL {url}: {response.message}")
+        return "" 
