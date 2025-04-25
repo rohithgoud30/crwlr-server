@@ -44,6 +44,9 @@ COPY requirements.txt .
 # Install dependencies from requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Ensure fake-useragent is explicitly installed for browser emulation
+RUN pip install --no-cache-dir fake-useragent==2.1.0
+
 # Install NLTK data for text processing
 RUN python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
 

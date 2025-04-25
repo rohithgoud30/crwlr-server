@@ -26,6 +26,7 @@ textstat==0.7.3
 
 # Web Automation
 playwright==1.42.0
+fake-useragent==2.1.0
 
 # Metrics and Monitoring
 prometheus-client==0.19.0

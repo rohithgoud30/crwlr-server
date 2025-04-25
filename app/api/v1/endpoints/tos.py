@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, status, Depends
 from playwright.async_api import async_playwright
 from typing import Optional, List
+from fake_useragent import UserAgent
 
 from app.models.tos import ToSRequest, ToSResponse
 from app.models.privacy import PrivacyRequest, PrivacyResponse
@@ -17,69 +18,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Define User_Agents list for rotation
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-]
+# Initialize UserAgent for random browser User-Agent strings
+ua_generator = UserAgent()
 
-def generate_random_user_agent():
+# Function to get a random user agent
+def get_random_user_agent():
     """
-    Generate a single random user agent string.
-    
-    Returns:
-        str: A realistic user agent string
+    Returns a random, realistic user agent string from the fake-useragent library.
+    Falls back to a default value if the API fails.
     """
-    # Randomly choose browser type
-    browser = random.choice(["chrome", "firefox", "safari", "edge"])
-    
-    # OS options
-    os_options = {
-        "windows": ["Windows NT 10.0", "Windows NT 11.0"],
-        "mac": ["Macintosh; Intel Mac OS X 10_15_7", "Macintosh; Intel Mac OS X 11_0_0"],
-        "linux": ["X11; Linux x86_64", "X11; Ubuntu; Linux x86_64"]
-    }
-    
-    # Simple version ranges
-    version_ranges = {
-        "chrome": list(range(120, 138)),
-        "firefox": list(range(115, 138)),
-        "safari": list(range(16, 21)),
-        "edge": list(range(120, 138))
-    }
-    
-    # Select platform
-    if browser in ["chrome", "firefox", "edge"]:
-        platform = random.choice(["windows", "mac", "linux"])
-    else:  # Safari only on Mac
-        platform = "mac"
-    
-    # Build the user agent string
-    if browser == "chrome":
-        chrome_version = f"{random.choice(version_ranges['chrome'])}.0.{random.randint(1000, 9999)}.{random.randint(10, 999)}"
-        ua = f"Mozilla/5.0 ({random.choice(os_options[platform])}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version} Safari/537.36"
-    
-    elif browser == "firefox":
-        firefox_version = f"{random.choice(version_ranges['firefox'])}.0"
-        ua = f"Mozilla/5.0 ({random.choice(os_options[platform])}; rv:{firefox_version}) Gecko/20100101 Firefox/{firefox_version}"
-    
-    elif browser == "safari":
-        webkit_version = f"605.1.{random.randint(1, 15)}"
-        safari_version = f"{random.choice(version_ranges['safari'])}.0"
-        ua = f"Mozilla/5.0 ({random.choice(os_options['mac'])}) AppleWebKit/{webkit_version} (KHTML, like Gecko) Version/{safari_version} Safari/{webkit_version}"
-    
-    elif browser == "edge":
-        chrome_version = f"{random.choice(version_ranges['chrome'])}.0.{random.randint(1000, 9999)}.{random.randint(10, 999)}"
-        edge_version = f"{random.choice(version_ranges['edge'])}.0.{random.randint(100, 999)}.{random.randint(10, 99)}"
-        ua = f"Mozilla/5.0 ({random.choice(os_options[platform])}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version} Safari/537.36 Edg/{edge_version}"
-    
-    # Log the generated user agent
-    logger.info(f"Generated user agent: {ua}")
-    
-    return ua
+    try:
+        return ua_generator.random
+    except Exception as e:
+        # Fallback user agents in case the API fails
+        fallback_user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        ]
+        logger.error(f"Error getting random user agent: {e}. Using fallback.")
+        return random.choice(fallback_user_agents)
 
 exactMatchPriorities = {
     "terms of service": 100,
@@ -663,7 +621,7 @@ async def setup_browser(playwright=None):
         playwright = await async_playwright().start()
     try:
         # Generate a random user agent
-        user_agent = generate_random_user_agent()
+        user_agent = get_random_user_agent()
         logger.info(f"Using user agent: {user_agent}")
         
         # Extract browser type for client hints
