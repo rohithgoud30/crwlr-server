@@ -760,7 +760,10 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
     """
     logger.info(f"Processing request for URL: {request.url}")
     start_time = time.time()
-
+    
+    playwright = None
+    browser = None
+    
     try:
         # Validate and normalize URL
         url = request.url.strip()
@@ -2395,7 +2398,7 @@ async def find_matching_privacy_link(page, context, unverified_result=None):
                 if not href:
                     continue
 
-                # Special case for eBay and similar sites
+                # Check for high-priority user privacy links
                 if ("user privacy" in text or "user" in text and "privacy" in text) or \
                    (href and ("user-privacy" in href.lower() or "user_privacy" in href.lower() or "user" in href.lower() and "privacy" in href.lower())):
                     print(f"⭐ Found high-priority user privacy link: {text}")
