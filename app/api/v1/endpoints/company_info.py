@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Response, HTTPException, status
 import logging
 import requests
+import asyncio
+import random
 from bs4 import BeautifulSoup
 import re
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any
 from urllib.parse import urlparse, urljoin
+from playwright.async_api import async_playwright
 
 from app.models.company_info import CompanyInfoRequest, CompanyInfoResponse
 
@@ -82,6 +85,297 @@ def normalize_url(url: str) -> str:
         
     return url
 
+def get_random_user_agent() -> str:
+    """Return a random, realistic user agent string"""
+    user_agents = [
+        # Chrome on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36",
+        # Chrome on macOS
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36",
+        # Firefox on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:95.0) Gecko/20100101 Firefox/95.0",
+        # Firefox on macOS
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:94.0) Gecko/20100101 Firefox/94.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:95.0) Gecko/20100101 Firefox/95.0",
+        # Safari on macOS
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15",
+    ]
+    return random.choice(user_agents)
+
+async def setup_stealth_browser():
+    """Setup Playwright browser with anti-detection measures"""
+    playwright = await async_playwright().start()
+    
+    # Launch with realistic viewport and non-headless mode (but we'll override below for production)
+    browser = await playwright.chromium.launch(
+        headless=False,  # Will be overridden to True in production
+    )
+    
+    # Create a context with realistic viewport and device settings
+    context = await browser.new_context(
+        viewport={"width": 1366, "height": 768},
+        device_scale_factor=1,
+        user_agent=get_random_user_agent(),
+        is_mobile=False
+    )
+    
+    # Add stealth script to avoid detection
+    await context.add_init_script("""
+        () => {
+            // Override WebDriver property to avoid detection
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            
+            // Override plugins to look like a real browser
+            Object.defineProperty(navigator, 'plugins', { 
+                get: () => [
+                    { description: "Portable Document Format", filename: "internal-pdf-viewer", name: "Chrome PDF Plugin" },
+                    { description: "", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai", name: "Chrome PDF Viewer" },
+                    { description: "", filename: "internal-nacl-plugin", name: "Native Client" }
+                ]
+            });
+            
+            // Override languages
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            
+            // Override hardware concurrency
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+            
+            // Fake battery API
+            if (typeof navigator.getBattery === 'function') {
+                navigator.getBattery = () => Promise.resolve({
+                    charging: true,
+                    chargingTime: 0,
+                    dischargingTime: Infinity,
+                    level: 1,
+                });
+            }
+        }
+    """)
+    
+    # Create a page and set various properties
+    page = await context.new_page()
+    await page.set_extra_http_headers({
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br"
+    })
+    
+    return playwright, browser, context, page
+
+async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
+    """
+    Extract company info using Playwright as a fallback
+    Returns (company_name, logo_url, success, message)
+    """
+    default_logo_url = "/placeholder.svg?height=48&width=48"
+    playwright = None
+    browser = None
+    context = None
+    
+    try:
+        domain = urlparse(url).netloc
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        default_company_name = domain.split('.')[0].capitalize()
+        
+        # Set up browser with anti-detection
+        playwright, browser, context, page = await setup_stealth_browser()
+        
+        # Add random delay before navigation
+        await asyncio.sleep(random.uniform(0.5, 1.5))
+        
+        # Navigate to page
+        logger.info(f"Navigating to {url} with Playwright")
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        
+        if not response.ok:
+            logger.warning(f"Failed to load page with status: {response.status}")
+            return default_company_name, default_logo_url, False, f"Failed to load page: HTTP {response.status}"
+        
+        # Add human-like interaction - scroll down smoothly
+        await page.evaluate("""
+            () => {
+                const randomScrollStop = () => Math.random() < 0.15;
+                const totalScrolls = Math.floor(Math.random() * 5) + 5;
+                
+                return new Promise((resolve) => {
+                    let scrolls = 0;
+                    const scroll = () => {
+                        if (scrolls >= totalScrolls) {
+                            resolve();
+                            return;
+                        }
+                        
+                        scrolls++;
+                        const scrollAmount = Math.floor(Math.random() * 400) + 100;
+                        window.scrollBy(0, scrollAmount);
+                        
+                        if (randomScrollStop()) {
+                            // Sometimes pause scrolling like a human would
+                            setTimeout(() => {
+                                setTimeout(scroll, Math.random() * 500 + 400);
+                            }, Math.random() * 1000 + 500);
+                        } else {
+                            setTimeout(scroll, Math.random() * 500 + 100);
+                        }
+                    };
+                    
+                    scroll();
+                });
+            }
+        """)
+        
+        # Extract company name from title
+        title = await page.title()
+        company_name = default_company_name
+        
+        if title:
+            # Clean up title (remove common suffixes)
+            common_suffixes = [
+                " - Home", " | Home", " - Official Website", " | Official Website",
+                " - Official Site", " | Official Site"
+            ]
+            for suffix in common_suffixes:
+                if title.endswith(suffix):
+                    title = title[:-len(suffix)]
+            
+            # If domain name is in title, use it
+            domain_name = domain.split('.')[0].lower()
+            if domain_name in title.lower():
+                company_name = title.strip()
+            else:
+                # Otherwise, use cleaned title
+                company_name = title.strip()[:50]
+        
+        # Extract logo using sophisticated JavaScript
+        logo_url = await page.evaluate("""
+            () => {
+                // Try multiple methods to find a logo
+                const findLogo = () => {
+                    // Check meta tags first
+                    const metaTags = document.querySelectorAll('meta[property*="logo"], meta[name*="logo"]');
+                    for (const tag of metaTags) {
+                        if (tag.content) return tag.content;
+                    }
+                    
+                    // Check OpenGraph image
+                    const ogImage = document.querySelector('meta[property="og:image"]');
+                    if (ogImage && ogImage.content) return ogImage.content;
+                    
+                    // Check structured data
+                    const jsonlds = document.querySelectorAll('script[type="application/ld+json"]');
+                    for (const script of jsonlds) {
+                        try {
+                            const data = JSON.parse(script.textContent);
+                            if (data.logo) return typeof data.logo === 'string' ? data.logo : data.logo.url;
+                            if (data.organization && data.organization.logo) 
+                                return typeof data.organization.logo === 'string' ? data.organization.logo : data.organization.logo.url;
+                        } catch (e) {
+                            // Skip invalid JSON
+                        }
+                    }
+                    
+                    // Find by common selectors with scoring
+                    const logoSelectors = [
+                        'img.logo', '.logo img', 'img#logo', '#logo img',
+                        'img.brand-logo', '.brand-logo img', 
+                        'img.brand', '.brand img', 
+                        'header img', '.header img', 
+                        '.navbar-brand img', '.site-logo img',
+                        'a[href="/"] img', 'a[href="./"] img'
+                    ];
+                    
+                    // Score each element
+                    const candidates = [];
+                    for (const selector of logoSelectors) {
+                        const elements = document.querySelectorAll(selector);
+                        for (const el of elements) {
+                            if (!el.src) continue;
+                            
+                            // Skip tiny images (likely icons)
+                            if (el.width > 0 && el.width < 10) continue;
+                            if (el.height > 0 && el.height < 10) continue;
+                            
+                            // Score by position (top of page = better)
+                            const rect = el.getBoundingClientRect();
+                            const verticalScore = Math.max(0, 1000 - rect.top);
+                            
+                            // Score by attributes
+                            let attrScore = 0;
+                            if (el.alt && /logo|brand|company/i.test(el.alt)) attrScore += 50;
+                            if (el.id && /logo|brand|company/i.test(el.id)) attrScore += 30;
+                            if (el.src && /logo|brand|company/i.test(el.src)) attrScore += 20;
+                            
+                            // Score image size (prefer square or landscape)
+                            const aspectScore = (el.width / el.height >= 0.5 && el.width / el.height <= 3) ? 30 : 0;
+                            
+                            // Final score
+                            candidates.push({
+                                src: el.src,
+                                score: verticalScore + attrScore + aspectScore
+                            });
+                        }
+                    }
+                    
+                    // Return highest scoring image
+                    if (candidates.length > 0) {
+                        candidates.sort((a, b) => b.score - a.score);
+                        return candidates[0].src;
+                    }
+                    
+                    // Last resort: favicon
+                    const favicon = document.querySelector('link[rel*="icon"]');
+                    if (favicon && favicon.href) return favicon.href;
+                    
+                    return null;
+                };
+                
+                return findLogo();
+            }
+        """)
+        
+        # If no logo found, use favicon from Google service
+        if not logo_url:
+            logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+        
+        # Make sure the logo URL is absolute
+        if logo_url and not logo_url.startswith(('http://', 'https://')):
+            base_url = get_base_url(url)
+            logo_url = urljoin(base_url, logo_url)
+        
+        # Verify logo URL is valid
+        try:
+            # Use simple HEAD request to check logo
+            verify_response = await page.request.head(logo_url, timeout=5000)
+            if not verify_response.ok:
+                logger.warning(f"Logo URL validation failed: {verify_response.status}")
+                logo_url = default_logo_url
+        except Exception as e:
+            logger.warning(f"Error validating logo URL: {e}")
+            logo_url = default_logo_url
+        
+        return company_name, logo_url, True, "Successfully extracted company information with Playwright"
+    
+    except Exception as e:
+        logger.error(f"Error extracting with Playwright: {e}")
+        # Construct default values based on domain
+        domain = urlparse(url).netloc if url else "unknown"
+        default_company_name = domain.split('.')[0].capitalize() if domain else "Unknown Company"
+        return default_company_name, default_logo_url, False, f"Playwright extraction error: {str(e)}"
+    
+    finally:
+        # Clean up Playwright resources
+        if context:
+            await context.close()
+        if browser:
+            await browser.close()
+        if playwright:
+            await playwright.stop()
+
 async def extract_company_info(url: str) -> tuple:
     """
     Extract company name and logo from a website.
@@ -112,129 +406,186 @@ async def extract_company_info(url: str) -> tuple:
         success = False
         message = "Initialization"
         
-        # Try to fetch the page
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-        response = requests.get(normalized_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        # Parse HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
-        base_url = get_base_url(normalized_url)
-        
-        # 1. Try to extract company name from title tag
-        if soup.title and soup.title.string:
-            title_text = soup.title.string.strip()
-            # Clean up title (remove common suffixes like "- Home", "| Official Website", etc.)
-            common_suffixes = [
-                " - Home", " | Home", " - Official Website", " | Official Website",
-                " - Official Site", " | Official Site"
-            ]
-            for suffix in common_suffixes:
-                if title_text.endswith(suffix):
-                    title_text = title_text[:-len(suffix)]
+        # First try with BeautifulSoup for speed
+        try:
+            # Try to fetch the page
+            headers = {
+                'User-Agent': get_random_user_agent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5'
+            }
             
-            # Remove domain name if it appears in title
-            domain_parts = domain.split('.')
-            if len(domain_parts) > 1:
-                domain_name = domain_parts[0].lower()
-                if domain_name in title_text.lower():
-                    company_name = title_text.strip()
-                else:
-                    # If no domain match, use the title but limit length
-                    company_name = title_text[:50].strip()
-        
-        # 2. Try to extract logo from various sources
-        logo_found = False
-        
-        # Method 1: Look for meta tags with 'logo' in the property/name
-        meta_logo_tags = soup.find_all('meta', attrs={'property': lambda x: x and 'logo' in x.lower() if x else False})
-        if not meta_logo_tags:
-            meta_logo_tags = soup.find_all('meta', attrs={'name': lambda x: x and 'logo' in x.lower() if x else False})
-        
-        if meta_logo_tags:
-            for tag in meta_logo_tags:
-                if tag.get('content'):
-                    logo_url = urljoin(base_url, tag['content'])
-                    logo_found = True
-                    break
-        
-        # Method 2: Look for OpenGraph image
-        if not logo_found:
-            og_image = soup.find('meta', property='og:image')
-            if og_image and og_image.get('content'):
-                logo_url = urljoin(base_url, og_image['content'])
-                logo_found = True
-        
-        # Method 3: Look for schema.org structured data with logo
-        if not logo_found:
+            response = requests.get(normalized_url, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            # Parse HTML
+            soup = BeautifulSoup(response.text, 'html.parser')
+            base_url = get_base_url(normalized_url)
+            
+            # 1. Try to extract company name from title tag
+            if soup.title and soup.title.string:
+                title_text = soup.title.string.strip()
+                # Clean up title (remove common suffixes like "- Home", "| Official Website", etc.)
+                common_suffixes = [
+                    " - Home", " | Home", " - Official Website", " | Official Website",
+                    " - Official Site", " | Official Site"
+                ]
+                for suffix in common_suffixes:
+                    if title_text.endswith(suffix):
+                        title_text = title_text[:-len(suffix)]
+                
+                # Remove domain name if it appears in title
+                domain_parts = domain.split('.')
+                if len(domain_parts) > 1:
+                    domain_name = domain_parts[0].lower()
+                    if domain_name in title_text.lower():
+                        company_name = title_text.strip()
+                    else:
+                        # If no domain match, use the title but limit length
+                        company_name = title_text[:50].strip()
+            
+            # Expand logo detection: also check header and organization schema
+            # Look for schema.org Organization logo first (most accurate)
+            logo_found = False
             schema_tags = soup.find_all('script', type='application/ld+json')
             for tag in schema_tags:
                 try:
                     import json
                     data = json.loads(tag.string)
-                    if isinstance(data, dict) and 'logo' in data:
-                        if isinstance(data['logo'], str):
-                            logo_url = urljoin(base_url, data['logo'])
-                            logo_found = True
-                            break
-                        elif isinstance(data['logo'], dict) and 'url' in data['logo']:
-                            logo_url = urljoin(base_url, data['logo']['url'])
-                            logo_found = True
-                            break
+                    # Check for Organization schema
+                    if isinstance(data, dict):
+                        # Direct logo property
+                        if 'logo' in data:
+                            if isinstance(data['logo'], str):
+                                logo_url = urljoin(base_url, data['logo'])
+                                logo_found = True
+                                break
+                            elif isinstance(data['logo'], dict) and 'url' in data['logo']:
+                                logo_url = urljoin(base_url, data['logo']['url'])
+                                logo_found = True
+                                break
+                        # Logo inside Organization property
+                        elif '@type' in data and data['@type'] == 'Organization' and 'logo' in data:
+                            if isinstance(data['logo'], str):
+                                logo_url = urljoin(base_url, data['logo'])
+                                logo_found = True
+                                break
+                            elif isinstance(data['logo'], dict) and 'url' in data['logo']:
+                                logo_url = urljoin(base_url, data['logo']['url'])
+                                logo_found = True
+                                break
+                        # Logo inside nested Organization
+                        elif 'organization' in data and isinstance(data['organization'], dict) and 'logo' in data['organization']:
+                            org_logo = data['organization']['logo']
+                            if isinstance(org_logo, str):
+                                logo_url = urljoin(base_url, org_logo)
+                                logo_found = True
+                                break
+                            elif isinstance(org_logo, dict) and 'url' in org_logo:
+                                logo_url = urljoin(base_url, org_logo['url'])
+                                logo_found = True
+                                break
                 except Exception as e:
                     logger.warning(f"Error parsing JSON-LD: {e}")
                     continue
-        
-        # Method 4: Look for common logo class/id patterns
-        if not logo_found:
-            logo_selectors = [
-                'img.logo', 'img#logo', '.logo img', '#logo img',
-                'img.brand', 'img#brand', '.brand img', '#brand img',
-                'img.site-logo', 'img#site-logo', '.site-logo img', '#site-logo img',
-                'header img', '.header img', '#header img',
-                '.navbar-brand img', '.brand-logo img'
-            ]
             
-            for selector in logo_selectors:
+            # Look for meta tags with 'logo' in the property/name
+            if not logo_found:
+                meta_logo_tags = soup.find_all('meta', attrs={'property': lambda x: x and 'logo' in x.lower() if x else False})
+                if not meta_logo_tags:
+                    meta_logo_tags = soup.find_all('meta', attrs={'name': lambda x: x and 'logo' in x.lower() if x else False})
+                
+                if meta_logo_tags:
+                    for tag in meta_logo_tags:
+                        if tag.get('content'):
+                            logo_url = urljoin(base_url, tag['content'])
+                            logo_found = True
+                            break
+            
+            # Look for OpenGraph image
+            if not logo_found:
+                og_image = soup.find('meta', property='og:image')
+                if og_image and og_image.get('content'):
+                    logo_url = urljoin(base_url, og_image['content'])
+                    logo_found = True
+            
+            # Look for typical logos in the header or navigation
+            if not logo_found:
+                # Find the header or nav element
+                header = soup.find(['header', 'nav', 'div.header', 'div.nav', 'div.navbar'])
+                if header:
+                    # Look for img in the header with logo-like attributes
+                    logo_candidates = header.select('img[src]')
+                    for img in logo_candidates:
+                        # Check if it looks like a logo based on attributes
+                        alt_text = img.get('alt', '').lower()
+                        class_attr = ' '.join(img.get('class', [])).lower()
+                        img_id = img.get('id', '').lower()
+                        
+                        is_likely_logo = (
+                            'logo' in alt_text or 'brand' in alt_text or
+                            'logo' in class_attr or 'brand' in class_attr or
+                            'logo' in img_id or 'brand' in img_id
+                        )
+                        
+                        if is_likely_logo:
+                            logo_url = urljoin(base_url, img['src'])
+                            logo_found = True
+                            break
+            
+            # Look for common logo class/id patterns
+            if not logo_found:
+                logo_selectors = [
+                    'img.logo', 'img#logo', '.logo img', '#logo img',
+                    'img.brand', 'img#brand', '.brand img', '#brand img',
+                    'img.site-logo', 'img#site-logo', '.site-logo img', '#site-logo img',
+                    'header img', '.header img', '#header img',
+                    '.navbar-brand img', '.brand-logo img',
+                    'a[href="/"] img', 'a[href="./"] img'  # Logo often links to homepage
+                ]
+                
+                for selector in logo_selectors:
+                    try:
+                        logo_img = soup.select_one(selector)
+                        if logo_img and logo_img.get('src'):
+                            logo_url = urljoin(base_url, logo_img['src'])
+                            logo_found = True
+                            break
+                    except Exception as e:
+                        logger.warning(f"Error with selector {selector}: {e}")
+                        continue
+            
+            # Fall back to favicon if nothing else worked
+            if not logo_found:
+                # Check for link rel="icon" or rel="shortcut icon"
+                favicon_link = soup.find('link', rel=lambda r: r and ('icon' in r.lower() if r else False))
+                if favicon_link and favicon_link.get('href'):
+                    logo_url = urljoin(base_url, favicon_link['href'])
+                    logo_found = True
+                else:
+                    # Use Google's favicon service as last resort
+                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+                    logo_found = True
+            
+            success = True
+            message = "Successfully extracted company information with BeautifulSoup"
+            
+            # Verify logo URL is valid
+            if logo_found:
                 try:
-                    logo_img = soup.select_one(selector)
-                    if logo_img and logo_img.get('src'):
-                        logo_url = urljoin(base_url, logo_img['src'])
-                        logo_found = True
-                        break
+                    # Don't download the image, just check if it exists with a HEAD request
+                    logo_test = requests.head(logo_url, timeout=5)
+                    if logo_test.status_code >= 400:
+                        logger.warning(f"Logo URL returned error: {logo_test.status_code}")
+                        logo_url = default_logo_url
                 except Exception as e:
-                    logger.warning(f"Error with selector {selector}: {e}")
-                    continue
-        
-        # Method 5: Fall back to favicon if nothing else worked
-        if not logo_found:
-            # Check for link rel="icon" or rel="shortcut icon"
-            favicon_link = soup.find('link', rel=lambda r: r and ('icon' in r.lower() if r else False))
-            if favicon_link and favicon_link.get('href'):
-                logo_url = urljoin(base_url, favicon_link['href'])
-                logo_found = True
-            else:
-                # Use Google's favicon service as last resort
-                logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-                logo_found = True
-        
-        success = True
-        message = "Successfully extracted company information"
-        
-        # Verify logo URL is valid
-        if logo_found:
-            try:
-                # Don't download the image, just check if it exists with a HEAD request
-                logo_test = requests.head(logo_url, timeout=5)
-                if logo_test.status_code >= 400:
-                    logger.warning(f"Logo URL returned error: {logo_test.status_code}")
+                    logger.warning(f"Error verifying logo URL: {e}")
                     logo_url = default_logo_url
-            except Exception as e:
-                logger.warning(f"Error verifying logo URL: {e}")
-                logo_url = default_logo_url
+            
+        except Exception as e:
+            logger.warning(f"BeautifulSoup extraction failed: {e}. Falling back to Playwright.")
+            # Fall back to Playwright for JavaScript-rendered sites
+            company_name, logo_url, success, message = await extract_with_playwright(normalized_url)
         
         return company_name, logo_url, success, message
         
@@ -250,9 +601,11 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
     """
     Extract company name and logo from a website.
     
-    Uses BeautifulSoup to parse the HTML and extract:
-    1. Company name from title or other metadata
-    2. Logo URL from various sources (meta tags, OpenGraph, schema.org, common selectors)
+    Uses a multi-layered approach:
+    1. First tries BeautifulSoup for speed and simplicity
+    2. Falls back to Playwright for JavaScript-heavy sites
+    3. Employs multiple extraction techniques for company name and logo
+    4. Uses anti-bot detection measures for reliable results
     
     Falls back to default values if extraction fails.
     """
