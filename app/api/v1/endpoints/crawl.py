@@ -410,6 +410,12 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             company_name = extract_company_name_from_domain(domain)
             logo_url = DEFAULT_LOGO_URL
         
+        # Final safety check - ensure we have a company name
+        if not company_name or company_name.strip() == "":
+            # Use the improved extract_company_name_from_domain method from company_info
+            company_name = extract_company_name_from_domain(domain)
+            logger.info(f"Using fallback company name from domain: {company_name}")
+        
         response.one_sentence_summary = one_sentence_summary
         response.hundred_word_summary = hundred_word_summary
         response.word_frequencies = word_frequencies
@@ -548,7 +554,12 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             company_name = extract_company_name_from_domain(domain)
             logo_url = DEFAULT_LOGO_URL
         
-        # Set response fields
+        # Final safety check - ensure we have a company name
+        if not company_name or company_name.strip() == "":
+            # Use the improved extract_company_name_from_domain method from company_info
+            company_name = extract_company_name_from_domain(domain)
+            logger.info(f"Using fallback company name from domain: {company_name}")
+        
         response.one_sentence_summary = one_sentence_summary
         response.hundred_word_summary = hundred_word_summary
         response.word_frequencies = word_frequencies

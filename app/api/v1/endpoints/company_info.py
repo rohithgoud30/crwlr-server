@@ -658,10 +658,22 @@ def extract_company_name_from_domain(domain: str) -> str:
         return company_name
     except Exception as e:
         logger.error(f"Error extracting company name from domain {domain}: {e}")
-        # Just use first character if possible
-        if domain and len(domain) > 0:
-            return domain[0].upper()
-        return "C"
+        
+        # Fallback company name extraction - use domain parts
+        try:
+            # Get raw domain name without www and tld
+            domain_parts = domain.split('.')
+            if domain.startswith('www.') and len(domain_parts) >= 3:
+                return domain_parts[1].capitalize()
+            elif len(domain_parts) >= 2:
+                return domain_parts[0].capitalize()
+            else:
+                return domain.capitalize()
+        except:
+            # Just use first character if possible
+            if domain and len(domain) > 0:
+                return domain[0].upper()
+            return "C"
 
 def extract_company_name(soup: BeautifulSoup) -> str:
     """
@@ -687,15 +699,6 @@ def extract_company_name(soup: BeautifulSoup) -> str:
     # Check title tag but clean it
     if soup.title and soup.title.string:
         title = soup.title.string.strip()
-        # Remove common suffixes and clean up title
-        common_suffixes = [
-            " - Home", " | Home", " - Official Website", " | Official Website",
-            " - Official Site", " | Official Site", " - log in or sign up",
-            " | log in or sign up", " - Login", " | Login", " – Log In or Sign Up"
-        ]
-        for suffix in common_suffixes:
-            if title.endswith(suffix):
-                title = title[:-len(suffix)]
         
         # Remove everything after a dash or pipe (common for page titles)
         if ' - ' in title:
