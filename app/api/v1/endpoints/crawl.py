@@ -1,6 +1,8 @@
-from fastapi import APIRouter, Response, HTTPException, status
+from fastapi import APIRouter, Response, HTTPException, status, Depends
 import logging
 import asyncio
+from uuid import UUID
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.tos import find_tos
 from app.api.v1.endpoints.privacy import find_privacy_policy
@@ -8,6 +10,7 @@ from app.api.v1.endpoints.extract import extract_text
 from app.api.v1.endpoints.summary import generate_summary
 from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining
+from app.core.database import get_db
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
@@ -16,6 +19,10 @@ from app.models.summary import SummaryRequest, SummaryResponse
 from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse
 from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMiningResults
 from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse
+from app.models.database import DocumentCreate, SubmissionCreate
+
+from app.crud.document import document_crud
+from app.crud.submission import submission_crud
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -142,154 +149,298 @@ async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type:
         
         return summary_response, word_freq_response, text_mining_response
 
+async def save_document_to_db(
+    doc_type: str,
+    url: str,
+    doc_url: str,
+    one_sentence_summary: str,
+    hundred_word_summary: str,
+    text_mining_metrics,
+    word_frequencies,
+    raw_text=None,
+):
+    try:
+        # Set default logo URL
+        default_logo_url = "/placeholder.svg?height=48&width=48"
+        logo_url = default_logo_url
+        
+        # Extract company name from original URL
+        from urllib.parse import urlparse
+        try:
+            parsed_url = urlparse(url)
+            domain_parts = parsed_url.netloc.split('.')
+            if len(domain_parts) >= 2:
+                company_name = domain_parts[-2].capitalize()
+                # Try to get logo using Google's favicon service
+                try:
+                    logo_url = f"https://www.google.com/s2/favicons?domain={parsed_url.netloc}&sz=128"
+                except Exception as e:
+                    logger.error(f"Error generating logo URL: {e}")
+                    logo_url = default_logo_url
+            else:
+                company_name = url
+                logo_url = default_logo_url
+            
+            logger.info(f"Extracted company name: {company_name}, Logo URL: {logo_url}")
+        except Exception as e:
+            logger.error(f"Error extracting company name from URL: {e}")
+            company_name = url
+            logo_url = default_logo_url
+        
+        # Convert word_frequencies and text_mining_metrics to JSON-serializable format if needed
+        if isinstance(word_frequencies, list) and word_frequencies:
+            serializable_word_freqs = [
+                {"word": wf.word, "frequency": wf.frequency} if hasattr(wf, "word") else wf 
+                for wf in word_frequencies
+            ]
+        else:
+            serializable_word_freqs = word_frequencies
+            
+        if isinstance(text_mining_metrics, dict):
+            serializable_text_mining = text_mining_metrics
+        elif hasattr(text_mining_metrics, "dict") and callable(getattr(text_mining_metrics, "dict")):
+            serializable_text_mining = text_mining_metrics.dict()
+        else:
+            serializable_text_mining = text_mining_metrics
+            
+        # Check if a document with this URL already exists
+        existing_doc = await document_crud.get_by_retrieved_url(doc_url, doc_type)
+        
+        if existing_doc:
+            logger.info(f"Document with URL {doc_url} already exists. Using existing document.")
+            document_id = existing_doc['id']
+            
+            # Update the document's views count
+            await document_crud.increment_views(document_id)
+        else:
+            # Create a new document
+            logger.info(f"Creating new document for URL: {doc_url}")
+            
+            # Create document data dictionary
+            document_data = {
+                "url": url,
+                "document_type": doc_type,
+                "retrieved_url": doc_url,
+                "company_name": company_name,
+                "logo_url": logo_url,
+                "raw_text": raw_text,
+                "one_sentence_summary": one_sentence_summary,
+                "hundred_word_summary": hundred_word_summary,
+                "word_frequencies": serializable_word_freqs,
+                "text_mining_metrics": serializable_text_mining,
+                "views": 0
+            }
+            
+            document = await document_crud.create(document_data)
+            document_id = document['id']
+        
+        return document_id
+    except Exception as e:
+        logger.error(f"Error saving document to database: {e}")
+        raise
+
 @router.post("/crawl-tos", response_model=CrawlTosResponse)
-async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
-    """
-    Crawls a website to find, extract, summarize, analyze word frequency,
-    and perform text mining on its Terms of Service in one request.
+async def crawl_tos(request: CrawlTosRequest):
+    logger.info(f"Received request to crawl ToS for URL: {request.url}")
     
-    Steps:
-    1. Find the Terms of Service URL
-    2. Extract the text content
-    3. Perform all analyses (summary, word frequency, text mining) in parallel
-    
-    Returns all results in a single response, excluding the full extracted text
-    for better performance.
-    """
-    logger.info(f"Processing optimized crawl-tos request for URL: {request.url}")
-    
-    # Step 1: Find ToS URL
-    tos_request = ToSRequest(url=request.url)
-    tos_response = await find_tos(tos_request)
-    
-    if not tos_response.success or not tos_response.tos_url:
-        return CrawlTosResponse(
-            url=request.url,
-            success=False,
-            message=f"Failed to find Terms of Service URL: {tos_response.message}",
-        )
-    
-    # Step 2: Extract text from ToS URL
-    extract_request = ExtractRequest(url=tos_response.tos_url, document_type="tos")
-    extract_response = await extract_text(extract_request, Response())
-    
-    if not extract_response.success or not extract_response.text:
-        return CrawlTosResponse(
-            url=request.url,
-            tos_url=tos_response.tos_url,
-            success=False,
-            message=f"Failed to extract text from ToS URL: {extract_response.message}",
-        )
-    
-    # Make sure the document type is consistently set to "tos"
-    extract_response.document_type = "tos"
-    
-    # Extract successful - proceed with parallel analyses
-    extracted_text = extract_response.text
-    
-    # Step 3: Perform all analyses in parallel
-    summary_response, word_freq_response, text_mining_response = await perform_parallel_analysis(
-        tos_response.tos_url, extracted_text, "tos"
-    )
-    
-    # Check if summary failed but continue with other analyses
-    summary_message = "Successfully generated summaries"
-    one_sentence_summary = None
-    hundred_word_summary = None
-    
-    if not summary_response.success:
-        summary_message = f"Failed to generate summary: {summary_response.message}"
-        logger.warning(summary_message)
-    else:
-        one_sentence_summary = summary_response.one_sentence_summary
-        hundred_word_summary = summary_response.hundred_word_summary
-    
-    # Return the complete response with all analyses
-    return CrawlTosResponse(
+    response = CrawlTosResponse(
         url=request.url,
-        tos_url=tos_response.tos_url,
-        # Not returning the full text to reduce response size
-        extracted_text=None,
-        one_sentence_summary=one_sentence_summary,
-        hundred_word_summary=hundred_word_summary,
-        text_mining=text_mining_response.text_mining if text_mining_response.success else None,
-        word_frequencies=word_freq_response.word_frequencies if word_freq_response.success else None,
-        success=True,
-        message=f"Successfully crawled and analyzed Terms of Service. {summary_message}",
+        success=False,
+        message="Failed to crawl Terms of Service"
     )
+    
+    try:
+        tos_url = None
+        try:
+            tos_url = await find_tos_url(request.url)
+            if tos_url:
+                logger.info(f"Found Terms of Service URL: {tos_url}")
+                response.tos_url = tos_url
+            else:
+                response.message = "Could not find Terms of Service URL"
+                return response
+        except Exception as e:
+            logger.error(f"Error finding Terms of Service URL: {e}")
+            response.message = f"Error finding Terms of Service URL: {str(e)}"
+            return response
+        
+        extracted_text = None
+        try:
+            extracted_text = await extract_text_from_url(tos_url)
+            if not extracted_text:
+                response.message = "Could not extract text from Terms of Service page"
+                return response
+            logger.info(f"Successfully extracted text from Terms of Service page. Text length: {len(extracted_text)}")
+        except Exception as e:
+            logger.error(f"Error extracting text from Terms of Service page: {e}")
+            response.message = f"Error extracting text from Terms of Service page: {str(e)}"
+            return response
+        
+        # Generate one-sentence summary
+        try:
+            one_sentence_summary = await generate_one_sentence_summary(extracted_text)
+            response.one_sentence_summary = one_sentence_summary
+            logger.info(f"Generated one-sentence summary: {one_sentence_summary}")
+        except Exception as e:
+            logger.error(f"Error generating one-sentence summary: {e}")
+            response.one_sentence_summary = "Error generating summary"
+        
+        # Generate hundred-word summary
+        try:
+            hundred_word_summary = await generate_hundred_word_summary(extracted_text)
+            response.hundred_word_summary = hundred_word_summary
+            logger.info("Generated hundred-word summary successfully")
+        except Exception as e:
+            logger.error(f"Error generating hundred-word summary: {e}")
+            response.hundred_word_summary = "Error generating summary"
+        
+        # Generate word frequencies
+        try:
+            word_frequencies = get_word_frequencies(extracted_text)
+            response.word_frequencies = word_frequencies
+            logger.info(f"Generated word frequencies. Top frequency: {word_frequencies[0].word if word_frequencies else 'None'}")
+        except Exception as e:
+            logger.error(f"Error generating word frequencies: {e}")
+            response.word_frequencies = []
+        
+        # Generate text mining metrics
+        try:
+            text_mining_metrics = extract_text_mining_metrics(extracted_text)
+            response.text_mining = text_mining_metrics
+            logger.info("Generated text mining metrics successfully")
+        except Exception as e:
+            logger.error(f"Error generating text mining metrics: {e}")
+            response.text_mining = TextMiningResults()
+        
+        # Save document to database
+        try:
+            document_id = await save_document_to_db(
+                doc_type="tos",
+                url=request.url,
+                doc_url=tos_url,
+                one_sentence_summary=response.one_sentence_summary,
+                hundred_word_summary=response.hundred_word_summary,
+                text_mining_metrics=response.text_mining,
+                word_frequencies=response.word_frequencies,
+                raw_text=extracted_text
+            )
+            response.document_id = document_id
+            logger.info(f"Saved document to database with ID: {document_id}")
+        except Exception as e:
+            logger.error(f"Error saving document to database: {e}")
+            # Don't fail the response if we couldn't save to the database
+            # The document analysis is still returned
+        
+        response.success = True
+        response.message = "Successfully crawled and analyzed Terms of Service"
+        
+        # Don't return the full extracted text to improve response performance
+        return response
+    
+    except Exception as e:
+        logger.error(f"Unexpected error during ToS crawling: {e}")
+        response.message = f"Unexpected error: {str(e)}"
+        return response
 
 @router.post("/crawl-pp", response_model=CrawlPrivacyResponse)
-async def crawl_privacy_policy(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
-    """
-    Crawls a website to find, extract, summarize, analyze word frequency,
-    and perform text mining on its Privacy Policy in one request.
+async def crawl_privacy_policy(request: CrawlPrivacyRequest):
+    logger.info(f"Received request to crawl Privacy Policy for URL: {request.url}")
     
-    Steps:
-    1. Find the Privacy Policy URL
-    2. Extract the text content
-    3. Perform all analyses (summary, word frequency, text mining) in parallel
-    
-    Returns all results in a single response, excluding the full extracted text
-    for better performance.
-    """
-    logger.info(f"Processing optimized crawl-pp request for URL: {request.url}")
-    
-    # Step 1: Find Privacy Policy URL
-    pp_request = PrivacyRequest(url=request.url)
-    pp_response = await find_privacy_policy(pp_request)
-    
-    if not pp_response.success or not pp_response.pp_url:
-        return CrawlPrivacyResponse(
-            url=request.url,
-            success=False,
-            message=f"Failed to find Privacy Policy URL: {pp_response.message}",
-        )
-    
-    # Step 2: Extract text from Privacy Policy URL
-    extract_request = ExtractRequest(url=pp_response.pp_url, document_type="pp")
-    extract_response = await extract_text(extract_request, Response())
-    
-    if not extract_response.success or not extract_response.text:
-        return CrawlPrivacyResponse(
-            url=request.url,
-            pp_url=pp_response.pp_url,
-            success=False,
-            message=f"Failed to extract text from Privacy Policy URL: {extract_response.message}",
-        )
-    
-    # Make sure the document type is consistently set to "pp"
-    extract_response.document_type = "pp"
-    
-    # Extract successful - proceed with parallel analyses
-    extracted_text = extract_response.text
-    
-    # Step 3: Perform all analyses in parallel
-    summary_response, word_freq_response, text_mining_response = await perform_parallel_analysis(
-        pp_response.pp_url, extracted_text, "pp"
+    response = CrawlPrivacyResponse(
+        url=request.url,
+        success=False,
+        message="Failed to crawl Privacy Policy"
     )
     
-    # Check if summary failed but continue with other analyses
-    summary_message = "Successfully generated summaries"
-    one_sentence_summary = None
-    hundred_word_summary = None
+    try:
+        pp_url = None
+        try:
+            pp_url = await find_privacy_policy_url(request.url)
+            if pp_url:
+                logger.info(f"Found Privacy Policy URL: {pp_url}")
+                response.pp_url = pp_url
+            else:
+                response.message = "Could not find Privacy Policy URL"
+                return response
+        except Exception as e:
+            logger.error(f"Error finding Privacy Policy URL: {e}")
+            response.message = f"Error finding Privacy Policy URL: {str(e)}"
+            return response
+        
+        extracted_text = None
+        try:
+            extracted_text = await extract_text_from_url(pp_url)
+            if not extracted_text:
+                response.message = "Could not extract text from Privacy Policy page"
+                return response
+            logger.info(f"Successfully extracted text from Privacy Policy page. Text length: {len(extracted_text)}")
+        except Exception as e:
+            logger.error(f"Error extracting text from Privacy Policy page: {e}")
+            response.message = f"Error extracting text from Privacy Policy page: {str(e)}"
+            return response
+        
+        # Generate one-sentence summary
+        try:
+            one_sentence_summary = await generate_one_sentence_summary(extracted_text)
+            response.one_sentence_summary = one_sentence_summary
+            logger.info(f"Generated one-sentence summary: {one_sentence_summary}")
+        except Exception as e:
+            logger.error(f"Error generating one-sentence summary: {e}")
+            response.one_sentence_summary = "Error generating summary"
+        
+        # Generate hundred-word summary
+        try:
+            hundred_word_summary = await generate_hundred_word_summary(extracted_text)
+            response.hundred_word_summary = hundred_word_summary
+            logger.info("Generated hundred-word summary successfully")
+        except Exception as e:
+            logger.error(f"Error generating hundred-word summary: {e}")
+            response.hundred_word_summary = "Error generating summary"
+        
+        # Generate word frequencies
+        try:
+            word_frequencies = get_word_frequencies(extracted_text)
+            response.word_frequencies = word_frequencies
+            logger.info(f"Generated word frequencies. Top frequency: {word_frequencies[0].word if word_frequencies else 'None'}")
+        except Exception as e:
+            logger.error(f"Error generating word frequencies: {e}")
+            response.word_frequencies = []
+        
+        # Generate text mining metrics
+        try:
+            text_mining_metrics = extract_text_mining_metrics(extracted_text)
+            response.text_mining = text_mining_metrics
+            logger.info("Generated text mining metrics successfully")
+        except Exception as e:
+            logger.error(f"Error generating text mining metrics: {e}")
+            response.text_mining = TextMiningResults()
+        
+        # Save document to database
+        try:
+            document_id = await save_document_to_db(
+                doc_type="pp",
+                url=request.url,
+                doc_url=pp_url,
+                one_sentence_summary=response.one_sentence_summary,
+                hundred_word_summary=response.hundred_word_summary,
+                text_mining_metrics=response.text_mining,
+                word_frequencies=response.word_frequencies,
+                raw_text=extracted_text
+            )
+            response.document_id = document_id
+            logger.info(f"Saved document to database with ID: {document_id}")
+        except Exception as e:
+            logger.error(f"Error saving document to database: {e}")
+            # Don't fail the response if we couldn't save to the database
+            # The document analysis is still returned
+        
+        response.success = True
+        response.message = "Successfully crawled and analyzed Privacy Policy"
+        
+        # Don't return the full extracted text to improve response performance
+        return response
     
-    if not summary_response.success:
-        summary_message = f"Failed to generate summary: {summary_response.message}"
-        logger.warning(summary_message)
-    else:
-        one_sentence_summary = summary_response.one_sentence_summary
-        hundred_word_summary = summary_response.hundred_word_summary
-    
-    # Return the complete response with all analyses
-    return CrawlPrivacyResponse(
-        url=request.url,
-        pp_url=pp_response.pp_url,
-        # Not returning the full text to reduce response size
-        extracted_text=None,
-        one_sentence_summary=one_sentence_summary,
-        hundred_word_summary=hundred_word_summary,
-        text_mining=text_mining_response.text_mining if text_mining_response.success else None,
-        word_frequencies=word_freq_response.word_frequencies if word_freq_response.success else None,
-        success=True,
-        message=f"Successfully crawled and analyzed Privacy Policy. {summary_message}",
-    ) 
+    except Exception as e:
+        logger.error(f"Unexpected error during Privacy Policy crawling: {e}")
+        response.message = f"Unexpected error: {str(e)}"
+        return response 

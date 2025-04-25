@@ -4,24 +4,14 @@ import requests
 from bs4 import BeautifulSoup
 from typing import Optional
 from urllib.parse import urlparse, urljoin
-from pydantic import BaseModel
+
+from app.models.company_info import CompanyInfoRequest, CompanyInfoResponse
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Models
-class CompanyInfoRequest(BaseModel):
-    url: str
-
-class CompanyInfoResponse(BaseModel):
-    url: str
-    company_name: str
-    logo_url: str
-    success: bool
-    message: str
 
 def get_base_url(url: str) -> str:
     """Extract the base URL from a given URL."""
