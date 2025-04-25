@@ -323,10 +323,14 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                 domain = normalize_domain(url)
                 logger.info(f"Trying search engine fallbacks for domain: {domain}")
                 
+                # Construct a proper search query
+                search_query = f"{domain} terms of service, terms of use, user agreement, legal terms"
+                logger.info(f"Using search query: {search_query}")
+                
                 # Try DuckDuckGo search
                 try:
                     logger.info("Trying DuckDuckGo search fallback...")
-                    tos_url = await duckduckgo_search_fallback(domain, page)
+                    tos_url = await duckduckgo_search_fallback(search_query, page)
                     if tos_url:
                         # Validate the ToS URL isn't a user content page
                         if is_likely_user_generated_content(tos_url):
@@ -346,7 +350,7 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                 # Try Bing search
                 try:
                     logger.info("Trying Bing search fallback...")
-                    tos_url = await bing_search_fallback(domain, page)
+                    tos_url = await bing_search_fallback(search_query, page)
                     if tos_url:
                         # Validate the ToS URL isn't a user content page
                         if is_likely_user_generated_content(tos_url):
@@ -366,7 +370,7 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                 # Try Yahoo search as a last resort
                 try:
                     logger.info("Trying Yahoo search fallback...")
-                    tos_url = await yahoo_search_fallback(domain, page)
+                    tos_url = await yahoo_search_fallback(search_query, page)
                     if tos_url:
                         # Validate the ToS URL isn't a user content page
                         if is_likely_user_generated_content(tos_url):
@@ -630,7 +634,7 @@ async def setup_browser(playwright=None):
 
         # Get headless setting - use False for better bot avoidance
         # We wanted to use "new" headless mode but it's causing an error
-        headless = True
+        headless = False
         
         print(f"Browser headless mode: {headless}")
 
@@ -3097,14 +3101,12 @@ async def bing_search_fallback(query, page):
         return None
 
 
-async def duckduckgo_search_fallback(domain, page):
+async def duckduckgo_search_fallback(search_query, page):
     """Search for terms of service using DuckDuckGo."""
     try:
         print("Attempting search engine fallback with DuckDuckGo...")
 
-        # Create a search query for the domain with specific site constraint
-        search_query = f'{domain} terms of service, terms of use, user agreement, legal terms'
-        
+        # Use the search query directly instead of constructing it
         # Use the lite version which has a simpler interface
         ddg_search_url = f"https://lite.duckduckgo.com/lite?q={search_query}"
 
@@ -3119,6 +3121,10 @@ async def duckduckgo_search_fallback(domain, page):
             const results = [];
             const allLinks = Array.from(document.querySelectorAll('a[href]'));
             
+            // Extract domain from query for filtering
+            const domainMatch = domain.match(/^(\S+?)(?:\s|$)/);
+            const extractedDomain = domainMatch ? domainMatch[1] : '';
+            
             // Filter for result links - DuckDuckGo lite has a simple structure
             for (const link of allLinks) {
                 try {
@@ -3129,8 +3135,10 @@ async def duckduckgo_search_fallback(domain, page):
                         continue;
                     }
                     
-                    // Only include links to the target domain
-                    if (!url.hostname.includes(domain) && !domain.includes(url.hostname)) {
+                    // Only include links to the target domain if we have a domain
+                    if (extractedDomain && 
+                        !url.hostname.includes(extractedDomain) && 
+                        !extractedDomain.includes(url.hostname)) {
                         continue;
                     }
                     
@@ -3239,7 +3247,7 @@ async def duckduckgo_search_fallback(domain, page):
             // Sort and return top results
             return results.sort((a, b) => b.score - a.score).slice(0, 5);
         }""",
-            domain,
+            search_query,
         )
 
         print(f"🔍 DuckDuckGo search found {len(search_results)} potential ToS results")
