@@ -9,6 +9,7 @@ from typing import Optional, Tuple, Dict, Any
 from urllib.parse import urlparse, urljoin
 from playwright.async_api import async_playwright
 import string
+from fake_useragent import UserAgent
 
 from app.models.company_info import CompanyInfoRequest, CompanyInfoResponse
 
@@ -17,6 +18,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Initialize the UserAgent generator once
+try:
+    ua_generator = UserAgent()
+except Exception as e:
+    logger.error(f"Failed to initialize UserAgent: {e}")
+    ua_generator = None
 
 def get_base_url(url: str) -> str:
     """Extract the base URL from a given URL."""
@@ -86,26 +94,22 @@ def normalize_url(url: str) -> str:
         
     return url
 
-def get_random_user_agent() -> str:
-    """Return a random, realistic user agent string"""
-    user_agents = [
-        # Chrome on Windows
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36",
-        # Chrome on macOS
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36",
-        # Firefox on Windows
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:95.0) Gecko/20100101 Firefox/95.0",
-        # Firefox on macOS
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:94.0) Gecko/20100101 Firefox/94.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:95.0) Gecko/20100101 Firefox/95.0",
-        # Safari on macOS
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15",
-    ]
-    return random.choice(user_agents)
+def get_random_user_agent():
+    """
+    Returns a random, realistic user agent string from the fake-useragent library.
+    Falls back to a default value if the API fails.
+    """
+    try:
+        return ua_generator.random
+    except Exception as e:
+        # Fallback user agents in case the API fails
+        fallback_user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        ]
+        logger.error(f"Error getting random user agent: {e}. Using fallback.")
+        return random.choice(fallback_user_agents)
 
 async def setup_stealth_browser():
     """Setup Playwright browser with anti-detection measures"""
@@ -363,9 +367,16 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
     
     except Exception as e:
         logger.error(f"Error extracting with Playwright: {e}")
-        # Construct default values based on domain
-        domain = urlparse(url).netloc if url else "unknown"
-        default_company_name = domain.split('.')[0].capitalize() if domain else "Unknown Company"
+        # Always extract a company name from the domain
+        try:
+            domain = urlparse(url).netloc if url else ""
+            if domain.startswith('www.'):
+                domain = domain[4:]
+            default_company_name = domain.split('.')[0].capitalize() if domain else extract_company_name_from_domain(url.split('/')[0])
+        except:
+            # Final fallback - extract something usable from the URL
+            default_company_name = url.split('/')[-1].capitalize() if url else "Company"
+            
         return default_company_name, default_logo_url, False, f"Playwright extraction error: {str(e)}"
     
     finally:
@@ -389,13 +400,15 @@ async def extract_company_info(url: str) -> tuple:
     """
     # Set default values
     default_logo_url = "/placeholder.svg?height=48&width=48"
-    default_company_name = "Unknown Company"
     
     try:
         # Validate and normalize the URL
         sanitized_url = sanitize_url(url)
         if not sanitized_url:
-            return default_company_name, default_logo_url, False, f"Invalid URL '{url}'"
+            # If sanitization fails, extract name from original URL
+            domain = urlparse(url).netloc if url else url.split('/')[0]
+            company_name = extract_company_name_from_domain(domain) if domain else url.split('/')[-1].capitalize()
+            return company_name, default_logo_url, False, f"Invalid URL '{url}'"
             
         normalized_url = normalize_url(sanitized_url)
         
@@ -595,9 +608,14 @@ async def extract_company_info(url: str) -> tuple:
         
     except Exception as e:
         logger.error(f"Error extracting company info: {e}")
-        # Return defaults with error message
-        domain = urlparse(normalized_url).netloc if 'normalized_url' in locals() else "unknown"
-        default_company_name = domain.split('.')[0].capitalize() if domain else "Unknown Company"
+        # Return names derived from domain even in error case
+        try:
+            domain = urlparse(normalized_url).netloc if 'normalized_url' in locals() else urlparse(url).netloc
+            default_company_name = extract_company_name_from_domain(domain)
+        except:
+            # Final fallback - extract something usable from the URL
+            default_company_name = url.split('/')[-1].capitalize() if url else "Company"
+        
         return default_company_name, default_logo_url, False, f"Error: {str(e)}"
 
 def extract_company_name_from_domain(domain: str) -> str:
@@ -610,32 +628,44 @@ def extract_company_name_from_domain(domain: str) -> str:
         Capitalized company name
     """
     try:
+        # Handle empty domain
+        if not domain:
+            return "Company"
+            
         # Remove www. if present
         if domain.startswith('www.'):
             domain = domain[4:]
         
-        # Extract the main domain name (before the TLD)
-        parts = domain.split('.')
-        if len(parts) >= 2:
-            company = parts[-2]  # Get the part before the TLD
+        # Remove protocol if present
+        if '://' in domain:
+            domain = domain.split('://', 1)[1]
             
-            # Handle special cases like co.uk
-            if len(parts) > 2 and parts[-2] in ['co', 'com', 'org', 'net']:
-                company = parts[-3]
+        # Handle IP addresses or localhost
+        if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', domain) or domain.startswith('localhost'):
+            return "Local Company"
             
-            # Format company name (capitalize first letter of each word)
-            company_name = string.capwords(company.replace('-', ' ').replace('_', ' '))
-            
-            return company_name
+        # Handle domains with port
+        if ':' in domain:
+            domain = domain.split(':', 1)[0]
         
-        return domain.split('.')[0].capitalize()
+        # Simply use the first part of the domain
+        company = domain.split('.')[0]
+        
+        # Handle very short names (add "Company" suffix)
+        if len(company) <= 2:
+            return f"{company.upper()} Company"
+            
+        # Format company name (capitalize first letter of each word)
+        company_name = string.capwords(company.replace('-', ' ').replace('_', ' '))
+        
+        return company_name
     except Exception as e:
         logger.error(f"Error extracting company name from domain {domain}: {e}")
-        # Return domain as fallback
-        if domain:
-            name = domain.split('.')[0]
-            return name.capitalize()
-        return "Unknown Company"
+        # Never return Unknown Company - use a placeholder derived from the input if possible
+        if domain and len(domain) > 0:
+            first_char = domain[0].upper()
+            return f"{first_char} Company"
+        return "Company"
 
 def extract_company_name(soup: BeautifulSoup) -> str:
     """
@@ -665,7 +695,7 @@ def extract_company_name(soup: BeautifulSoup) -> str:
         common_suffixes = [
             " - Home", " | Home", " - Official Website", " | Official Website",
             " - Official Site", " | Official Site", " - log in or sign up",
-            " | log in or sign up", " - Login", " | Login"
+            " | log in or sign up", " - Login", " | Login", " – Log In or Sign Up"
         ]
         for suffix in common_suffixes:
             if title.endswith(suffix):
@@ -676,6 +706,10 @@ def extract_company_name(soup: BeautifulSoup) -> str:
             title = title.split(' - ')[0].strip()
         elif ' | ' in title:
             title = title.split(' | ')[0].strip()
+        
+        # Skip titles with "log in" or "sign up" phrases as they're typically not company names
+        if "log in" in title.lower() or "sign up" in title.lower() or "login" in title.lower():
+            return ""
             
         return title.strip()
     
@@ -786,51 +820,45 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
     # Default values
     default_logo_url = "/placeholder.svg?height=48&width=48"
     logo_url = default_logo_url
-    company_name = None
     
     try:
         # Get the domain
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
         
-        # Try fetching the site
-        try:
-            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extract company name from the page
-            company_name = extract_company_name(soup)
-            if not company_name:
-                company_name = extract_company_name_from_domain(domain)
-                
-            # Try to extract logo URL
-            logo_url = extract_logo_url(soup, domain)
-            
-            return CompanyInfoResponse(
-                url=url,
-                company_name=company_name,
-                logo_url=logo_url,
-                success=True,
-                message="Company information extracted successfully"
-            )
-            
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Failed to fetch URL {url}: {str(e)}")
-            company_name = extract_company_name_from_domain(domain)
-            return CompanyInfoResponse(
-                url=url,
-                company_name=company_name,
-                logo_url=logo_url,
-                success=False,
-                message=f"Failed to fetch URL: {str(e)}"
-            )
+        # Extract company name directly from domain
+        company_name = extract_company_name_from_domain(domain)
+        
+        # Use Google's favicon service for logo
+        logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+        
+        return CompanyInfoResponse(
+            url=url,
+            company_name=company_name,
+            logo_url=logo_url,
+            success=True,
+            message="Company information extracted from domain"
+        )
             
     except Exception as e:
         logging.error(f"Error extracting company info: {str(e)}")
+        
+        # Even in error case, extract company name from domain
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+            company_name = extract_company_name_from_domain(domain)
+        except:
+            # Final fallback - extract something usable from the URL
+            domain_parts = url.split('.')
+            if len(domain_parts) >= 2:
+                company_name = domain_parts[0].split('/')[-1].capitalize()
+            else:
+                company_name = url.split('/')[-1].capitalize()
+        
         return CompanyInfoResponse(
             url=url,
-            company_name=None,
+            company_name=company_name,
             logo_url=logo_url,
             success=False,
             message=f"Error extracting company info: {str(e)}"
