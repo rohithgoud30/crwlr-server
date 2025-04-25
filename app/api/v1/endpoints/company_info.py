@@ -375,7 +375,7 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             default_company_name = domain.split('.')[0].capitalize() if domain else url.split('/')[0].capitalize()
         except:
             # Final fallback - extract something usable from the URL
-            default_company_name = url.split('/')[-1].capitalize() if url else "C"
+            default_company_name = url.split('/')[-1].capitalize() if url else "Company"
             
         return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
     
@@ -611,7 +611,7 @@ async def extract_company_info(url: str) -> tuple:
             default_company_name = extract_company_name_from_domain(domain)
         except:
             # Final fallback - extract something usable from the URL
-            default_company_name = url.split('/')[-1].capitalize() if url else "C"
+            default_company_name = url.split('/')[-1].capitalize() if url else "Company"
         
         return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Error: {str(e)}"
 
@@ -627,7 +627,7 @@ def extract_company_name_from_domain(domain: str) -> str:
     try:
         # Handle empty domain
         if not domain:
-            return "C"
+            return "Company"
             
         # Remove www. if present
         if domain.startswith('www.'):
@@ -644,6 +644,39 @@ def extract_company_name_from_domain(domain: str) -> str:
         # Handle domains with port
         if ':' in domain:
             domain = domain.split(':', 1)[0]
+            
+        # Special cases for well-known domains
+        known_domains = {
+            "facebook.com": "Facebook",
+            "fb.com": "Facebook",
+            "instagram.com": "Instagram",
+            "whatsapp.com": "WhatsApp",
+            "meta.com": "Meta",
+            "google.com": "Google",
+            "youtube.com": "YouTube",
+            "twitter.com": "Twitter",
+            "x.com": "Twitter",
+            "amazon.com": "Amazon",
+            "apple.com": "Apple",
+            "netflix.com": "Netflix",
+            "microsoft.com": "Microsoft",
+            "linkedin.com": "LinkedIn",
+            "github.com": "GitHub",
+            "reddit.com": "Reddit",
+            "tiktok.com": "TikTok",
+            "snapchat.com": "Snapchat",
+            "airbnb.com": "Airbnb",
+            "uber.com": "Uber",
+            "lyft.com": "Lyft",
+            "paypal.com": "PayPal",
+            "walmart.com": "Walmart",
+            "ebay.com": "eBay"
+        }
+        
+        # Check if this is a known domain
+        for known_domain, company_name in known_domains.items():
+            if domain.endswith(known_domain):
+                return company_name
         
         # Simply use the first part of the domain
         company = domain.split('.')[0]
@@ -673,7 +706,7 @@ def extract_company_name_from_domain(domain: str) -> str:
             # Just use first character if possible
             if domain and len(domain) > 0:
                 return domain[0].upper()
-            return "C"
+            return "Company"
 
 def extract_company_name(soup: BeautifulSoup) -> str:
     """
@@ -850,7 +883,7 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
             else:
                 company_name = url.split('/')[-1].capitalize()
                 if not company_name or len(company_name) < 1:
-                    company_name = "C"
+                    company_name = "Company"
         
         return CompanyInfoResponse(
             url=url,
