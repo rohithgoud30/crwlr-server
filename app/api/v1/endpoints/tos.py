@@ -2948,12 +2948,12 @@ async def bing_search_fallback(query, page):
                         // Filter out articles/blog posts by checking URL patterns
                         
                         // 1. Filter out date patterns (YYYY/MM/DD) commonly used in news/blog URLs
-                        if (/\\/\\d{4}\\/\\d{1,2}\\//.test(urlPath)) {
+                        if (/\/\d{4}\/\d{1,2}\//.test(urlPath)) {
                             return false;
                         }
                         
                         // 2. Filter out URLs with long numeric IDs (often articles)
-                        if (/\\/\\d{5,}/.test(urlPath)) {
+                        if (/\/\d{5,}/.test(urlPath)) {
                             return false;
                         }
                         
