@@ -14,6 +14,9 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from fastapi import APIRouter, Response
 from functools import lru_cache
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
+from fake_useragent import UserAgent
+
+# Fixed version with improved resource management and error handling
 
 from app.models.extract import ExtractRequest, ExtractResponse
 from app.models.tos import ToSRequest
@@ -27,12 +30,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # PlaywrightManager singleton for headful browser reuse
+
+
 class PlaywrightManager:
     def __init__(self, max_instances: int = 3):
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.semaphore = asyncio.Semaphore(max_instances)
+        self.active_pages = set()  # Track active pages to ensure cleanup
+        self.last_cleanup = time.time()
+        self.cleanup_interval = 300  # Clean unused tabs every 5 minutes
 
     async def startup(self):
         logger.info("Launching Playwright browser...")
@@ -40,44 +48,88 @@ class PlaywrightManager:
         self.browser = await self.playwright.chromium.launch(
             headless=False,
             args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--ignore-certificate-errors',
-            ]
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--ignore-certificate-errors",
+            ],
         )
         self.context = await self.browser.new_context(
             viewport={"width": 1920, "height": 1080},
             ignore_https_errors=True,
-            locale='en-US',
-            timezone_id='America/New_York',
+            locale="en-US",
+            timezone_id="America/New_York",
         )
         # Inject minimal stealth script
-        await self.context.add_init_script("""
+        await self.context.add_init_script(
+            """
         () => {
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
         }
-        """)
+        """
+        )
         logger.info("PlaywrightManager ready.")
 
     async def get_page(self):
         await self.semaphore.acquire()
-        return await self.context.new_page()
+        page = await self.context.new_page()
+        self.active_pages.add(page)
+
+        # Check if we need to clean up unused tabs
+        if time.time() - self.last_cleanup > self.cleanup_interval:
+            await self.cleanup_stale_pages()
+
+        return page
 
     async def release_page(self, page):
         try:
+            if page in self.active_pages:
+                self.active_pages.remove(page)
             await page.close()
+        except Exception as e:
+            logger.error(f"Error closing page: {str(e)}")
         finally:
             self.semaphore.release()
 
+    async def cleanup_stale_pages(self):
+        """Close any stale pages that might have been left open"""
+        try:
+            logger.info(
+                f"Checking for stale browser pages. Active pages count: {len(self.active_pages)}"
+            )
+            if self.context:
+                pages = self.context.pages
+                for page in pages:
+                    if page not in self.active_pages:
+                        logger.info("Closing stale browser page")
+                        try:
+                            await page.close()
+                        except Exception as e:
+                            logger.warning(f"Error closing stale page: {str(e)}")
+            self.last_cleanup = time.time()
+        except Exception as e:
+            logger.error(f"Error during stale page cleanup: {str(e)}")
+
     async def shutdown(self):
         logger.info("Shutting down Playwright browser...")
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
-        logger.info("PlaywrightManager shut down.")
+        try:
+            # Close all active pages first
+            for page in list(self.active_pages):
+                try:
+                    await page.close()
+                except Exception as e:
+                    logger.warning(f"Error closing page during shutdown: {str(e)}")
+            self.active_pages.clear()
+
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+            logger.info("PlaywrightManager shut down.")
+        except Exception as e:
+            logger.error(f"Error during browser shutdown: {str(e)}")
+
 
 # Instantiate and plan to call startup/shutdown in app main
 auth_manager = PlaywrightManager()
@@ -86,271 +138,704 @@ auth_manager = PlaywrightManager()
 CACHE = {}
 CACHE_TTL = 3600
 MAX_CACHE_SIZE = 500
-STANDARD_TIMEOUT = 10
-URL_DISCOVERY_TIMEOUT = 8
+STANDARD_TIMEOUT = 15
+URL_DISCOVERY_TIMEOUT = 12
 MIN_CONTENT_LENGTH = 100
 MAX_PDF_PAGES = 30
 PDF_CHUNK = 5
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
+# Initialize UserAgent for random browser User-Agent strings
+ua_generator = UserAgent()
+
+# Function to get a random user agent
+
+
+def get_random_user_agent():
+    """
+    Returns a random, realistic user agent string from the fake-useragent library.
+    Falls back to a default value if the API fails.
+    """
+    try:
+        return ua_generator.random
+    except Exception as e:
+        # Fallback user agents in case the API fails
+        fallback_user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        ]
+        logger.error(f"Error getting random user agent: {e}. Using fallback.")
+        return random.choice(fallback_user_agents)
+
+
 # URL sanitization
+
 
 def sanitize_url(url: str) -> str:
     url = url.strip()
     if not re.match(r"^https?://", url):
         url = "https://" + url
     parsed = urlparse(url)
-    if not parsed.netloc or '.' not in parsed.netloc:
-        return ''
+    if not parsed.netloc or "." not in parsed.netloc:
+        return ""
     return url
+
 
 # Cache helpers
 
+
 def get_from_cache(key: str):
     entry = CACHE.get(key)
-    if entry and time.time() < entry['expires']:
-        return entry['value']
+    if entry and time.time() < entry["expires"]:
+        return entry["value"]
     return None
 
 
 def add_to_cache(key: str, value: dict):
     if len(CACHE) >= MAX_CACHE_SIZE:
-        oldest = sorted(CACHE.items(), key=lambda kv: kv[1]['expires'])[0][0]
+        oldest = sorted(CACHE.items(), key=lambda kv: kv[1]["expires"])[0][0]
         del CACHE[oldest]
-    CACHE[key] = {'value': value, 'expires': time.time() + CACHE_TTL}
+    CACHE[key] = {"value": value, "expires": time.time() + CACHE_TTL}
+
 
 # PDF detection & extraction
 
+
 def is_pdf_url(url: str) -> bool:
-    return url.lower().endswith('.pdf')
+    return url.lower().endswith(".pdf")
+
 
 @lru_cache(maxsize=100)
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     reader = io.BytesIO(pdf_bytes)
-    pdf = __import__('PyPDF2').PdfReader(reader)
+    pdf = __import__("PyPDF2").PdfReader(reader)
     pages = min(len(pdf.pages), MAX_PDF_PAGES)
     chunks = []
     for i in range(0, pages, PDF_CHUNK):
         text = []
         for p in range(i, min(i + PDF_CHUNK, pages)):
-            text.append(pdf.pages[p].extract_text() or '')
-        chunks.append('\n'.join(text))
-    return '\n'.join(chunks)
+            text.append(pdf.pages[p].extract_text() or "")
+        chunks.append("\n".join(text))
+    return "\n".join(chunks)
+
 
 # HTML cleanup
 
+
 def extract_content_from_soup(soup: BeautifulSoup) -> str:
-    for tag in soup(['script','style','nav','header','footer']):
+    """Extract content from BeautifulSoup object with multiple strategies."""
+    # First check if this is likely a bot verification page
+    is_bot_verification = detect_bot_verification_page(soup)
+    if is_bot_verification:
+        raise Exception(
+            "Bot verification page detected - unable to access actual content"
+        )
+
+    # First remove known non-content elements
+    for tag in soup(
+        ["script", "style", "nav", "header", "footer", "noscript", "iframe"]
+    ):
         tag.decompose()
-    ps = [p.get_text(strip=True) for p in soup.find_all('p') if len(p.get_text(strip=True))>10]
-    text = '\n\n'.join(ps)
-    return text if len(text)>=MIN_CONTENT_LENGTH else soup.get_text(separator='\n', strip=True)
+
+    # Try multiple extraction strategies in order of specificity
+
+    # 1. Look for TOS or privacy-specific containers
+    for selector in [
+        '[id*="terms"]',
+        '[id*="tos"]',
+        '[id*="agreement"]',
+        '[id*="legal"]',
+        '[id*="policy"]',
+        '[class*="terms"]',
+        '[class*="tos"]',
+        '[class*="agreement"]',
+        '[class*="legal"]',
+        '[class*="policy"]',
+        "article",
+        "main",
+        '[role="main"]',
+        "#content",
+        ".content",
+        "#main-content",
+        ".main-content",
+    ]:
+        try:
+            elements = soup.select(selector)
+            if elements:
+                # Sort by content length to find the most substantial element
+                elements_with_text = [
+                    (el, len(el.get_text(strip=True))) for el in elements
+                ]
+                elements_with_text.sort(key=lambda x: x[1], reverse=True)
+
+                # Get the element with the most text
+                main_element, text_length = elements_with_text[0]
+                if text_length >= MIN_CONTENT_LENGTH:
+                    content = main_element.get_text(separator="\n", strip=True)
+                    logger.info(
+                        f"Found content using selector '{selector}' with {text_length} characters"
+                    )
+                    return content
+        except Exception as e:
+            logger.debug(f"Error using selector {selector}: {str(e)}")
+            continue
+
+    # 2. Extract paragraphs
+    ps = [
+        p.get_text(strip=True)
+        for p in soup.find_all("p")
+        if len(p.get_text(strip=True)) > 10
+    ]
+    if ps:
+        text = "\n\n".join(ps)
+        if len(text) >= MIN_CONTENT_LENGTH:
+            logger.info(f"Found content from paragraphs: {len(text)} characters")
+            return text
+
+    # 3. Try to find sections with numbered lists (common in legal docs)
+    list_elements = soup.find_all(["ol", "ul"])
+    if list_elements:
+        lists_text = []
+        for list_el in list_elements:
+            items = [
+                li.get_text(strip=True)
+                for li in list_el.find_all("li")
+                if len(li.get_text(strip=True)) > 10
+            ]
+            if items:
+                lists_text.append("\n".join(items))
+
+        if lists_text:
+            combined_text = "\n\n".join(lists_text)
+            if len(combined_text) >= MIN_CONTENT_LENGTH:
+                logger.info(
+                    f"Found content from lists: {len(combined_text)} characters"
+                )
+                return combined_text
+
+    # 4. Last resort: get all text
+    text = soup.get_text(separator="\n", strip=True)
+
+    # Double check if this might be a bot verification page that we missed
+    if len(text) < 1000 and is_likely_bot_page(text):
+        raise Exception(
+            "Bot verification content detected - unable to access actual document"
+        )
+
+    logger.info(f"Using full page text as fallback: {len(text)} characters")
+    return text
+
+
+def detect_bot_verification_page(soup: BeautifulSoup) -> bool:
+    """
+    Detect if the page is a bot verification or CAPTCHA page.
+    Returns True if it appears to be a verification page.
+    """
+    # Common bot verification indicators in text
+    verification_phrases = [
+        "verify yourself",
+        "please verify",
+        "security check",
+        "bot check",
+        "captcha",
+        "prove you're human",
+        "are you a robot",
+        "not a robot",
+        "verification required",
+        "security verification",
+        "security measure",
+        "please confirm you're not a robot",
+        "we need to verify",
+        "please complete the security check",
+    ]
+
+    # Check page text for verification phrases
+    page_text = soup.get_text(separator=" ", strip=True).lower()
+    if any(phrase in page_text for phrase in verification_phrases):
+        matching_phrases = [
+            phrase for phrase in verification_phrases if phrase in page_text
+        ]
+        logger.warning(
+            f"Bot verification page detected with phrases: {matching_phrases}"
+        )
+        return True
+
+    # Check for CAPTCHA elements
+    captcha_indicators = soup.select(
+        'iframe[src*="captcha"], iframe[src*="recaptcha"], div[class*="captcha"], div[id*="captcha"]'
+    )
+    if captcha_indicators:
+        logger.warning("CAPTCHA elements detected on page")
+        return True
+
+    # Check if there are verification images
+    verification_images = soup.select(
+        'img[alt*="verification"], img[alt*="security"], img[alt*="captcha"]'
+    )
+    if verification_images:
+        logger.warning("Verification images detected on page")
+        return True
+
+    return False
+
+
+def is_likely_bot_page(text: str) -> bool:
+    """
+    Analyzes text content to determine if it's likely a bot verification page.
+    """
+    text = text.lower()
+
+    # Common phrases in bot verification pages
+    bot_phrases = [
+        "verify yourself",
+        "verification",
+        "security measure",
+        "please verify",
+        "bot detection",
+        "captcha",
+        "human verification",
+        "not a robot",
+        "bot check",
+        "security check",
+        "confirm you're human",
+        "prove you're not a bot",
+    ]
+
+    # Check if multiple bot verification phrases are present
+    matches = [phrase for phrase in bot_phrases if phrase in text]
+    if len(matches) >= 2:
+        logger.warning(
+            f"Text likely from a bot verification page. Matched phrases: {matches}"
+        )
+        return True
+
+    # Check for very short content with specific verification keywords
+    if len(text.split()) < 150 and any(
+        phrase in text
+        for phrase in ["verify", "verification", "robot", "bot", "security check"]
+    ):
+        retry_words = ["try again", "reload", "refresh", "browser"]
+        if any(word in text for word in retry_words):
+            logger.warning(
+                "Short text with verification keywords and retry suggestions detected"
+            )
+            return True
+
+    return False
+
 
 # Standard HTML extraction
 
-async def extract_standard_html(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
+
+async def extract_standard_html(
+    url: str, doc_type: str, ret_url: str
+) -> ExtractResponse:
     try:
         # Enhanced browser-like headers with random user agent
         headers = {
-            'User-Agent': get_random_user_agent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0'
+            "User-Agent": get_random_user_agent(),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
         }
-        
+
         # Log the headers we're using
-        logger.info(f"Attempting standard extraction for URL: {url} with User-Agent: {headers['User-Agent']}")
-        
+        logger.info(
+            f"Attempting standard extraction for URL: {url} with User-Agent: {headers['User-Agent']}"
+        )
+
         loop = asyncio.get_event_loop()
-        
+
         # Use retry strategy with exponential backoff
         max_retries = 3
         retry_delay = 1.0
-        
+
         for retry in range(max_retries):
             try:
                 fut = loop.run_in_executor(
-                    None, 
-                    lambda: requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT, allow_redirects=True)
+                    None,
+                    lambda: requests.get(
+                        url,
+                        headers=headers,
+                        timeout=STANDARD_TIMEOUT,
+                        allow_redirects=True,
+                    ),
                 )
-                resp = await asyncio.wait_for(fut, timeout=STANDARD_TIMEOUT+1)
+                resp = await asyncio.wait_for(fut, timeout=STANDARD_TIMEOUT + 1)
                 resp.raise_for_status()
                 break  # Success, exit retry loop
             except Exception as e:
                 if retry == max_retries - 1:  # Last retry
                     raise
-                logger.warning(f"Extraction attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay}s...")
+                logger.warning(
+                    f"Extraction attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay}s..."
+                )
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
-                
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # Try different content extraction strategies
-        text = None
-        
-        # 1. Try content extraction by paragraphs
-        paragraphs = [p.get_text(strip=True) for p in soup.find_all('p') if len(p.get_text(strip=True)) > 10]
-        if paragraphs:
-            text = '\n\n'.join(paragraphs)
-            
-        # 2. If we didn't get enough content, try specific content sections
-        if not text or len(text) < MIN_CONTENT_LENGTH:
-            for content_id in ['content', 'main', 'main-content', 'article', 'terms', 'privacy-policy', 'terms-of-service']:
-                content_div = soup.find(id=content_id) or soup.find('div', class_=content_id) or soup.find('article', class_=content_id)
-                if content_div and len(content_div.get_text(strip=True)) > MIN_CONTENT_LENGTH:
-                    text = content_div.get_text(separator='\n', strip=True)
-                    break
-                    
-        # 3. If still no content, get full text
-        if not text or len(text) < MIN_CONTENT_LENGTH:
-            # First remove script, style and hidden elements
-            for element in soup(['script', 'style', 'meta', 'link', 'header', 'footer', 'nav']):
-                element.decompose()
-            
-            text = soup.get_text(separator='\n', strip=True)
-        
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        text = extract_content_from_soup(soup)
+
         if len(text) < MIN_CONTENT_LENGTH:
-            raise Exception('Insufficient content')
-            
-        logger.info(f"Successfully extracted {len(text)} characters from {url} using standard method")
-        return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='standard', method_used='standard')
+            raise Exception("Insufficient content")
+
+        logger.info(
+            f"Successfully extracted {len(text)} characters from {url} using standard method"
+        )
+        return ExtractResponse(
+            url=ret_url,
+            document_type=doc_type,
+            text=text,
+            success=True,
+            message="standard",
+            method_used="standard",
+        )
     except Exception as e:
         logger.warning(f"Standard extraction failed: {str(e)}")
         raise
 
+
 # PDF extraction
+
 
 async def extract_pdf(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
     try:
         # Enhanced browser-like headers with random user agent
         headers = {
-            'User-Agent': get_random_user_agent(),
-            'Accept': 'application/pdf,*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Cache-Control': 'max-age=0'
+            "User-Agent": get_random_user_agent(),
+            "Accept": "application/pdf,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Cache-Control": "max-age=0",
         }
-        
-        logger.info(f"Attempting PDF extraction for: {url} with User-Agent: {headers['User-Agent']}")
-        
+
+        logger.info(
+            f"Attempting PDF extraction for: {url} with User-Agent: {headers['User-Agent']}"
+        )
+
         # Use retry strategy with exponential backoff
         max_retries = 3
         retry_delay = 1.0
-        
+
         for retry in range(max_retries):
             try:
-                resp = requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT, allow_redirects=True)
+                resp = requests.get(
+                    url, headers=headers, timeout=STANDARD_TIMEOUT, allow_redirects=True
+                )
                 resp.raise_for_status()
                 break  # Success, exit retry loop
             except Exception as e:
                 if retry == max_retries - 1:  # Last retry
                     raise
-                logger.warning(f"PDF download attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay}s...")
+                logger.warning(
+                    f"PDF download attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay}s..."
+                )
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
-        
+
         # Check if content type is PDF
-        content_type = resp.headers.get('Content-Type', '').lower()
-        if not ('application/pdf' in content_type or is_pdf_url(url)):
+        content_type = resp.headers.get("Content-Type", "").lower()
+        if not ("application/pdf" in content_type or is_pdf_url(url)):
             raise Exception(f"Not a PDF document. Content-Type: {content_type}")
-        
+
         text = extract_text_from_pdf(resp.content)
         if len(text) < MIN_CONTENT_LENGTH:
-            raise Exception('PDF content too small')
-            
+            raise Exception("PDF content too small")
+
         logger.info(f"Successfully extracted {len(text)} characters from PDF: {url}")
-        return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='pdf', method_used='pdf')
+        return ExtractResponse(
+            url=ret_url,
+            document_type=doc_type,
+            text=text,
+            success=True,
+            message="pdf",
+            method_used="pdf",
+        )
     except Exception as e:
         logger.warning(f"PDF extraction failed: {str(e)}")
         raise
 
+
 # Playwright extraction
 
-async def extract_with_playwright(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
-    page = await auth_manager.get_page()
+
+async def extract_with_playwright(
+    url: str, doc_type: str, ret_url: str
+) -> ExtractResponse:
+    """Extract content using Playwright with improved waiting and interaction."""
+    if not auth_manager.context:
+        logger.warning(
+            "Playwright context not initialized - browser might not be started"
+        )
+        raise Exception("Playwright browser not initialized")
+
+    page = None
     try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=STANDARD_TIMEOUT*1000)
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(1)
+        page = await auth_manager.get_page()
+        logger.info(f"Navigating to {url} with Playwright")
+
+        # Use a longer timeout for initial page load
+        await page.goto(
+            url, wait_until="domcontentloaded", timeout=STANDARD_TIMEOUT * 1000
+        )
+
+        # Wait for network to be idle (helps with JS-loaded content)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5000)
+            logger.info("Network is idle")
+        except Exception as e:
+            logger.warning(f"Network idle timeout: {str(e)}")
+
+        # Scroll to ensure lazy-loaded content appears
+        await page.evaluate(
+            """
+        () => {
+                const scrollToBottom = () => {
+                    window.scrollTo(0, document.body.scrollHeight);
+                };
+                
+                const scrollToTop = () => {
+                    window.scrollTo(0, 0);
+                };
+                
+                // Scroll down in increments
+                const totalScrolls = 5;
+                for(let i = 0; i < totalScrolls; i++) {
+                    setTimeout(() => {
+                        const scrollPos = (document.body.scrollHeight / totalScrolls) * i;
+                        window.scrollTo(0, scrollPos);
+                    }, i * 300);
+                }
+                
+                // Final scroll to bottom and back to top
+                setTimeout(() => {
+                    scrollToBottom();
+                    setTimeout(scrollToTop, 300);
+                }, totalScrolls * 300);
+        }
+        """
+        )
+
+        # Wait for any animations to finish
+        await asyncio.sleep(2)
+
+        # Try to click "Accept" or "I Agree" buttons if present (common on legal pages)
+        for selector in [
+            'button:has-text("Accept")',
+            'button:has-text("I Agree")',
+            'button:has-text("Agree")',
+            'button:has-text("Continue")',
+            'a:has-text("Accept")',
+            'a:has-text("I Agree")',
+        ]:
+            try:
+                if await page.locator(selector).count() > 0:
+                    logger.info(f"Clicking {selector} button")
+                    await page.locator(selector).first.click()
+                    await asyncio.sleep(1)  # Wait for any post-click changes
+            except Exception as accept_error:
+                logger.debug(f"Error clicking {selector}: {str(accept_error)}")
+
+        # Get content
         html = await page.content()
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html, "html.parser")
         text = extract_content_from_soup(soup)
-        if len(text)>=MIN_CONTENT_LENGTH:
-            return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='playwright', method_used='playwright')
-        raise Exception('Playwright no content')
+
+        if len(text) >= MIN_CONTENT_LENGTH:
+            logger.info(
+                f"Successfully extracted {len(text)} characters using Playwright"
+            )
+            return ExtractResponse(
+                url=ret_url,
+                document_type=doc_type,
+                text=text,
+                success=True,
+                message="playwright",
+                method_used="playwright",
+            )
+
+        # As a fallback for very complex pages, try just evaluating body text
+        try:
+            text = await page.evaluate("document.body.innerText")
+            # Basic cleaning
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) >= MIN_CONTENT_LENGTH:
+                logger.info(
+                    f"Used body.innerText fallback to extract {len(text)} characters"
+                )
+                return ExtractResponse(
+                    url=ret_url,
+                    document_type=doc_type,
+                    text=text,
+                    success=True,
+                    message="playwright_innertext",
+                    method_used="playwright",
+                )
+        except Exception as e:
+            logger.warning(f"innerText extraction failed: {str(e)}")
+
+        # If we get here, all methods failed
+        raise Exception("Playwright extraction yielded insufficient content")
+    except Exception as e:
+        logger.warning(f"Playwright extraction failed: {str(e)}")
+        raise
     finally:
-        await auth_manager.release_page(page)
+        # Ensure page is always released back to the pool
+        if page:
+            try:
+                await auth_manager.release_page(page)
+                logger.debug("Successfully released page back to the pool")
+            except Exception as e:
+                logger.error(f"Error releasing Playwright page: {str(e)}")
+
 
 # Main endpoint
 
-@router.post('/extract', response_model=ExtractResponse)
+
+@router.post("/extract", response_model=ExtractResponse)
 async def extract_text(request: ExtractRequest, response: Response) -> ExtractResponse:
     orig = request.url
     url = sanitize_url(orig)
     if not url:
         response.status_code = 400
-        return ExtractResponse(url=orig, document_type=request.document_type or 'tos', text=None, success=False, message='Invalid URL', method_used='standard')
+        return ExtractResponse(
+            url=orig,
+            document_type=request.document_type or "tos",
+            text=None,
+            success=False,
+            message="Invalid URL",
+            method_used="standard",
+        )
 
-    doc_type = request.document_type or 'tos'
+    doc_type = request.document_type or "tos"
     cache_key = f"{url}:{doc_type}"
     cached = get_from_cache(cache_key)
     if cached:
         return ExtractResponse(**cached)
 
     # Discover ToS/PP
-    if doc_type in ['tos','pp']:
+    if doc_type in ["tos", "pp"]:
         path = urlparse(url).path.lower()
+        query = urlparse(url).query.lower()
         # Skip URL discovery if URL already appears to be a legal document
-        if ((doc_type=='tos' and any(pattern in path for pattern in ['terms', 'tos', 'user-agreement', 'legal', 'service', 'eula'])) or 
-            (doc_type=='pp' and any(pattern in path for pattern in ['privacy', 'datapolicy', 'data-policy', 'privacypolicy']))):
-            logger.info(f"URL appears to be a {doc_type} URL already, skipping discovery: {url}")
+        if (
+            doc_type == "tos"
+            and any(
+                pattern in path or pattern in query
+                for pattern in [
+                    "terms",
+                    "tos",
+                    "user-agreement",
+                    "legal",
+                    "service",
+                    "eula",
+                ]
+            )
+        ) or (
+            doc_type == "pp"
+            and any(
+                pattern in path or pattern in query
+                for pattern in ["privacy", "datapolicy", "data-policy", "privacypolicy"]
+            )
+        ):
+            logger.info(
+                f"URL appears to be a {doc_type} URL already, skipping discovery: {url}"
+            )
         else:
-            req = ToSRequest(url=url) if doc_type=='tos' else PrivacyRequest(url=url)
-            finder = find_tos if doc_type=='tos' else find_privacy_policy
+            req = ToSRequest(url=url) if doc_type == "tos" else PrivacyRequest(url=url)
+            finder = find_tos if doc_type == "tos" else find_privacy_policy
             try:
-                resp = await asyncio.wait_for(finder(req), timeout=URL_DISCOVERY_TIMEOUT)
-                doc_url = resp.tos_url if doc_type=='tos' else resp.pp_url
+                resp = await asyncio.wait_for(
+                    finder(req), timeout=URL_DISCOVERY_TIMEOUT
+                )
+                doc_url = resp.tos_url if doc_type == "tos" else resp.pp_url
                 if doc_url:
                     url = doc_url
                     logger.info(f"Found document URL: {url}")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Document finder timed out after {URL_DISCOVERY_TIMEOUT}s"
+                )
             except Exception as e:
                 logger.warning(f"Document finder failed: {str(e)}")
 
-    # Extraction tasks - STANDARD first, then Playwright
+    # Extraction tasks
+    # For certain websites, we want to try the Playwright method first as it often works better for JavaScript-heavy sites
+    use_playwright_first = any(
+        domain in url.lower()
+        for domain in [
+            "ebay.com",
+            "amazon.com",
+            "facebook.com",
+            "twitter.com",
+            "instagram.com",
+            "tiktok.com",
+            "netflix.com",
+            "airbnb.com",
+            "booking.com",
+            "expedia.com",
+        ]
+    )
+
     tasks = []
     if is_pdf_url(url):
         tasks.append(asyncio.create_task(extract_pdf(url, doc_type, url)))
     else:
-        # Standard extraction first
-        tasks.append(asyncio.create_task(extract_standard_html(url, doc_type, url)))
-        # Then try playwright
-        tasks.append(asyncio.create_task(extract_with_playwright(url, doc_type, url)))
+        if use_playwright_first:
+            # Try Playwright first for JS-heavy sites
+            logger.info(f"Using Playwright as primary extraction method for {url}")
+            if auth_manager.context:  # Only if browser is initialized
+                tasks.append(
+                    asyncio.create_task(extract_with_playwright(url, doc_type, url))
+                )
+            tasks.append(asyncio.create_task(extract_standard_html(url, doc_type, url)))
+        else:
+            # Standard extraction first for most sites
+            tasks.append(asyncio.create_task(extract_standard_html(url, doc_type, url)))
+            if auth_manager.context:  # Only if browser is initialized
+                tasks.append(
+                    asyncio.create_task(extract_with_playwright(url, doc_type, url))
+                )
+
+    # Run tasks with better failure handling
+    all_errors = []
 
     for task in tasks:
         try:
             res = await task
             if res.success:
                 add_to_cache(cache_key, res.dict())
+                # Cancel remaining tasks
                 for t in tasks:
-                    if t is not task and not t.done(): t.cancel()
+                    if t is not task and not t.done():
+                        t.cancel()
                 return res
         except Exception as e:
-            logger.warning(f"Extraction task failed: {str(e)}")
+            error_msg = str(e)
+            logger.warning(f"Extraction task failed: {error_msg}")
+            all_errors.append(error_msg)
             continue
 
+    # If we get here, all methods failed
+    error_summary = (
+        "; ".join(all_errors) if all_errors else "Unknown extraction failure"
+    )
+    logger.error(f"All extraction methods failed for {url}: {error_summary}")
+
     return ExtractResponse(
-        url=url, 
-        document_type=doc_type, 
-        text=None, 
+        url=url,
+        document_type=doc_type,
+        text=None,
         success=False,
-        message='Extraction failed - all methods exhausted', 
-        method_used='standard'
+        message=f"Extraction failed - all methods exhausted: {error_summary[:200]}",
+        method_used="standard_failed",
     )

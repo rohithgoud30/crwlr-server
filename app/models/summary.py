@@ -4,12 +4,13 @@ from typing import Optional, Literal
 from app.models.extract import ExtractResponse
 
 class SummaryRequest(BaseModel):
-    url: str  # The actual document URL
+    url: Optional[str] = None  # The actual document URL, now optional
     document_type: Literal["tos", "pp"]  # Type of document (only "tos" or "pp" allowed)
     text: Optional[str] = None
+    extract_response: Optional[ExtractResponse] = None  # Results from extract endpoint if available
 
 class SummaryResponse(BaseModel):
-    url: str  # The actual document URL
+    url: Optional[str] = None  # The actual document URL, now optional
     document_type: Literal["tos", "pp"]  # Type of document (only "tos" or "pp" allowed)
     one_sentence_summary: Optional[str] = None
     hundred_word_summary: Optional[str] = None

@@ -17,37 +17,34 @@ ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
     """
-    Validate API key from header.
+    Validate the API key.
     """
-    # Log information about the environment and API keys
     configured_api_key = settings.API_KEY
     masked_key = f"{configured_api_key[:3]}{'*' * (len(configured_api_key) - 3)}" if configured_api_key else "NOT SET"
-    
-    logger.info(f"Environment: {ENVIRONMENT}")
-    logger.info(f"Configured API key (masked): {masked_key}")
     logger.info(f"Received API key: {'PROVIDED' if api_key_header else 'NOT PROVIDED'}")
+    logger.info(f"Configured API key: {masked_key}")
     
-    # In development mode, if API_KEY is empty, allow all requests
+    # In development mode, if no API key is configured, accept "test" as API key for debugging
     if ENVIRONMENT == "development" and not configured_api_key:
-        logger.warning("⚠️ DEVELOPMENT MODE: No API key configured - allowing request")
-        return "development_mode"
+        logger.warning("No API key configured. Running in development mode with relaxed security.")
+        if api_key_header == "test":
+            return api_key_header
     
-    # Handle proper validation
-    if api_key_header == configured_api_key:
-        logger.info("✅ API key validation successful")
+    # For testing purposes, also accept "test_api_key" in development mode
+    if ENVIRONMENT == "development" and api_key_header == "test_api_key":
+        logger.warning("Using test API key for development mode")
         return api_key_header
         
-    # If no API key was provided in the header
+    if api_key_header == configured_api_key:
+        return api_key_header
+        
     if not api_key_header:
-        logger.warning("❌ No API key provided in request header")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API key is required. Add X-API-Key header.",
+            detail="API key is required. Add X-API-Key header."
         )
-    
-    # If API key was provided but doesn't match
-    logger.warning("❌ Invalid API key provided")
+        
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid API key",
+        detail="Invalid API key"
     ) 

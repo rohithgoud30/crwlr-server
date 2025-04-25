@@ -2,8 +2,8 @@ import os
 import logging
 import warnings
 from typing import Optional
-from sqlalchemy import create_engine, MetaData, Column, Table, String, DateTime, Text, ForeignKey, Enum
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import create_engine, MetaData, Column, Table, String, DateTime, Text, ForeignKey, Enum, JSON, BigInteger
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import text, func
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -83,10 +83,10 @@ users = Table(
     "users",
     metadata,
     Column("id", UUID, primary_key=True, server_default=text("gen_random_uuid()")),
-    Column("clerk_user_id", String(255), unique=True, nullable=True),
-    Column("email", String(255), unique=True, nullable=False),
+    Column("clerk_user_id", String(255), unique=True, nullable=False),
+    Column("email", String(255), nullable=False),
     Column("name", String(255), nullable=True),
-    Column("role", String(50), nullable=False, server_default="user"),
+    Column("role", String(20), nullable=False, server_default="user"),
     Column("created_at", DateTime, server_default=func.now()),
     Column("updated_at", DateTime, server_default=func.now(), onupdate=func.now()),
 )
@@ -106,10 +106,17 @@ documents = Table(
     "documents",
     metadata,
     Column("id", UUID, primary_key=True, server_default=text("gen_random_uuid()")),
-    Column("url", String(2048), nullable=False),
+    Column("url", Text, nullable=False),
     Column("document_type", Enum("tos", "pp", name="document_type", create_type=False), nullable=False),
-    Column("content", Text, nullable=True),
-    Column("analysis", Text, nullable=True),
+    Column("retrieved_url", Text, nullable=False),
+    Column("company_name", Text, nullable=True),
+    Column("logo_url", Text, nullable=True),
+    Column("views", BigInteger, nullable=False, server_default="0"),
+    Column("raw_text", Text, nullable=False),
+    Column("one_sentence_summary", Text, nullable=True),
+    Column("hundred_word_summary", Text, nullable=True),
+    Column("word_frequencies", JSONB, nullable=True),
+    Column("text_mining_metrics", JSONB, nullable=True),
     Column("created_at", DateTime, server_default=func.now()),
     Column("updated_at", DateTime, server_default=func.now(), onupdate=func.now()),
 )
@@ -120,8 +127,10 @@ submissions = Table(
     Column("id", UUID, primary_key=True, server_default=text("gen_random_uuid()")),
     Column("user_id", UUID, ForeignKey("users.id"), nullable=True),
     Column("document_id", UUID, ForeignKey("documents.id"), nullable=True),
-    Column("url", String(2048), nullable=False),
-    Column("status", String(50), nullable=False, server_default="pending"),
+    Column("requested_url", Text, nullable=False),
+    Column("document_type", Enum("tos", "pp", name="document_type", create_type=False), nullable=False),
+    Column("status", String(20), nullable=False, server_default="pending"),
+    Column("error_message", Text, nullable=True),
     Column("created_at", DateTime, server_default=func.now()),
     Column("updated_at", DateTime, server_default=func.now(), onupdate=func.now()),
 )

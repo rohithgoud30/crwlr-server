@@ -1,2 +1,2 @@
 # Models package initialization
-# No database models are imported since we're using mock implementations 
+from app.models.database import User, UserCreate, Document, DocumentCreate, Submission, SubmissionCreate 

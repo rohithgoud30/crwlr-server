@@ -378,30 +378,33 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
 
 async def extract_company_info(url: str) -> tuple:
     """
-    Extract company name and logo from a website.
+    Extract company name and logo from a given URL.
+    Uses various techniques:
+    1. First attempts with BeautifulSoup for speed
+    2. Falls back to Playwright for JavaScript-rendered sites
+    3. Uses multiple extraction methods for both company name and logo
     
-    Returns:
-    - Tuple of (company_name, logo_url, success, message)
+    Returns a tuple of (company_name, logo_url, success, message)
     """
+    # Set default values
+    default_logo_url = "/placeholder.svg?height=48&width=48"
+    default_company_name = "Unknown Company"
+    
     try:
         # Validate and normalize the URL
         sanitized_url = sanitize_url(url)
         if not sanitized_url:
-            return "Unknown Company", "/placeholder.svg?height=48&width=48", False, f"Invalid URL '{url}'"
+            return default_company_name, default_logo_url, False, f"Invalid URL '{url}'"
             
         normalized_url = normalize_url(sanitized_url)
         
         # Default values in case extraction fails
-        default_logo_url = "/placeholder.svg?height=48&width=48"
         domain = urlparse(normalized_url).netloc
         
-        # Default company name from domain
-        if domain.startswith('www.'):
-            domain = domain[4:]
-        default_company_name = domain.split('.')[0].capitalize()
+        # Extract company name from domain if we can't get it from page
+        company_name = extract_company_name_from_domain(domain)
         
         # Initialize with defaults
-        company_name = default_company_name
         logo_url = default_logo_url
         success = False
         message = "Initialization"
@@ -596,27 +599,200 @@ async def extract_company_info(url: str) -> tuple:
         default_company_name = domain.split('.')[0].capitalize() if domain else "Unknown Company"
         return default_company_name, default_logo_url, False, f"Error: {str(e)}"
 
+def extract_company_name_from_domain(domain: str) -> str:
+    """Extract company name from domain.
+    
+    Args:
+        domain: Domain name (e.g. www.example.com)
+        
+    Returns:
+        Capitalized company name
+    """
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    return domain.split('.')[0].capitalize()
+
+def extract_company_name(soup: BeautifulSoup) -> str:
+    """
+    Extract company name from the BeautifulSoup object.
+    
+    Args:
+        soup: BeautifulSoup object of the webpage
+        
+    Returns:
+        Company name or empty string if not found
+    """
+    # Check title tag first
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+        # Remove common suffixes
+        common_suffixes = [
+            " - Home", " | Home", " - Official Website", " | Official Website",
+            " - Official Site", " | Official Site"
+        ]
+        for suffix in common_suffixes:
+            if title.endswith(suffix):
+                title = title[:-len(suffix)]
+        return title.strip()
+    
+    # Check meta tags
+    og_site_name = soup.find('meta', property='og:site_name')
+    if og_site_name and og_site_name.get('content'):
+        return og_site_name['content'].strip()
+    
+    # Check common header elements
+    header_logo = soup.find('a', class_=['logo', 'brand', 'navbar-brand'])
+    if header_logo and header_logo.get_text().strip():
+        return header_logo.get_text().strip()
+    
+    # Check copyright text
+    copyright_text = soup.find(string=lambda text: text and '©' in text)
+    if copyright_text:
+        match = re.search(r'©\s*\d{4}\s*([A-Za-z0-9\s]+)', copyright_text)
+        if match:
+            return match.group(1).strip()
+    
+    return ""
+
+def extract_logo_url(soup: BeautifulSoup, domain: str) -> str:
+    """
+    Extract logo URL from the BeautifulSoup object.
+    
+    Args:
+        soup: BeautifulSoup object of the webpage
+        domain: Domain name
+        
+    Returns:
+        Logo URL or default logo URL if not found
+    """
+    default_logo_url = "/placeholder.svg?height=48&width=48"
+    base_url = f"https://{domain}"
+    
+    # Look for schema.org Organization logo first (most accurate)
+    schema_tags = soup.find_all('script', type='application/ld+json')
+    for tag in schema_tags:
+        try:
+            import json
+            data = json.loads(tag.string)
+            # Check for Organization schema
+            if isinstance(data, dict):
+                # Direct logo property
+                if 'logo' in data:
+                    if isinstance(data['logo'], str):
+                        return urljoin(base_url, data['logo'])
+                    elif isinstance(data['logo'], dict) and 'url' in data['logo']:
+                        return urljoin(base_url, data['logo']['url'])
+                # Logo inside Organization property
+                elif '@type' in data and data['@type'] == 'Organization' and 'logo' in data:
+                    if isinstance(data['logo'], str):
+                        return urljoin(base_url, data['logo'])
+                    elif isinstance(data['logo'], dict) and 'url' in data['logo']:
+                        return urljoin(base_url, data['logo']['url'])
+        except Exception:
+            continue
+    
+    # Look for meta tags with 'logo' in the property/name
+    meta_logo_tags = soup.find_all('meta', attrs={'property': lambda x: x and 'logo' in x.lower() if x else False})
+    if not meta_logo_tags:
+        meta_logo_tags = soup.find_all('meta', attrs={'name': lambda x: x and 'logo' in x.lower() if x else False})
+    
+    for tag in meta_logo_tags:
+        if tag.get('content'):
+            return urljoin(base_url, tag['content'])
+    
+    # Look for OpenGraph image
+    og_image = soup.find('meta', property='og:image')
+    if og_image and og_image.get('content'):
+        return urljoin(base_url, og_image['content'])
+    
+    # Look for common logo selectors
+    logo_selectors = [
+        'img.logo', 'img#logo', '.logo img', '#logo img',
+        'img.brand', 'img#brand', '.brand img', '#brand img',
+        'img.site-logo', 'img#site-logo', '.site-logo img', '#site-logo img',
+        'header img:first-child', '.header img:first-child',
+        '.navbar-brand img', '.brand-logo img',
+        'a[href="/"] img', 'a[href="./"] img'
+    ]
+    
+    for selector in logo_selectors:
+        try:
+            logo_img = soup.select_one(selector)
+            if logo_img and logo_img.get('src'):
+                return urljoin(base_url, logo_img['src'])
+        except Exception:
+            continue
+    
+    # Fall back to favicon
+    favicon_link = soup.find('link', rel=lambda r: r and ('icon' in r.lower() if r else False))
+    if favicon_link and favicon_link.get('href'):
+        return urljoin(base_url, favicon_link['href'])
+    
+    # Use Google's favicon service as last resort
+    return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+
 @router.post("/extract-company-info", response_model=CompanyInfoResponse)
 async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
     """
-    Extract company name and logo from a website.
+    Extract the company name and logo URL from a webpage.
     
-    Uses a multi-layered approach:
-    1. First tries BeautifulSoup for speed and simplicity
-    2. Falls back to Playwright for JavaScript-heavy sites
-    3. Employs multiple extraction techniques for company name and logo
-    4. Uses anti-bot detection measures for reliable results
-    
-    Falls back to default values if extraction fails.
+    Args:
+        request: CompanyInfoRequest containing the URL.
+        
+    Returns:
+        CompanyInfoResponse with extracted company name and logo_url
     """
-    logger.info(f"Extracting company info for URL: {request.url}")
+    url = request.url
     
-    company_name, logo_url, success, message = await extract_company_info(request.url)
+    # Default values
+    default_logo_url = "/placeholder.svg?height=48&width=48"
+    logo_url = default_logo_url
+    company_name = None
     
-    return CompanyInfoResponse(
-        url=request.url,
-        company_name=company_name,
-        logo_url=logo_url,
-        success=success,
-        message=message
-    ) 
+    try:
+        # Get the domain
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+        
+        # Try fetching the site
+        try:
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Extract company name from the page
+            company_name = extract_company_name(soup)
+            if not company_name:
+                company_name = extract_company_name_from_domain(domain)
+                
+            # Try to extract logo URL
+            logo_url = extract_logo_url(soup, domain)
+            
+            return CompanyInfoResponse(
+                url=url,
+                company_name=company_name,
+                logo_url=logo_url,
+                success=True,
+                message="Company information extracted successfully"
+            )
+            
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to fetch URL {url}: {str(e)}")
+            company_name = extract_company_name_from_domain(domain)
+            return CompanyInfoResponse(
+                url=url,
+                company_name=company_name,
+                logo_url=logo_url,
+                success=False,
+                message=f"Failed to fetch URL: {str(e)}"
+            )
+            
+    except Exception as e:
+        logging.error(f"Error extracting company info: {str(e)}")
+        return CompanyInfoResponse(
+            url=url,
+            company_name=None,
+            logo_url=logo_url,
+            success=False,
+            message=f"Error extracting company info: {str(e)}"
+        ) 

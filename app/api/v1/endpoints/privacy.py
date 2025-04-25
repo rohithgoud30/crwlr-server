@@ -5,6 +5,8 @@ from typing import List, Optional, Union, Any
 import asyncio
 import re
 from fake_useragent import UserAgent
+import httpx
+import time
 
 from fastapi import APIRouter, HTTPException
 from playwright.async_api import async_playwright, Page
@@ -756,52 +758,131 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
     """
     Find the Privacy Policy URL for a given website.
     """
-    original_url = request.url
-
-    if not original_url:
-        raise HTTPException(status_code=400, detail="URL is required")
-    
-    # First sanitize the URL to handle malformed URLs
-    url = sanitize_url(original_url)
-    
-    if not url:
-        print(f"Invalid URL detected: {original_url}")
-        return PrivacyResponse(
-            url=original_url,
-            pp_url=None,
-            success=False,
-            message="Invalid URL format. The URL appears to be malformed or non-existent.",
-            method_used="url_validation_failed"
-        )
-
-    # Normalize the URL domain for consistent processing
-    url = normalize_domain(url)
-
-    # Handle URLs without scheme is now unnecessary as sanitize_url adds it
-    # But keep for safety
-    if not url.startswith(("http://", "https://")):
-        url = f"https://{url}"
-
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc
-
-    browser = None
-    playwright = None
-    unverified_result = None  # Initialize unverified_result here
+    logger.info(f"Processing request for URL: {request.url}")
+    start_time = time.time()
 
     try:
-        playwright = await async_playwright().start()
-        browser, context, page, _ = await setup_browser(playwright)
-        success, _, _ = await navigate_with_retry(page, url, max_retries=2)
-        if not success:
-            print("\nMain site navigation had issues, but trying to analyze current page...")
+        # Validate and normalize URL
+        url = request.url.strip()
+        
+        sanitized_url = sanitize_url(url)
+        if not sanitized_url:
+            logger.warning(f"Invalid URL provided: {url}")
+            return PrivacyResponse(
+                url=url,
+                pp_url=None,
+                success=False,
+                message="Invalid URL format",
+                method_used="validation"
+            )
 
+        # Extract domain for pattern matching
+        parsed_url = urlparse(sanitized_url)
+        domain = parsed_url.netloc.lower()
+
+        # Try to setup browser for more detailed search
+        playwright = await async_playwright().start()
+        browser, browser_context, page, _ = await setup_browser(playwright)
+        
+        # Navigate to the URL - notice we don't exit but continue with recovery methods
+        success, _, _ = await navigate_with_retry(page, sanitized_url)
+        if not success:
+            logger.warning(f"Main site navigation had issues, but trying to analyze current page...")
+            
+            # We don't exit here with failure, we instead try other methods
+            # Try JS scanning approaches, then search engine fallbacks
+            
+            # First check for anti-bot patterns to log the reason
+            anti_bot_detected = await detect_anti_bot_patterns(page)
+            if anti_bot_detected:
+                logger.warning(f"Anti-bot protection detected. Will attempt search fallbacks.")
+                
+                # Continue with search engine fallbacks, don't return failure yet
+            
+            # Try our search engine fallbacks instead of directly returning failure
+            unverified_result = None  # Will hold our best guess if we find one
+            
+            # Initialize a fresh page if possible for search fallbacks
+            try:
+                await page.close()
+                page = await browser_context.new_page()
+            except Exception as e:
+                logger.warning(f"Error creating new page for search fallbacks: {e}")
+            
+            # Domain-focused search approach similar to tos.py approach
+            try:
+                # Extract clean domain name for search
+                domain_name = domain.replace("www.", "")
+                
+                # Try duckduckgo search first
+                logger.info(f"Trying DuckDuckGo search fallback for {domain_name}")
+                duck_result = await duckduckgo_search_fallback(domain_name, page)
+                
+                if duck_result:
+                    logger.info(f"Found privacy policy via DuckDuckGo search: {duck_result}")
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=duck_result,
+                        success=True,
+                        message="Privacy Policy found via DuckDuckGo search (after navigation issues)",
+                        method_used="duckduckgo_search_fallback"
+                    )
+                
+                # Try Yahoo search next
+                logger.info(f"Trying Yahoo search fallback for {domain_name}")
+                yahoo_result = await yahoo_search_fallback(domain_name, page)
+                
+                if yahoo_result:
+                    logger.info(f"Found privacy policy via Yahoo search: {yahoo_result}")
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=yahoo_result,
+                        success=True,
+                        message="Privacy Policy found via Yahoo search (after navigation issues)",
+                        method_used="yahoo_search_fallback"
+                    )
+                
+                # Try Bing search as last resort
+                logger.info(f"Trying Bing search fallback for {domain_name}")
+                bing_result = await bing_search_fallback(domain_name, page)
+                
+                if bing_result:
+                    logger.info(f"Found privacy policy via Bing search: {bing_result}")
+                    return PrivacyResponse(
+                        url=url,
+                        pp_url=bing_result,
+                        success=True,
+                        message="Privacy Policy found via Bing search (after navigation issues)",
+                        method_used="bing_search_fallback"
+                    )
+                
+                # All search methods failed, return failure
+                logger.warning(f"All search fallbacks failed for {domain_name}")
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=None,
+                    success=False,
+                    message="Navigation failed and all search fallbacks exhausted",
+                    method_used="all_search_failed"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error during search fallbacks: {e}")
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=None,
+                    success=False,
+                    message=f"Navigation failed and search fallbacks encountered error: {str(e)}",
+                    method_used="search_fallback_error"
+                )
+                
+        # Continue with normal flow if navigation was successful
         # Check if this is a Google Play Store page first
         play_store_privacy_link = await extract_play_store_privacy_link(page)
         if play_store_privacy_link:
             print(f"\n\n🤖 HIGHEST PRIORITY SUCCESS: Found Play Store privacy link: {play_store_privacy_link}")
             return PrivacyResponse(
-                url=original_url,
+                url=url,
                 pp_url=play_store_privacy_link,
                 success=True,
                 message="Found privacy policy link in Google Play Store",
@@ -813,7 +894,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         if app_store_privacy_link:
             print(f"\n\n🍏 HIGHEST PRIORITY SUCCESS: Found App Store privacy link: {app_store_privacy_link}")
             return PrivacyResponse(
-                url=original_url,
+                url=url,
                 pp_url=app_store_privacy_link,
                 success=True,
                 message="Found privacy policy link in Apple App Store",
@@ -825,7 +906,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         if user_privacy_link:
             print(f"\n\n⭐⭐⭐ HIGHEST PRIORITY SUCCESS: Found user/customer privacy link: {user_privacy_link}")
             return PrivacyResponse(
-                url=original_url,
+                url=url,
                 pp_url=user_privacy_link,
                 success=True,
                 message="Found User/Customer Privacy Policy (HIGHEST PRIORITY)",
@@ -840,7 +921,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         # 1. JavaScript method - Highest priority
         print("Trying find_all_links_js approach...")
         try:
-            js_result, page, js_unverified = await find_privacy_links_js(page, context, None)
+            js_result, page, js_unverified = await find_privacy_links_js(page, browser_context, None)
             if js_result:
                 all_links.append(js_result)
                 method_sources.append((js_result, "javascript"))
@@ -868,7 +949,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         # 2. Scroll method - Second highest priority
         print("Trying smooth_scroll_and_click approach...")
         try:
-            scroll_result, page, scroll_unverified = await smooth_scroll_and_click_privacy(page, context, js_unverified if 'js_unverified' in locals() else None)
+            scroll_result, page, scroll_unverified = await smooth_scroll_and_click_privacy(page, browser_context, js_unverified if 'js_unverified' in locals() else None)
             if scroll_result:
                 all_links.append(scroll_result)
                 method_sources.append((scroll_result, "scroll"))
@@ -908,7 +989,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                     # Try to navigate to it
                     await page.goto(user_customer_link, timeout=5000, wait_until="domcontentloaded")
                     return PrivacyResponse(
-                        url=original_url,
+                        url=url,
                         pp_url=user_customer_link,
                         success=True,
                         message="Found User/Customer Privacy Policy (highest priority)",
@@ -918,7 +999,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                     print(f"Error navigating to user/customer link: {e}")
                     # Still return it even if navigation fails
                     return PrivacyResponse(
-                        url=original_url,
+                        url=url,
                         pp_url=user_customer_link,
                         success=True,
                         message="Found User/Customer Privacy Policy (navigation failed but high confidence)",
@@ -928,7 +1009,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
             # Otherwise proceed with the high score footer link
             print(f"Prioritizing high-score footer link with privacy-related title: {high_score_footer_link}")
             return PrivacyResponse(
-                url=original_url,
+                url=url,
                 pp_url=high_score_footer_link,
                 success=True,
                 message="Found Privacy Policy using high-priority footer link with privacy title",
@@ -1007,7 +1088,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 if 'privacy' in title.lower():
                     print(f"✅ Confirmed main domain footer link has privacy-related title")
                     return PrivacyResponse(
-                        url=original_url,
+                        url=url,
                         pp_url=main_domain_footer,
                         success=True,
                         message="Found Privacy Policy using main domain footer link",
@@ -1131,7 +1212,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 if total_score >= 70:
                     print(f"✅ Using high-scoring footer link: {best_footer_link} (Score: {total_score})")
                     return PrivacyResponse(
-                        url=original_url,
+                        url=url,
                         pp_url=best_footer_link,
                         success=True,
                         message="Found Privacy Policy using high-scoring footer link",
@@ -1157,7 +1238,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 await page.goto(best_link, timeout=1000, wait_until="domcontentloaded")
                 # No need to verify content - presence of user/customer in URL is enough
                 return PrivacyResponse(
-                    url=original_url,
+                    url=url,
                     pp_url=best_link,
                     success=True,
                     message="Found Privacy Policy containing user/customer terms in URL",
@@ -1167,7 +1248,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 print(f"Error navigating to user/customer link: {e}")
                 # Return anyway as high confidence
                 return PrivacyResponse(
-                    url=original_url,
+                    url=url,
                     pp_url=best_link,
                     success=True,
                     message="Found Privacy Policy with user/customer terms (navigation failed but high confidence)",
@@ -1204,7 +1285,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                      search_path.lower().endswith(hp_path.lower()))):
                     print(f"✅ Found overlap between high priority link and search result: {hp_link}")
                     return PrivacyResponse(
-                        url=original_url,
+                        url=url,
                         pp_url=hp_link,
                         success=True,
                         message="Found Privacy Policy (confirmed by multiple methods)",
@@ -1243,7 +1324,7 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                     if any(term in title_lower for term in user_customer_terms) or any(term in link_lower for term in user_customer_terms):
                         print(f"🚀 Returning user/customer privacy link immediately: {link}")
                         return PrivacyResponse(
-                            url=original_url,
+                            url=url,
                             pp_url=link,
                             success=True,
                             message="Found User/Customer Privacy Policy (highest priority)",
@@ -2644,170 +2725,106 @@ async def verify_is_privacy_page(page):
 
 
 async def duckduckgo_search_fallback(domain, page):
-    """Search for privacy policy using DuckDuckGo Search."""
+    """Search for privacy policy using DuckDuckGo Search with a lighter implementation."""
     try:
-        print("Attempting search engine fallback with DuckDuckGo...")
-        search_query = f'{domain} privacy policy, privacy notice, data policy, privacy'
+        logger.info("Attempting search engine fallback with DuckDuckGo...")
+        search_query = f'{domain} privacy policy privacy notice data policy'
         
-        # Navigate to DuckDuckGo
-        await page.goto('https://duckduckgo.com/', timeout=5000)
+        # Use the lite version for faster, simpler search
+        ddg_search_url = f"https://lite.duckduckgo.com/lite?q={search_query}"
         
-        # Enter search query
-        await page.fill('input[name="q"]', search_query)
-        await page.press('input[name="q"]', 'Enter')
+        # Navigate to DuckDuckGo with appropriate timeout
+        await page.goto(ddg_search_url, timeout=5000, wait_until="domcontentloaded")
         
-        # Wait for results to load
-        await page.wait_for_selector('.result__body', timeout=5000)
+        # Wait for results to load with a fixed timeout
+        await page.wait_for_timeout(2000)  # Consistent short timeout
         
-        # Extract search results
+        # Extract search results from DuckDuckGo's simplified HTML
         search_results = await page.evaluate(
             """() => {
-                const results = Array.from(document.querySelectorAll('.result__body'))
-                    .map(result => {
-                        const titleEl = result.querySelector('.result__title a');
-                        const urlEl = result.querySelector('.result__url');
-                        const snippetEl = result.querySelector('.result__snippet');
+                const results = [];
+                const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                
+                for (const link of allLinks) {
+                    try {
+                        const url = new URL(link.href);
                         
-                        if (!titleEl || !urlEl) return null;
-                        
-                        const title = titleEl.textContent.trim();
-                        const url = titleEl.href;
-                        const snippet = snippetEl ? snippetEl.textContent.trim() : '';
+                        // Skip DuckDuckGo internal links
+                        if (url.hostname.includes('duckduckgo.com')) {
+                            continue;
+                        }
                         
                         // Score the result
                         let score = 0;
+                        const text = link.textContent.trim().toLowerCase();
+                        const href = link.href.toLowerCase();
                         
                         // Title scoring
-                        const titleLower = title.toLowerCase();
-                        if (titleLower === 'privacy policy' || titleLower === 'privacy notice')
+                        if (text === 'privacy policy' || text === 'privacy notice')
                             score += 100;
-                        else if (titleLower.includes('privacy policy') || titleLower.includes('privacy notice'))
+                        else if (text.includes('privacy policy') || text.includes('privacy notice'))
                             score += 90;
-                        else if (titleLower.includes('privacy') && titleLower.includes('statement'))
+                        else if (text.includes('privacy') && text.includes('statement'))
                             score += 85;
-                        else if (titleLower.includes('privacy'))
+                        else if (text.includes('privacy'))
                             score += 70;
-                        else if (titleLower.includes('data protection') || titleLower.includes('data policy'))
+                        else if (text.includes('data protection') || text.includes('data policy'))
                             score += 60;
                             
                         // User/customer bonus
-                        if (titleLower.includes('user privacy') || titleLower.includes('customer privacy'))
+                        if (text.includes('user privacy') || text.includes('customer privacy'))
                             score += 50;
-                        else if ((titleLower.includes('user') || titleLower.includes('customer')) && 
-                                 titleLower.includes('privacy'))
+                        else if ((text.includes('user') || text.includes('customer')) && 
+                                 text.includes('privacy'))
                             score += 40;
                             
                         // URL scoring
-                        const urlLower = url.toLowerCase();
-                        if (urlLower.includes('privacy-policy') || urlLower.includes('privacy_policy'))
+                        if (href.includes('privacy-policy') || href.includes('privacy_policy'))
                             score += 50;
-                        else if (urlLower.includes('privacy-notice') || urlLower.includes('privacy_notice'))
+                        else if (href.includes('privacy-notice') || href.includes('privacy_notice'))
                             score += 48;
-                        else if (urlLower.includes('privacy'))
+                        else if (href.includes('privacy'))
                             score += 40;
                             
                         // User/customer URL bonus
-                        if (urlLower.includes('user-privacy') || urlLower.includes('user_privacy'))
+                        if (href.includes('user-privacy') || href.includes('user_privacy'))
                             score += 50;
-                        else if (urlLower.includes('customer-privacy') || urlLower.includes('customer_privacy'))
+                        else if (href.includes('customer-privacy') || href.includes('customer_privacy'))
                             score += 45;
-                        else if ((urlLower.includes('user') || urlLower.includes('customer')) && 
-                                urlLower.includes('privacy'))
+                        else if ((href.includes('user') || href.includes('customer')) && 
+                                href.includes('privacy'))
                             score += 35;
                         
-                        // Snippet scoring
-                        const snippetLower = snippet.toLowerCase();
-                        if (snippetLower.includes('privacy policy') || snippetLower.includes('privacy notice'))
-                            score += 30;
-                        
-                        return { title, url, snippet, score };
-                    })
-                    .filter(result => result !== null)
-                    .filter(result => {
-                        // Additional filtering
-                        const urlLower = result.url.toLowerCase();
-                        return !urlLower.includes('facebook.com') && 
-                               !urlLower.includes('twitter.com') && 
-                               !urlLower.includes('youtube.com') &&
-                               !urlLower.includes('linkedin.com');
-                    })
-                    .sort((a, b) => b.score - a.score);
+                        // Only add results with a minimum score
+                        if (score >= 40) {
+                            results.push({ title: text, url: href, score: score });
+                        }
+                    } catch (e) {
+                        // Skip problematic links
+                        continue;
+                    }
+                }
                 
-                return results.slice(0, 10); // Return top 10 results
+                // Sort and return top results
+                return results.sort((a, b) => b.score - a.score).slice(0, 5);
             }"""
         )
         
         if search_results and len(search_results) > 0:
-            print(f"Found {len(search_results)} DuckDuckGo search results")
+            logger.info(f"Found {len(search_results)} DuckDuckGo search results")
             
-            # Try to verify the top results
-            best_result_url = None
-            best_result_score = 0
-            
-            for result_index in range(min(3, len(search_results))):
-                # Only check the top 3 results
-                if search_results[result_index]['score'] < 50:
-                    # Skip low-scoring results
-                    continue
-                    
-                best_result = search_results[result_index]["url"]
-                
-                try:
-                    # Visit the page to verify it's a privacy page
-                    print(f"Checking DuckDuckGo result: {best_result}")
-                    await page.goto(best_result, timeout=5000, wait_until="domcontentloaded")
-                    
-                    # Get the page title
-                    title = await page.title()
-                    title_lower = title.lower()
-                    
-                    # Verify it's a privacy page
-                    if ('privacy' in title_lower or 
-                        'data policy' in title_lower or 
-                        'data protection' in title_lower):
-                        print(f"✅ Confirmed privacy page from DuckDuckGo search: {title}")
-                        return best_result
-                    
-                    # If title doesn't confirm, check content
-                    privacy_indicators = await page.evaluate(
-                        """() => {
-                            const text = document.body.innerText.toLowerCase();
-                            return {
-                                hasPrivacyHeader: /privacy|data\\s+policy/i.test(document.body.innerText),
-                                hasPrivacyWords: text.includes('information we collect') || 
-                                                text.includes('data we collect') || 
-                                                text.includes('personal information')
-                            };
-                        }"""
-                    )
-                    
-                    if privacy_indicators["hasPrivacyHeader"] and privacy_indicators["hasPrivacyWords"]:
-                        print(f"✅ Confirmed privacy page from content analysis")
-                        return best_result
-                        
-                    # Store this as a fallback
-                    if search_results[result_index]['score'] > best_result_score:
-                        best_result_url = best_result
-                        best_result_score = search_results[result_index]['score']
-                except Exception as e:
-                    print(f"Error verifying DuckDuckGo result: {e}")
-                    # Store as fallback if high score
-                    if search_results[result_index]['score'] > best_result_score:
-                        best_result_url = best_result
-                        best_result_score = search_results[result_index]['score']
-            
-            # If we get here, no verified result was found
-            if search_results[0]['score'] >= 60:
-                print(f"Returning unverified high-confidence result: {search_results[0]['url']}")
-                return search_results[0]['url']
+            # Return highest scoring result if score is sufficient
+            if search_results[0]["score"] >= 60:
+                logger.info(f"Best DuckDuckGo Privacy Policy result: {search_results[0]['url']} (Score: {search_results[0]['score']})")
+                return search_results[0]["url"]
             else:
-                print("No high-confidence results found from DuckDuckGo")
+                logger.info("No high-confidence Privacy Policy results found from DuckDuckGo")
                 return None
         else:
-            print("No relevant search results found from DuckDuckGo")
+            logger.info("No relevant search results found from DuckDuckGo")
             return None
     except Exception as e:
-        print(f"Error in DuckDuckGo search fallback: {e}")
+        logger.error(f"Error in DuckDuckGo search fallback: {e}")
         return None
 
 

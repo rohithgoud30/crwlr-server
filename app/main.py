@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from contextlib import asynccontextmanager
@@ -6,10 +6,13 @@ import subprocess
 import os
 import re
 import logging
+import asyncio
 
 from app.api.v1.api import api_router, test_router
 from app.core.config import settings
 from app.core.database import create_tables
+# Import auth_manager for Playwright initialization
+from app.api.v1.endpoints.extract import auth_manager
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +21,23 @@ logger = logging.getLogger(__name__)
 # Reduce logging for specific libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)  # Hide HTTP client logs
 logging.getLogger("httpcore").setLevel(logging.WARNING)  # Hide HTTP core logs
+
+# Background task to periodically clean up browser tabs
+async def cleanup_browser_tabs():
+    """Background task to clean up any stale browser tabs."""
+    try:
+        while True:
+            await asyncio.sleep(300)  # Run every 5 minutes
+            if hasattr(auth_manager, 'cleanup_stale_pages'):
+                try:
+                    logger.info("Running scheduled browser tab cleanup")
+                    await auth_manager.cleanup_stale_pages()
+                except Exception as e:
+                    logger.error(f"Error in scheduled browser tab cleanup: {e}")
+    except asyncio.CancelledError:
+        logger.info("Browser tab cleanup task cancelled")
+    except Exception as e:
+        logger.error(f"Unexpected error in browser tab cleanup task: {e}")
 
 # Get current branch name for API documentation
 def get_branch_name():
@@ -56,9 +76,21 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown events.
     """
     # Startup: Initialize database
+    cleanup_task = None
     try:
         create_tables()
         logger.info("Database tables setup complete")
+        
+        # Initialize Playwright browser
+        try:
+            await auth_manager.startup()
+            logger.info("Playwright browser started successfully")
+            
+            # Start background task for tab cleanup
+            cleanup_task = asyncio.create_task(cleanup_browser_tabs())
+            logger.info("Started background task for browser tab cleanup")
+        except Exception as e:
+            logger.error(f"Error starting Playwright browser: {e}")
     except Exception as e:
         logger.error(f"Error setting up database tables: {e}")
     
@@ -67,6 +99,21 @@ async def lifespan(app: FastAPI):
     # Shutdown: Add any cleanup here if needed
     # Code after the yield will be executed on shutdown
     logger.info("Shutting down application")
+    
+    # Cancel the background cleanup task
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+    
+    # Shutdown Playwright browser
+    try:
+        await auth_manager.shutdown()
+        logger.info("Playwright browser shut down successfully")
+    except Exception as e:
+        logger.error(f"Error shutting down Playwright browser: {e}")
 
 branch_name = get_branch_name()
 # Ensure we don't have raw template strings in the version

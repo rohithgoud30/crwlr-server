@@ -1,16 +1,22 @@
-from fastapi import APIRouter, Response, HTTPException, status, Depends
+from fastapi import APIRouter, Response, HTTPException, status, Depends, Header
 import logging
 import asyncio
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from urllib.parse import urlparse
+import requests
+import random
+from typing import Dict, Optional, Tuple, Any
+import string
 
 from app.api.v1.endpoints.tos import find_tos
 from app.api.v1.endpoints.privacy import find_privacy_policy
 from app.api.v1.endpoints.extract import extract_text
-from app.api.v1.endpoints.summary import generate_summary, generate_one_sentence_summary, generate_hundred_word_summary
-from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, get_word_frequencies
-from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, extract_text_mining_metrics
+from app.api.v1.endpoints.summary import generate_summary
+from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analyze_text_frequency
+from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
+from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain
+from app.core.config import settings
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
@@ -29,6 +35,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Default logo URL
+DEFAULT_LOGO_URL = "/placeholder.svg?height=48&width=48"
 
 async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type: str):
     """
@@ -150,85 +159,96 @@ async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type:
         return summary_response, word_freq_response, text_mining_response
 
 async def save_document_to_db(
-    doc_type: str,
-    url: str,
-    doc_url: str,
-    one_sentence_summary: str,
-    hundred_word_summary: str,
-    text_mining_metrics,
-    word_frequencies,
-    raw_text=None,
-):
-    """Save document to database and create a submission record."""
+    original_url: str,
+    document_type: str,
+    document_content: str,
+    analysis: Dict,
+    user_id: Optional[UUID] = None
+) -> Optional[UUID]:
+    """
+    Save document to database after crawling.
+    
+    Args:
+        original_url: The original URL crawled
+        document_type: Type of document (TOS or PP)
+        document_content: The parsed content
+        analysis: Dictionary of analysis results
+        user_id: Optional user ID for submission tracking
+        
+    Returns:
+        UUID of created/existing document or None if operation fails
+    """
     try:
-        # Set default logo URL
+        # Set a default logo URL
         default_logo_url = "/placeholder.svg?height=48&width=48"
-        
-        # Extract company name from URL
-        domain = urlparse(url).netloc
-        if domain.startswith('www.'):
-            domain = domain[4:]
-        company_name = domain.split('.')[0].capitalize()
-        
-        # Initialize with default logo URL
         logo_url = default_logo_url
         
-        # Try to extract a better logo URL using Google's favicon service
+        # Get the domain
+        parsed_url = urlparse(original_url)
+        domain = parsed_url.netloc
+        
+        # Extract company name from domain
+        company_name = extract_company_name_from_domain(domain)
+        
+        # Try to get a logo from Google's favicon service
         try:
             logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-            logger.info(f"Using logo URL: {logo_url} for domain: {domain}")
+            # Test if logo exists with a head request
+            response = requests.head(logo_url, timeout=5)
+            if response.status_code != 200:
+                logo_url = default_logo_url
         except Exception as e:
-            logger.warning(f"Failed to generate logo URL, using default: {e}")
+            logger.warning(f"Failed to get logo for {domain}: {e}")
             logo_url = default_logo_url
         
-        logger.info(f"Using company name: {company_name} and logo URL: {logo_url}")
+        logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
         
         # Handle serialization of word frequencies
         serializable_word_freqs = []
         try:
-            if isinstance(word_frequencies, list):
+            if isinstance(analysis['word_frequencies'], list):
                 serializable_word_freqs = [
                     wf.dict() if hasattr(wf, "dict") and callable(getattr(wf, "dict")) else wf
-                    for wf in word_frequencies
+                    for wf in analysis['word_frequencies']
                 ]
             else:
-                serializable_word_freqs = word_frequencies
+                serializable_word_freqs = analysis['word_frequencies']
         except Exception as e:
             logger.error(f"Error serializing word frequencies: {e}")
             serializable_word_freqs = []
         
         # Handle serialization of text mining metrics
         serializable_text_mining = {}
-        if isinstance(text_mining_metrics, dict):
-            serializable_text_mining = text_mining_metrics
-        elif hasattr(text_mining_metrics, "dict") and callable(getattr(text_mining_metrics, "dict")):
-            serializable_text_mining = text_mining_metrics.dict()
+        if isinstance(analysis['text_mining'], dict):
+            serializable_text_mining = analysis['text_mining']
+        elif hasattr(analysis['text_mining'], "dict") and callable(getattr(analysis['text_mining'], "dict")):
+            serializable_text_mining = analysis['text_mining'].dict()
         else:
-            serializable_text_mining = text_mining_metrics
+            serializable_text_mining = analysis['text_mining']
         
         # Check if a document with this URL already exists
-        existing_doc = await document_crud.get_by_retrieved_url(doc_url, doc_type)
+        existing_doc = await document_crud.get_by_retrieved_url(original_url, document_type)
         
         if existing_doc:
-            logger.info(f"Document with URL {doc_url} already exists. Using existing document.")
+            logger.info(f"Document with URL {original_url} already exists. Using existing document.")
             document_id = existing_doc['id']
             
             # Update the document's views count
             await document_crud.increment_views(document_id)
         else:
             # Create a new document
-            logger.info(f"Creating new document for URL: {doc_url}")
+            logger.info(f"Creating new document for URL: {original_url}")
             
             # Create document data dictionary
             document_data = {
-                "url": url,
-                "document_type": doc_type,
-                "retrieved_url": doc_url,
+                "url": original_url,
+                "document_type": document_type,
+                "retrieved_url": original_url,
                 "company_name": company_name,
                 "logo_url": logo_url,
-                "raw_text": raw_text,
-                "one_sentence_summary": one_sentence_summary,
-                "hundred_word_summary": hundred_word_summary,
+                "raw_text": document_content,
+                "one_sentence_summary": analysis['one_sentence_summary'],
+                "hundred_word_summary": analysis['hundred_word_summary'],
                 "word_frequencies": serializable_word_freqs,
                 "text_mining_metrics": serializable_text_mining,
                 "views": 0
@@ -293,232 +313,394 @@ async def find_privacy_policy_url(url: str) -> str:
         return None
 
 @router.post("/crawl-tos", response_model=CrawlTosResponse)
-async def crawl_tos(request: CrawlTosRequest):
-    logger.info(f"Received request to crawl ToS for URL: {request.url}")
-    
-    response = CrawlTosResponse(
-        url=request.url,
-        success=False,
-        message="Failed to crawl Terms of Service"
-    )
-    
-    try:
-        tos_url = None
-        try:
-            tos_url = await find_tos_url(request.url)
-            if tos_url:
-                logger.info(f"Found Terms of Service URL: {tos_url}")
-                response.tos_url = tos_url
-            else:
-                response.message = "Could not find Terms of Service URL"
-                return response
-        except Exception as e:
-            logger.error(f"Error finding Terms of Service URL: {e}")
-            response.message = f"Error finding Terms of Service URL: {str(e)}"
-            return response
-        
-        extracted_text = None
-        try:
-            extracted_text = await extract_text_from_url(tos_url)
-            if not extracted_text:
-                response.message = "Could not extract text from Terms of Service page"
-                return response
-            logger.info(f"Successfully extracted text from Terms of Service page. Text length: {len(extracted_text)}")
-        except Exception as e:
-            logger.error(f"Error extracting text from Terms of Service page: {e}")
-            response.message = f"Error extracting text from Terms of Service page: {str(e)}"
-            return response
-        
-        # Generate one-sentence summary
-        try:
-            one_sentence_summary = await generate_one_sentence_summary(extracted_text)
-            response.one_sentence_summary = one_sentence_summary
-            logger.info(f"Generated one-sentence summary: {one_sentence_summary}")
-        except Exception as e:
-            logger.error(f"Error generating one-sentence summary: {e}")
-            response.one_sentence_summary = "Error generating summary"
-        
-        # Generate hundred-word summary
-        try:
-            hundred_word_summary = await generate_hundred_word_summary(extracted_text)
-            response.hundred_word_summary = hundred_word_summary
-            logger.info("Generated hundred-word summary successfully")
-        except Exception as e:
-            logger.error(f"Error generating hundred-word summary: {e}")
-            response.hundred_word_summary = "Error generating summary"
-        
-        # Generate word frequencies
-        try:
-            word_frequencies = get_word_frequencies(extracted_text)
-            response.word_frequencies = word_frequencies
-            logger.info(f"Generated word frequencies. Top frequency: {word_frequencies[0].word if word_frequencies else 'None'}")
-        except Exception as e:
-            logger.error(f"Error generating word frequencies: {e}")
-            response.word_frequencies = []
-        
-        # Generate text mining metrics
-        try:
-            text_mining_metrics = extract_text_mining_metrics(extracted_text)
-            response.text_mining = text_mining_metrics
-            logger.info("Generated text mining metrics successfully")
-        except Exception as e:
-            logger.error(f"Error generating text mining metrics: {e}")
-            response.text_mining = TextMiningResults()
-        
-        # Save document to database
-        try:
-            document_id = await save_document_to_db(
-                doc_type="tos",
-                url=request.url,
-                doc_url=tos_url,
-                one_sentence_summary=response.one_sentence_summary,
-                hundred_word_summary=response.hundred_word_summary,
-                text_mining_metrics=response.text_mining,
-                word_frequencies=response.word_frequencies,
-                raw_text=extracted_text
-            )
-            response.document_id = document_id
-            logger.info(f"Saved document to database with ID: {document_id}")
-        except Exception as e:
-            logger.error(f"Error saving document to database: {e}")
-            # Don't fail the response if we couldn't save to the database
-            # The document analysis is still returned
-        
-        response.success = True
-        response.message = "Successfully crawled and analyzed Terms of Service"
-        
-        # Don't return the full extracted text to improve response performance
-        return response
-    
-    except Exception as e:
-        logger.error(f"Unexpected error during ToS crawling: {e}")
-        response.message = f"Unexpected error: {str(e)}"
-        return response
-
-@router.post("/crawl-pp", response_model=CrawlPrivacyResponse)
-async def crawl_privacy_policy(request: CrawlPrivacyRequest):
-    logger.info(f"Received request to crawl Privacy Policy for URL: {request.url}")
-    
-    response = CrawlPrivacyResponse(
-        url=request.url,
-        success=False,
-        message="Failed to crawl Privacy Policy"
-    )
-    
-    try:
-        pp_url = None
-        try:
-            pp_url = await find_privacy_policy_url(request.url)
-            if pp_url:
-                logger.info(f"Found Privacy Policy URL: {pp_url}")
-                response.pp_url = pp_url
-            else:
-                response.message = "Could not find Privacy Policy URL"
-                return response
-        except Exception as e:
-            logger.error(f"Error finding Privacy Policy URL: {e}")
-            response.message = f"Error finding Privacy Policy URL: {str(e)}"
-            return response
-        
-        extracted_text = None
-        try:
-            extracted_text = await extract_text_from_url(pp_url)
-            if not extracted_text:
-                response.message = "Could not extract text from Privacy Policy page"
-                return response
-            logger.info(f"Successfully extracted text from Privacy Policy page. Text length: {len(extracted_text)}")
-        except Exception as e:
-            logger.error(f"Error extracting text from Privacy Policy page: {e}")
-            response.message = f"Error extracting text from Privacy Policy page: {str(e)}"
-            return response
-        
-        # Generate one-sentence summary
-        try:
-            one_sentence_summary = await generate_one_sentence_summary(extracted_text)
-            response.one_sentence_summary = one_sentence_summary
-            logger.info(f"Generated one-sentence summary: {one_sentence_summary}")
-        except Exception as e:
-            logger.error(f"Error generating one-sentence summary: {e}")
-            response.one_sentence_summary = "Error generating summary"
-        
-        # Generate hundred-word summary
-        try:
-            hundred_word_summary = await generate_hundred_word_summary(extracted_text)
-            response.hundred_word_summary = hundred_word_summary
-            logger.info("Generated hundred-word summary successfully")
-        except Exception as e:
-            logger.error(f"Error generating hundred-word summary: {e}")
-            response.hundred_word_summary = "Error generating summary"
-        
-        # Generate word frequencies
-        try:
-            word_frequencies = get_word_frequencies(extracted_text)
-            response.word_frequencies = word_frequencies
-            logger.info(f"Generated word frequencies. Top frequency: {word_frequencies[0].word if word_frequencies else 'None'}")
-        except Exception as e:
-            logger.error(f"Error generating word frequencies: {e}")
-            response.word_frequencies = []
-        
-        # Generate text mining metrics
-        try:
-            text_mining_metrics = extract_text_mining_metrics(extracted_text)
-            response.text_mining = text_mining_metrics
-            logger.info("Generated text mining metrics successfully")
-        except Exception as e:
-            logger.error(f"Error generating text mining metrics: {e}")
-            response.text_mining = TextMiningResults()
-        
-        # Save document to database
-        try:
-            document_id = await save_document_to_db(
-                doc_type="pp",
-                url=request.url,
-                doc_url=pp_url,
-                one_sentence_summary=response.one_sentence_summary,
-                hundred_word_summary=response.hundred_word_summary,
-                text_mining_metrics=response.text_mining,
-                word_frequencies=response.word_frequencies,
-                raw_text=extracted_text
-            )
-            response.document_id = document_id
-            logger.info(f"Saved document to database with ID: {document_id}")
-        except Exception as e:
-            logger.error(f"Error saving document to database: {e}")
-            # Don't fail the response if we couldn't save to the database
-            # The document analysis is still returned
-        
-        response.success = True
-        response.message = "Successfully crawled and analyzed Privacy Policy"
-        
-        # Don't return the full extracted text to improve response performance
-        return response
-    
-    except Exception as e:
-        logger.error(f"Unexpected error during Privacy Policy crawling: {e}")
-        response.message = f"Unexpected error: {str(e)}"
-        return response 
-
-async def extract_text_from_url(url: str) -> str:
+async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
     """
-    Wrapper function to extract text from a URL.
+    Crawl a website to find its Terms of Service, analyze it, and save to database.
+    """
+    logger.info(f"Received request to crawl TOS from URL: {request.url}")
+    response = CrawlTosResponse(url=request.url, success=False, message="Processing request...")
+    
+    try:
+        # Find TOS URL
+        tos_url = await find_tos_url(request.url)
+        if not tos_url:
+            logger.warning(f"No TOS URL found for {request.url}")
+            response.tos_url = None
+            response.success = False
+            response.message = "No terms of service page found."
+            return response
+            
+        logger.info(f"Found TOS URL: {tos_url}")
+        response.tos_url = tos_url
+        
+        # Extract content - now returns a tuple of (text, error)
+        extraction_result = await extract_text_from_url(tos_url)
+        
+        if not extraction_result:
+            logger.warning(f"Complete failure extracting content from {tos_url}")
+            response.success = False
+            response.message = "Failed to extract content from terms of service page."
+            return response
+            
+        extracted_text, extraction_error = extraction_result
+        
+        if not extracted_text:
+            logger.warning(f"Failed to extract content from {tos_url}: {extraction_error}")
+            response.success = False
+            response.message = f"Failed to extract content: {extraction_error}"
+            return response
+            
+        # Check for very short content which might indicate a bot verification page
+        if len(extracted_text.split()) < 100:
+            logger.warning(f"Extracted content from {tos_url} is suspiciously short ({len(extracted_text.split())} words)")
+            # Check for common verification phrases
+            if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser"]):
+                logger.warning(f"Short extracted content appears to be a verification page: {tos_url}")
+                response.success = False
+                response.message = "Bot verification page detected - unable to access actual content"
+                return response
+        
+        # Perform analysis in parallel
+        analyses = await perform_parallel_analysis(tos_url, extracted_text, "tos")
+        
+        # Set response fields
+        one_sentence_summary = analyses[0].one_sentence_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
+        hundred_word_summary = analyses[0].hundred_word_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
+        word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
+        text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
+        
+        # Extract company name from the URL
+        company_name = extract_company_name_from_domain(request.url)
+        
+        # Set default logo URL
+        logo_url = DEFAULT_LOGO_URL
+        
+        response.one_sentence_summary = one_sentence_summary
+        response.hundred_word_summary = hundred_word_summary
+        response.word_frequencies = word_frequencies
+        response.text_mining = text_mining_metrics
+        response.company_name = company_name
+        response.logo_url = logo_url
+        response.success = True
+        response.message = "Successfully crawled and analyzed terms of service."
+        
+        # Log extracted company name and logo URL
+        logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
+        
+        # Save document to database
+        try:
+            document_id = await save_document_to_db(
+                original_url=request.url,
+                document_type="tos",
+                document_content=extracted_text,
+                analysis={
+                    "one_sentence_summary": one_sentence_summary,
+                    "hundred_word_summary": hundred_word_summary,
+                    "word_frequencies": word_frequencies,
+                    "text_mining": text_mining_metrics,
+                    "company_name": company_name,
+                    "logo_url": logo_url
+                },
+                user_id=None
+            )
+            response.document_id = document_id
+        except Exception as e:
+            logger.error(f"Error saving document to database: {e}")
+            # Continue with response even if database save fails
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error processing TOS crawl request: {e}")
+        response.success = False
+        response.message = f"Error processing request: {str(e)}"
+        return response
+        
+@router.post("/crawl-pp", response_model=CrawlPrivacyResponse)
+async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
+    """
+    Crawl a website to find its Privacy Policy, analyze it, and save to database.
+    """
+    logger.info(f"Received request to crawl Privacy Policy from URL: {request.url}")
+    response = CrawlPrivacyResponse(url=request.url, success=False, message="Processing request...")
+    
+    try:
+        # Find Privacy Policy URL
+        pp_url = await find_privacy_policy_url(request.url)
+        if not pp_url:
+            logger.warning(f"No Privacy Policy URL found for {request.url}")
+            response.pp_url = None
+            response.success = False
+            response.message = "No privacy policy page found."
+            return response
+            
+        logger.info(f"Found Privacy Policy URL: {pp_url}")
+        response.pp_url = pp_url
+        
+        # Extract content - now returns a tuple of (text, error)
+        extraction_result = await extract_text_from_url(pp_url)
+        
+        if not extraction_result:
+            logger.warning(f"Complete failure extracting content from {pp_url}")
+            response.success = False
+            response.message = "Failed to extract content from privacy policy page."
+            return response
+            
+        extracted_text, extraction_error = extraction_result
+        
+        if not extracted_text:
+            logger.warning(f"Failed to extract content from {pp_url}: {extraction_error}")
+            response.success = False
+            response.message = f"Failed to extract content: {extraction_error}"
+            return response
+            
+        # Check for very short content which might indicate a bot verification page
+        if len(extracted_text.split()) < 100:
+            logger.warning(f"Extracted content from {pp_url} is suspiciously short ({len(extracted_text.split())} words)")
+            # Check for common verification phrases
+            if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser"]):
+                logger.warning(f"Short extracted content appears to be a verification page: {pp_url}")
+                response.success = False
+                response.message = "Bot verification page detected - unable to access actual content"
+                return response
+        
+        # Perform analysis in parallel
+        analyses = await perform_parallel_analysis(pp_url, extracted_text, "pp")
+        
+        # Set response fields
+        one_sentence_summary = analyses[0].one_sentence_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
+        hundred_word_summary = analyses[0].hundred_word_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
+        word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
+        text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
+        
+        # Extract company name from the URL
+        company_name = extract_company_name_from_domain(request.url)
+        
+        # Set default logo URL
+        logo_url = DEFAULT_LOGO_URL
+        
+        # Set response fields
+        response.one_sentence_summary = one_sentence_summary
+        response.hundred_word_summary = hundred_word_summary
+        response.word_frequencies = word_frequencies
+        response.text_mining = text_mining_metrics
+        response.company_name = company_name
+        response.logo_url = logo_url
+        response.success = True
+        response.message = "Successfully crawled and analyzed privacy policy."
+        
+        # Log extracted company name and logo URL
+        logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
+        
+        # Save document to database
+        try:
+            document_id = await save_document_to_db(
+                original_url=request.url,
+                document_type="pp",
+                document_content=extracted_text,
+                analysis={
+                    "one_sentence_summary": one_sentence_summary,
+                    "hundred_word_summary": hundred_word_summary,
+                    "word_frequencies": word_frequencies,
+                    "text_mining": text_mining_metrics,
+                    "company_name": company_name,
+                    "logo_url": logo_url
+                },
+                user_id=None
+            )
+            response.document_id = document_id
+        except Exception as e:
+            logger.error(f"Error saving document to database: {e}")
+            # Continue with response even if database save fails
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error processing Privacy Policy crawl request: {e}")
+        response.success = False
+        response.message = f"Error processing request: {str(e)}"
+        return response
+
+async def extract_text_from_url(url: str) -> Optional[Tuple[str, str]]:
+    """
+    Wrapper function to extract text from a URL with enhanced anti-bot protection.
     
     Args:
         url: The URL to extract text from
         
     Returns:
-        The extracted text from the URL
+        Tuple of (extracted_text, error_message) or None if completely failed
     """
     logger.info(f"Extracting text from URL: {url}")
     
     # Create extract request
-    extract_request = ExtractRequest(url=url)
+    extract_request = ExtractRequest(url=url, document_type="tos")
     
-    # Call extract_text endpoint function
-    response = await extract_text(extract_request, Response())
+    # Try multiple times with different methods if needed
+    max_attempts = 3
+    last_error = ""
     
-    if response.success:
-        logger.info(f"Successfully extracted text from URL: {url}")
-        return response.text
-    else:
-        logger.warning(f"Failed to extract text from URL {url}: {response.message}")
-        return "" 
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Call extract_text endpoint function
+            logger.info(f"Extraction attempt {attempt}/{max_attempts} for URL: {url}")
+            
+            # Send the extraction request
+            response = await extract_text(extract_request, Response())
+            
+            if response and hasattr(response, 'success') and response.success and response.text:
+                # Check if the extracted content looks like a bot verification page
+                if "verify yourself" in response.text.lower() or "security check" in response.text.lower():
+                    logger.warning(f"Bot verification page detected for URL: {url}")
+                    last_error = "Bot verification page detected - unable to access actual content"
+                    
+                    # Try once more with a different approach if this isn't our last attempt
+                    if attempt < max_attempts:
+                        logger.info(f"Retrying with different approach for URL: {url}")
+                        await asyncio.sleep(random.uniform(5.0, 8.0))
+                        continue
+                else:
+                    logger.info(f"Successfully extracted text from URL: {url} using method: {response.method_used}")
+                    # Return the successfully extracted text and no error
+                    return (response.text, None)
+            else:
+                # Log specific reason for failure if available
+                error_msg = response.message if hasattr(response, 'message') else "Unknown extraction error"
+                logger.warning(f"Failed to extract text from URL {url} on attempt {attempt}/{max_attempts}: {error_msg}")
+                last_error = error_msg
+                
+                # If this is the last attempt, return empty string and the error
+                if attempt == max_attempts:
+                    logger.error(f"All extraction attempts failed for URL: {url}")
+                    return ("", last_error)
+                    
+                # Vary wait time between attempts to avoid detection
+                await asyncio.sleep(random.uniform(3.0, 5.0))
+        except Exception as e:
+            error_str = str(e)
+            logger.error(f"Error extracting text from URL {url} on attempt {attempt}/{max_attempts}: {error_str}")
+            last_error = error_str
+            
+            # If the error indicates bot detection, record that specifically
+            if "bot verification" in error_str.lower() or "captcha" in error_str.lower():
+                last_error = "Bot verification detected: " + error_str
+            
+            # If this is the last attempt, return empty string and the error
+            if attempt == max_attempts:
+                logger.error(f"All extraction attempts failed for URL: {url}")
+                return ("", last_error)
+                
+            # Increase wait time with each failure
+            await asyncio.sleep(random.uniform(2.0 * attempt, 4.0 * attempt))
+    
+    logger.warning(f"Failed to extract content from {url}")
+    return ("", "Failed to extract content from URL")
+
+async def generate_one_sentence_summary(text: str, url: str = None) -> str:
+    """
+    Generate a one-sentence summary of the provided text.
+    
+    Args:
+        text: The text to summarize
+        url: Optional URL for context
+        
+    Returns:
+        A one-sentence summary of the text
+    """
+    logger.info("Generating one-sentence summary")
+    
+    if not text or len(text.strip()) < 100:
+        logger.warning("Text is too short for summarization")
+        return "Text too short for summarization"
+    
+    try:
+        # Create a summary request
+        summary_request = SummaryRequest(
+            text=text,
+            document_type="tos",  # Default document type
+            url=url  # Pass the URL if available
+        )
+        
+        # Call the generate_summary endpoint
+        summary_response = await generate_summary(summary_request, Response())
+        
+        if summary_response and summary_response.success:
+            if summary_response.one_sentence_summary:
+                logger.info("Successfully generated one-sentence summary")
+                return summary_response.one_sentence_summary
+            else:
+                logger.warning("Empty one-sentence summary returned")
+                return "Summary generation returned empty result"
+        else:
+            error_msg = summary_response.message if summary_response else "Unknown error"
+            logger.error(f"Failed to generate one-sentence summary: {error_msg}")
+            return f"Error generating summary: {error_msg}"
+    except Exception as e:
+        logger.error(f"Exception during one-sentence summary generation: {str(e)}")
+        return f"Error generating summary: {str(e)}"
+
+async def generate_hundred_word_summary(text: str, url: str = None) -> str:
+    """
+    Generate a hundred-word summary of the provided text.
+    
+    Args:
+        text: The text to summarize
+        url: Optional URL for context
+        
+    Returns:
+        A hundred-word summary of the text
+    """
+    logger.info("Generating hundred-word summary")
+    
+    if not text or len(text.strip()) < 200:
+        logger.warning("Text is too short for summarization")
+        return "Text too short for summarization"
+    
+    try:
+        # Create a summary request
+        summary_request = SummaryRequest(
+            text=text,
+            document_type="tos",  # Default document type
+            url=url  # Pass the URL if available
+        )
+        
+        # Call the generate_summary endpoint
+        summary_response = await generate_summary(summary_request, Response())
+        
+        if summary_response and summary_response.success:
+            if summary_response.hundred_word_summary:
+                logger.info("Successfully generated hundred-word summary")
+                return summary_response.hundred_word_summary
+            else:
+                logger.warning("Empty hundred-word summary returned")
+                return "Summary generation returned empty result"
+        else:
+            error_msg = summary_response.message if summary_response else "Unknown error"
+            logger.error(f"Failed to generate hundred-word summary: {error_msg}")
+            return f"Error generating summary: {error_msg}"
+    except Exception as e:
+        logger.error(f"Exception during hundred-word summary generation: {str(e)}")
+        return f"Error generating summary: {str(e)}"
+
+def get_word_frequencies(text: str, max_words: int = 20):
+    """
+    Analyze word frequencies in the provided text.
+    
+    Args:
+        text: The text to analyze
+        max_words: Maximum number of words to include in results
+        
+    Returns:
+        List of WordFrequency objects
+    """
+    return analyze_text_frequency(text, max_words)
+
+def extract_text_mining_metrics(text: str):
+    """
+    Extract text mining metrics from the provided text.
+    
+    Args:
+        text: The text to analyze
+        
+    Returns:
+        TextMiningResults object
+    """
+    return perform_text_mining(text) 
