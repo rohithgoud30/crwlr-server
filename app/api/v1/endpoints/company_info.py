@@ -372,7 +372,8 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             domain = urlparse(url).netloc if url else ""
             if domain.startswith('www.'):
                 domain = domain[4:]
-            default_company_name = domain.split('.')[0].capitalize() if domain else extract_company_name_from_domain(url.split('/')[0])
+            # Just use the first part of the domain directly
+            default_company_name = domain.split('.')[0].capitalize() if domain else url.split('/')[0].capitalize()
         except:
             # Final fallback - extract something usable from the URL
             default_company_name = url.split('/')[-1].capitalize() if url else "C"
@@ -651,7 +652,7 @@ def extract_company_name_from_domain(domain: str) -> str:
         # Simply use the first part of the domain
         company = domain.split('.')[0]
         
-        # Handle very short names
+        # Handle very short names (just use as is, capitalized)
         if len(company) <= 2:
             return company.upper()
             
@@ -661,10 +662,9 @@ def extract_company_name_from_domain(domain: str) -> str:
         return company_name
     except Exception as e:
         logger.error(f"Error extracting company name from domain {domain}: {e}")
-        # Never return Unknown Company - use a placeholder derived from the input if possible
+        # Just use first character if possible
         if domain and len(domain) > 0:
-            first_char = domain[0].upper()
-            return first_char
+            return domain[0].upper()
         return "C"
 
 def extract_company_name(soup: BeautifulSoup) -> str:
@@ -854,7 +854,9 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
             if len(domain_parts) >= 2:
                 company_name = domain_parts[0].split('/')[-1].capitalize()
             else:
-                company_name = url.split('/')[-1].capitalize() if url else "C"
+                company_name = url.split('/')[-1].capitalize()
+                if not company_name or len(company_name) < 1:
+                    company_name = "C"
         
         return CompanyInfoResponse(
             url=url,
