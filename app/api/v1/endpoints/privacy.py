@@ -4,6 +4,7 @@ import logging
 from typing import List, Optional, Union, Any
 import asyncio
 import re
+from fake_useragent import UserAgent
 
 from fastapi import APIRouter, HTTPException
 from playwright.async_api import async_playwright, Page
@@ -40,14 +41,26 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-# Define User_Agents list for rotation
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-]
+# Initialize UserAgent for random browser User-Agent strings
+ua_generator = UserAgent()
+
+# Function to get a random user agent
+def get_random_user_agent():
+    """
+    Returns a random, realistic user agent string from the fake-useragent library.
+    Falls back to a default value if the API fails.
+    """
+    try:
+        return ua_generator.random
+    except Exception as e:
+        # Fallback user agents in case the API fails
+        fallback_user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        ]
+        print(f"Error getting random user agent: {e}. Using fallback.")
+        return random.choice(fallback_user_agents)
 
 """
 PRIVACY POLICY SCORING SYSTEM
@@ -1556,11 +1569,11 @@ async def setup_browser(playwright=None):
         playwright = await async_playwright().start()
     try:
         # Use random user agent
-        user_agent = random.choice(USER_AGENTS)
+        user_agent = get_random_user_agent()
 
         # Get headless setting from environment or default to True for performance
         # Set to False only for debugging when needed
-        headless = True
+        headless = False
 
         print(f"Browser headless mode: {headless}")
 
