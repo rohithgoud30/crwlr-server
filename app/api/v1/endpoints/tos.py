@@ -76,6 +76,9 @@ def generate_random_user_agent():
         edge_version = f"{random.choice(version_ranges['edge'])}.0.{random.randint(100, 999)}.{random.randint(10, 99)}"
         ua = f"Mozilla/5.0 ({random.choice(os_options[platform])}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version} Safari/537.36 Edg/{edge_version}"
     
+    # Log the generated user agent
+    logger.info(f"Generated user agent: {ua}")
+    
     return ua
 
 exactMatchPriorities = {
