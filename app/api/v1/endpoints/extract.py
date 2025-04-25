@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from fastapi import APIRouter, Response
 from functools import lru_cache
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
+from fake_useragent import UserAgent
 
 from app.models.extract import ExtractRequest, ExtractResponse
 from app.models.tos import ToSRequest
@@ -26,6 +27,32 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Initialize UserAgent
+try:
+    ua_generator = UserAgent()
+except Exception as e:
+    logger.warning(f"Failed to initialize UserAgent: {str(e)}")
+    ua_generator = None
+
+# Get random user agent
+def get_random_user_agent():
+    """Get a random user agent string"""
+    try:
+        if ua_generator:
+            return ua_generator.random
+    except Exception as e:
+        logger.warning(f"Error getting random user agent: {str(e)}")
+    
+    # Fallback user agents if fake-useragent fails
+    fallback_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0"
+    ]
+    return random.choice(fallback_agents)
+
 # PlaywrightManager singleton for headful browser reuse
 class PlaywrightManager:
     def __init__(self, max_instances: int = 3):
@@ -33,8 +60,12 @@ class PlaywrightManager:
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.semaphore = asyncio.Semaphore(max_instances)
+        self.is_ready = False
 
     async def startup(self):
+        if self.is_ready:
+            return
+            
         logger.info("Launching Playwright browser...")
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
@@ -50,6 +81,7 @@ class PlaywrightManager:
             ignore_https_errors=True,
             locale='en-US',
             timezone_id='America/New_York',
+            user_agent=get_random_user_agent(),
         )
         # Inject minimal stealth script
         await self.context.add_init_script("""
@@ -57,9 +89,13 @@ class PlaywrightManager:
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
         }
         """)
+        self.is_ready = True
         logger.info("PlaywrightManager ready.")
 
     async def get_page(self):
+        if not self.is_ready:
+            await self.startup()
+            
         await self.semaphore.acquire()
         return await self.context.new_page()
 
@@ -77,6 +113,7 @@ class PlaywrightManager:
             await self.browser.close()
         if self.playwright:
             await self.playwright.stop()
+        self.is_ready = False
         logger.info("PlaywrightManager shut down.")
 
 # Instantiate and plan to call startup/shutdown in app main
@@ -149,7 +186,11 @@ def extract_content_from_soup(soup: BeautifulSoup) -> str:
 # Standard HTML extraction
 
 async def extract_standard_html(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
-    headers = {'User-Agent':'Mozilla/5.0','Accept-Language':'en-US'}
+    headers = {
+        'User-Agent': get_random_user_agent(),
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+    }
     loop = asyncio.get_event_loop()
     fut = loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT))
     resp = await asyncio.wait_for(fut, timeout=STANDARD_TIMEOUT+1)
@@ -163,7 +204,10 @@ async def extract_standard_html(url: str, doc_type: str, ret_url: str) -> Extrac
 # PDF extraction
 
 async def extract_pdf(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
-    headers = {'User-Agent':'Mozilla/5.0','Accept':'application/pdf'}
+    headers = {
+        'User-Agent': get_random_user_agent(),
+        'Accept': 'application/pdf,*/*'
+    }
     resp = requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT)
     resp.raise_for_status()
     text = extract_text_from_pdf(resp.content)
@@ -174,19 +218,23 @@ async def extract_pdf(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
 # Playwright extraction
 
 async def extract_with_playwright(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
-    page = await auth_manager.get_page()
     try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=STANDARD_TIMEOUT*1000)
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(1)
-        html = await page.content()
-        soup = BeautifulSoup(html, 'html.parser')
-        text = extract_content_from_soup(soup)
-        if len(text)>=MIN_CONTENT_LENGTH:
-            return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='playwright', method_used='playwright')
-        raise Exception('Playwright no content')
-    finally:
-        await auth_manager.release_page(page)
+        page = await auth_manager.get_page()
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=STANDARD_TIMEOUT*1000)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(1)
+            html = await page.content()
+            soup = BeautifulSoup(html, 'html.parser')
+            text = extract_content_from_soup(soup)
+            if len(text)>=MIN_CONTENT_LENGTH:
+                return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='playwright', method_used='playwright')
+            raise Exception('Playwright no content')
+        finally:
+            await auth_manager.release_page(page)
+    except Exception as e:
+        logger.error(f"Playwright extraction error: {str(e)}")
+        raise
 
 # Main endpoint
 
