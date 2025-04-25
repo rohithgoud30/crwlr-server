@@ -2,6 +2,7 @@ from fastapi import APIRouter, Response, HTTPException, status
 import logging
 import requests
 from bs4 import BeautifulSoup
+import re
 from typing import Optional
 from urllib.parse import urlparse, urljoin
 
@@ -18,6 +19,69 @@ def get_base_url(url: str) -> str:
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
 
+def sanitize_url(url: str) -> str:
+    """
+    Sanitize and validate URLs to ensure they are valid.
+    
+    If the URL is severely malformed or clearly invalid, returns an empty string
+    instead of attempting to fix it.
+    """
+    if not url:
+        logger.warning("Empty URL provided")
+        return ""
+        
+    # Trim whitespace and control characters
+    url = url.strip().strip('\r\n\t')
+    
+    # Log the original URL for debugging
+    logger.info(f"Validating URL: {url}")
+    
+    try:
+        # Fix only the most common minor issues
+        # Add protocol if missing
+        if not re.match(r'^https?://', url):
+            url = 'https://' + url
+        
+        # Validate the URL structure
+        parsed = urlparse(url)
+        
+        # Check for severely malformed URLs
+        if not parsed.netloc or '.' not in parsed.netloc:
+            logger.warning(f"Invalid domain in URL: {url}")
+            return ""
+            
+        # Check for nonsensical URL patterns that indicate a malformed URL
+        if re.match(r'https?://[a-z]+s?://', url):
+            # Invalid patterns like https://ttps://
+            logger.warning(f"Malformed URL with invalid protocol pattern: {url}")
+            return ""
+            
+        # Additional validation to ensure domain has a valid TLD
+        domain_parts = parsed.netloc.split('.')
+        if len(domain_parts) < 2 or len(domain_parts[-1]) < 2:
+            logger.warning(f"Domain lacks valid TLD: {url}")
+            return ""
+            
+        logger.info(f"URL validated: {url}")
+        return url
+    except Exception as e:
+        logger.error(f"Error validating URL {url}: {str(e)}")
+        return ""
+
+def normalize_url(url: str) -> str:
+    """Normalize URL to handle common variations"""
+    if not url:
+        return url
+    
+    # Remove trailing slashes, fragments and normalize to lowercase
+    url = url.lower().split('#')[0].rstrip('/')
+    
+    # Ensure URL has protocol
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+        
+    return url
+
 async def extract_company_info(url: str) -> tuple:
     """
     Extract company name and logo from a website.
@@ -26,9 +90,16 @@ async def extract_company_info(url: str) -> tuple:
     - Tuple of (company_name, logo_url, success, message)
     """
     try:
+        # Validate and normalize the URL
+        sanitized_url = sanitize_url(url)
+        if not sanitized_url:
+            return "Unknown Company", "/placeholder.svg?height=48&width=48", False, f"Invalid URL '{url}'"
+            
+        normalized_url = normalize_url(sanitized_url)
+        
         # Default values in case extraction fails
         default_logo_url = "/placeholder.svg?height=48&width=48"
-        domain = urlparse(url).netloc
+        domain = urlparse(normalized_url).netloc
         
         # Default company name from domain
         if domain.startswith('www.'):
@@ -46,12 +117,12 @@ async def extract_company_info(url: str) -> tuple:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(normalized_url, headers=headers, timeout=10)
         response.raise_for_status()
         
         # Parse HTML
         soup = BeautifulSoup(response.text, 'html.parser')
-        base_url = get_base_url(url)
+        base_url = get_base_url(normalized_url)
         
         # 1. Try to extract company name from title tag
         if soup.title and soup.title.string:
@@ -170,6 +241,7 @@ async def extract_company_info(url: str) -> tuple:
     except Exception as e:
         logger.error(f"Error extracting company info: {e}")
         # Return defaults with error message
+        domain = urlparse(normalized_url).netloc if 'normalized_url' in locals() else "unknown"
         default_company_name = domain.split('.')[0].capitalize() if domain else "Unknown Company"
         return default_company_name, default_logo_url, False, f"Error: {str(e)}"
 
