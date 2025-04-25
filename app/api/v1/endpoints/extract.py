@@ -14,7 +14,6 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from fastapi import APIRouter, Response
 from functools import lru_cache
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
-from fake_useragent import UserAgent
 
 from app.models.extract import ExtractRequest, ExtractResponse
 from app.models.tos import ToSRequest
@@ -27,32 +26,6 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Initialize UserAgent
-try:
-    ua_generator = UserAgent()
-except Exception as e:
-    logger.warning(f"Failed to initialize UserAgent: {str(e)}")
-    ua_generator = None
-
-# Get random user agent
-def get_random_user_agent():
-    """Get a random user agent string"""
-    try:
-        if ua_generator:
-            return ua_generator.random
-    except Exception as e:
-        logger.warning(f"Error getting random user agent: {str(e)}")
-    
-    # Fallback user agents if fake-useragent fails
-    fallback_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0"
-    ]
-    return random.choice(fallback_agents)
-
 # PlaywrightManager singleton for headful browser reuse
 class PlaywrightManager:
     def __init__(self, max_instances: int = 3):
@@ -60,12 +33,8 @@ class PlaywrightManager:
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.semaphore = asyncio.Semaphore(max_instances)
-        self.is_ready = False
 
     async def startup(self):
-        if self.is_ready:
-            return
-            
         logger.info("Launching Playwright browser...")
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
@@ -81,7 +50,6 @@ class PlaywrightManager:
             ignore_https_errors=True,
             locale='en-US',
             timezone_id='America/New_York',
-            user_agent=get_random_user_agent(),
         )
         # Inject minimal stealth script
         await self.context.add_init_script("""
@@ -89,13 +57,9 @@ class PlaywrightManager:
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
         }
         """)
-        self.is_ready = True
         logger.info("PlaywrightManager ready.")
 
     async def get_page(self):
-        if not self.is_ready:
-            await self.startup()
-            
         await self.semaphore.acquire()
         return await self.context.new_page()
 
@@ -113,7 +77,6 @@ class PlaywrightManager:
             await self.browser.close()
         if self.playwright:
             await self.playwright.stop()
-        self.is_ready = False
         logger.info("PlaywrightManager shut down.")
 
 # Instantiate and plan to call startup/shutdown in app main
@@ -186,55 +149,145 @@ def extract_content_from_soup(soup: BeautifulSoup) -> str:
 # Standard HTML extraction
 
 async def extract_standard_html(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
-    headers = {
-        'User-Agent': get_random_user_agent(),
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
-    }
-    loop = asyncio.get_event_loop()
-    fut = loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT))
-    resp = await asyncio.wait_for(fut, timeout=STANDARD_TIMEOUT+1)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    text = extract_content_from_soup(soup)
-    if len(text)<MIN_CONTENT_LENGTH:
-        raise Exception('Insufficient content')
-    return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='standard', method_used='standard')
+    try:
+        # Enhanced browser-like headers with random user agent
+        headers = {
+            'User-Agent': get_random_user_agent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        # Log the headers we're using
+        logger.info(f"Attempting standard extraction for URL: {url} with User-Agent: {headers['User-Agent']}")
+        
+        loop = asyncio.get_event_loop()
+        
+        # Use retry strategy with exponential backoff
+        max_retries = 3
+        retry_delay = 1.0
+        
+        for retry in range(max_retries):
+            try:
+                fut = loop.run_in_executor(
+                    None, 
+                    lambda: requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT, allow_redirects=True)
+                )
+                resp = await asyncio.wait_for(fut, timeout=STANDARD_TIMEOUT+1)
+                resp.raise_for_status()
+                break  # Success, exit retry loop
+            except Exception as e:
+                if retry == max_retries - 1:  # Last retry
+                    raise
+                logger.warning(f"Extraction attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # Try different content extraction strategies
+        text = None
+        
+        # 1. Try content extraction by paragraphs
+        paragraphs = [p.get_text(strip=True) for p in soup.find_all('p') if len(p.get_text(strip=True)) > 10]
+        if paragraphs:
+            text = '\n\n'.join(paragraphs)
+            
+        # 2. If we didn't get enough content, try specific content sections
+        if not text or len(text) < MIN_CONTENT_LENGTH:
+            for content_id in ['content', 'main', 'main-content', 'article', 'terms', 'privacy-policy', 'terms-of-service']:
+                content_div = soup.find(id=content_id) or soup.find('div', class_=content_id) or soup.find('article', class_=content_id)
+                if content_div and len(content_div.get_text(strip=True)) > MIN_CONTENT_LENGTH:
+                    text = content_div.get_text(separator='\n', strip=True)
+                    break
+                    
+        # 3. If still no content, get full text
+        if not text or len(text) < MIN_CONTENT_LENGTH:
+            # First remove script, style and hidden elements
+            for element in soup(['script', 'style', 'meta', 'link', 'header', 'footer', 'nav']):
+                element.decompose()
+            
+            text = soup.get_text(separator='\n', strip=True)
+        
+        if len(text) < MIN_CONTENT_LENGTH:
+            raise Exception('Insufficient content')
+            
+        logger.info(f"Successfully extracted {len(text)} characters from {url} using standard method")
+        return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='standard', method_used='standard')
+    except Exception as e:
+        logger.warning(f"Standard extraction failed: {str(e)}")
+        raise
 
 # PDF extraction
 
 async def extract_pdf(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
-    headers = {
-        'User-Agent': get_random_user_agent(),
-        'Accept': 'application/pdf,*/*'
-    }
-    resp = requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT)
-    resp.raise_for_status()
-    text = extract_text_from_pdf(resp.content)
-    if len(text)<MIN_CONTENT_LENGTH:
-        raise Exception('PDF too small')
-    return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='pdf', method_used='pdf')
+    try:
+        # Enhanced browser-like headers with random user agent
+        headers = {
+            'User-Agent': get_random_user_agent(),
+            'Accept': 'application/pdf,*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        logger.info(f"Attempting PDF extraction for: {url} with User-Agent: {headers['User-Agent']}")
+        
+        # Use retry strategy with exponential backoff
+        max_retries = 3
+        retry_delay = 1.0
+        
+        for retry in range(max_retries):
+            try:
+                resp = requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT, allow_redirects=True)
+                resp.raise_for_status()
+                break  # Success, exit retry loop
+            except Exception as e:
+                if retry == max_retries - 1:  # Last retry
+                    raise
+                logger.warning(f"PDF download attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+        
+        # Check if content type is PDF
+        content_type = resp.headers.get('Content-Type', '').lower()
+        if not ('application/pdf' in content_type or is_pdf_url(url)):
+            raise Exception(f"Not a PDF document. Content-Type: {content_type}")
+        
+        text = extract_text_from_pdf(resp.content)
+        if len(text) < MIN_CONTENT_LENGTH:
+            raise Exception('PDF content too small')
+            
+        logger.info(f"Successfully extracted {len(text)} characters from PDF: {url}")
+        return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='pdf', method_used='pdf')
+    except Exception as e:
+        logger.warning(f"PDF extraction failed: {str(e)}")
+        raise
 
 # Playwright extraction
 
 async def extract_with_playwright(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
+    page = await auth_manager.get_page()
     try:
-        page = await auth_manager.get_page()
-        try:
-            await page.goto(url, wait_until='domcontentloaded', timeout=STANDARD_TIMEOUT*1000)
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(1)
-            html = await page.content()
-            soup = BeautifulSoup(html, 'html.parser')
-            text = extract_content_from_soup(soup)
-            if len(text)>=MIN_CONTENT_LENGTH:
-                return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='playwright', method_used='playwright')
-            raise Exception('Playwright no content')
-        finally:
-            await auth_manager.release_page(page)
-    except Exception as e:
-        logger.error(f"Playwright extraction error: {str(e)}")
-        raise
+        await page.goto(url, wait_until='domcontentloaded', timeout=STANDARD_TIMEOUT*1000)
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(1)
+        html = await page.content()
+        soup = BeautifulSoup(html, 'html.parser')
+        text = extract_content_from_soup(soup)
+        if len(text)>=MIN_CONTENT_LENGTH:
+            return ExtractResponse(url=ret_url, document_type=doc_type, text=text, success=True, message='playwright', method_used='playwright')
+        raise Exception('Playwright no content')
+    finally:
+        await auth_manager.release_page(page)
 
 # Main endpoint
 
@@ -297,7 +350,7 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
         url=url, 
         document_type=doc_type, 
         text=None, 
-        success=False, 
+        success=False,
         message='Extraction failed - all methods exhausted', 
         method_used='standard'
     )
