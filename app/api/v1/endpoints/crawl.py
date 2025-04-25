@@ -369,11 +369,39 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
         text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
         
-        # Extract company name from the URL
-        company_name = extract_company_name_from_domain(request.url)
+        # Get the domain for company info extraction
+        parsed_url = urlparse(request.url)
+        domain = parsed_url.netloc
         
-        # Set default logo URL
-        logo_url = DEFAULT_LOGO_URL
+        # Extract company name and try to get the logo URL
+        # First try to get company info
+        company_name, logo_url = "", DEFAULT_LOGO_URL
+        try:
+            # Use the extract_company_info function from company_info module
+            company_info_result = await extract_company_info(request.url)
+            if company_info_result[2]:  # Check if extraction was successful
+                company_name = company_info_result[0]
+                logo_url = company_info_result[1]
+                logger.info(f"Successfully extracted company info: {company_name}, {logo_url}")
+            else:
+                # Fall back to domain extraction if company info extraction failed
+                company_name = extract_company_name_from_domain(domain)
+                
+                # Try to get a logo from Google's favicon service
+                try:
+                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+                    # Test if logo exists with a head request
+                    response_head = requests.head(logo_url, timeout=5)
+                    if response_head.status_code != 200:
+                        logo_url = DEFAULT_LOGO_URL
+                except Exception as e:
+                    logger.warning(f"Failed to get logo from favicon service for {domain}: {e}")
+                    logo_url = DEFAULT_LOGO_URL
+        except Exception as e:
+            logger.warning(f"Error extracting company info: {e}")
+            # Fall back to simple domain-based extraction
+            company_name = extract_company_name_from_domain(domain)
+            logo_url = DEFAULT_LOGO_URL
         
         response.one_sentence_summary = one_sentence_summary
         response.hundred_word_summary = hundred_word_summary
@@ -472,11 +500,39 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
         text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
         
-        # Extract company name from the URL
-        company_name = extract_company_name_from_domain(request.url)
+        # Get the domain for company info extraction
+        parsed_url = urlparse(request.url)
+        domain = parsed_url.netloc
         
-        # Set default logo URL
-        logo_url = DEFAULT_LOGO_URL
+        # Extract company name and try to get the logo URL
+        # First try to get company info
+        company_name, logo_url = "", DEFAULT_LOGO_URL
+        try:
+            # Use the extract_company_info function from company_info module
+            company_info_result = await extract_company_info(request.url)
+            if company_info_result[2]:  # Check if extraction was successful
+                company_name = company_info_result[0]
+                logo_url = company_info_result[1]
+                logger.info(f"Successfully extracted company info: {company_name}, {logo_url}")
+            else:
+                # Fall back to domain extraction if company info extraction failed
+                company_name = extract_company_name_from_domain(domain)
+                
+                # Try to get a logo from Google's favicon service
+                try:
+                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+                    # Test if logo exists with a head request
+                    response_head = requests.head(logo_url, timeout=5)
+                    if response_head.status_code != 200:
+                        logo_url = DEFAULT_LOGO_URL
+                except Exception as e:
+                    logger.warning(f"Failed to get logo from favicon service for {domain}: {e}")
+                    logo_url = DEFAULT_LOGO_URL
+        except Exception as e:
+            logger.warning(f"Error extracting company info: {e}")
+            # Fall back to simple domain-based extraction
+            company_name = extract_company_name_from_domain(domain)
+            logo_url = DEFAULT_LOGO_URL
         
         # Set response fields
         response.one_sentence_summary = one_sentence_summary
