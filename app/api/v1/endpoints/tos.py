@@ -286,7 +286,7 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                     logger.info(f"Found Terms of Service via base URL: {base_url_response.tos_url}")
                     return base_url_response
                 else:
-                    # If base URL approach failed, return clear failure
+                    # If base URL approach failed, return clear failure for app store URLs
                     logger.warning(f"Could not find Terms of Service using base URL: {base_url}")
                     return ToSResponse(
                         url=url,
@@ -295,26 +295,21 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                         message=f"Could not find Terms of Service for {base_url}",
                         method_used="store_base_url_failed"
                     )
+            else:
+                # No privacy policy found for app store URL, return failure
+                logger.warning(f"No privacy policy found for App/Play Store URL: {url}")
+                return ToSResponse(
+                    url=url,
+                    tos_url=None,
+                    success=False,
+                    message="Could not find Privacy Policy for App/Play Store URL",
+                    method_used="app_store_no_privacy_policy"
+                )
         
         # Try HTML inspection approach first - more lightweight
         logger.info("Attempting to find ToS via HTML inspection...")
-        tos_url = await find_tos_via_html_inspection(url)
-        if tos_url:
-            # Validate the ToS URL isn't a user content page
-            if is_likely_user_generated_content(tos_url):
-                logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
-                # Don't return this result, continue to other methods
-            else:
-                logger.info(f"Found ToS via HTML inspection: {tos_url}")
-                return ToSResponse(
-                    url=url,
-                    tos_url=tos_url,
-                    success=True,
-                    message="Terms of Service found via HTML inspection",
-                    method_used="html_inspection"
-                )
         
-        # Use browser approach
+        # Try to setup browser if needed for subsequent operations
         playwright = await async_playwright().start()
         browser, browser_context, page, _ = await setup_browser(playwright)
         
