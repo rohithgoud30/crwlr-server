@@ -375,13 +375,20 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         
         # Extract company name and try to get the logo URL
         # First try to get company info
-        company_name, logo_url = "", DEFAULT_LOGO_URL
+        company_name = ""
+        logo_url = DEFAULT_LOGO_URL
         try:
             # Use the extract_company_info function from company_info module
             company_info_result = await extract_company_info(request.url)
             if company_info_result[2]:  # Check if extraction was successful
                 company_name = company_info_result[0]
                 logo_url = company_info_result[1]
+                
+                # Extra validation for company name
+                if not company_name or "log in" in company_name.lower() or "sign up" in company_name.lower():
+                    # Fall back to domain name
+                    company_name = extract_company_name_from_domain(domain)
+                
                 logger.info(f"Successfully extracted company info: {company_name}, {logo_url}")
             else:
                 # Fall back to domain extraction if company info extraction failed
@@ -506,13 +513,20 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         
         # Extract company name and try to get the logo URL
         # First try to get company info
-        company_name, logo_url = "", DEFAULT_LOGO_URL
+        company_name = ""
+        logo_url = DEFAULT_LOGO_URL
         try:
             # Use the extract_company_info function from company_info module
             company_info_result = await extract_company_info(request.url)
             if company_info_result[2]:  # Check if extraction was successful
                 company_name = company_info_result[0]
                 logo_url = company_info_result[1]
+                
+                # Extra validation for company name
+                if not company_name or "log in" in company_name.lower() or "sign up" in company_name.lower():
+                    # Fall back to domain name
+                    company_name = extract_company_name_from_domain(domain)
+                
                 logger.info(f"Successfully extracted company info: {company_name}, {logo_url}")
             else:
                 # Fall back to domain extraction if company info extraction failed

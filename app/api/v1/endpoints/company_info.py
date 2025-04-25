@@ -8,6 +8,7 @@ import re
 from typing import Optional, Tuple, Dict, Any
 from urllib.parse import urlparse, urljoin
 from playwright.async_api import async_playwright
+import string
 
 from app.models.company_info import CompanyInfoRequest, CompanyInfoResponse
 
@@ -608,9 +609,33 @@ def extract_company_name_from_domain(domain: str) -> str:
     Returns:
         Capitalized company name
     """
-    if domain.startswith('www.'):
-        domain = domain[4:]
-    return domain.split('.')[0].capitalize()
+    try:
+        # Remove www. if present
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        
+        # Extract the main domain name (before the TLD)
+        parts = domain.split('.')
+        if len(parts) >= 2:
+            company = parts[-2]  # Get the part before the TLD
+            
+            # Handle special cases like co.uk
+            if len(parts) > 2 and parts[-2] in ['co', 'com', 'org', 'net']:
+                company = parts[-3]
+            
+            # Format company name (capitalize first letter of each word)
+            company_name = string.capwords(company.replace('-', ' ').replace('_', ' '))
+            
+            return company_name
+        
+        return domain.split('.')[0].capitalize()
+    except Exception as e:
+        logger.error(f"Error extracting company name from domain {domain}: {e}")
+        # Return domain as fallback
+        if domain:
+            name = domain.split('.')[0]
+            return name.capitalize()
+        return "Unknown Company"
 
 def extract_company_name(soup: BeautifulSoup) -> str:
     """
@@ -622,23 +647,37 @@ def extract_company_name(soup: BeautifulSoup) -> str:
     Returns:
         Company name or empty string if not found
     """
-    # Check title tag first
+    # Try to get og:site_name first (most reliable)
+    og_site_name = soup.find('meta', property='og:site_name')
+    if og_site_name and og_site_name.get('content'):
+        name = og_site_name['content'].strip()
+        # Clean up if it has taglines
+        if ' - ' in name:
+            name = name.split(' - ')[0].strip()
+        elif ' | ' in name:
+            name = name.split(' | ')[0].strip()
+        return name
+    
+    # Check title tag but clean it
     if soup.title and soup.title.string:
         title = soup.title.string.strip()
-        # Remove common suffixes
+        # Remove common suffixes and clean up title
         common_suffixes = [
             " - Home", " | Home", " - Official Website", " | Official Website",
-            " - Official Site", " | Official Site"
+            " - Official Site", " | Official Site", " - log in or sign up",
+            " | log in or sign up", " - Login", " | Login"
         ]
         for suffix in common_suffixes:
             if title.endswith(suffix):
                 title = title[:-len(suffix)]
+        
+        # Remove everything after a dash or pipe (common for page titles)
+        if ' - ' in title:
+            title = title.split(' - ')[0].strip()
+        elif ' | ' in title:
+            title = title.split(' | ')[0].strip()
+            
         return title.strip()
-    
-    # Check meta tags
-    og_site_name = soup.find('meta', property='og:site_name')
-    if og_site_name and og_site_name.get('content'):
-        return og_site_name['content'].strip()
     
     # Check common header elements
     header_logo = soup.find('a', class_=['logo', 'brand', 'navbar-brand'])
