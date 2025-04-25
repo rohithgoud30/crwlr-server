@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Deployment script for CRWLR API server
+# Note: This project requires Python 3.11 for better compatibility with cloud-sql-python-connector
+
 # Load environment variables from .env file
 if [ -f .env ]; then
   echo "Loading API keys from .env file..."

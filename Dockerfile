@@ -1,4 +1,6 @@
 FROM python:3.11-slim
+# Note: Python 3.11 is used for better compatibility with cloud-sql-python-connector
+# Using Python 3.12+ can cause deprecation warnings with cloud-sql-python-connector
 
 WORKDIR /app
 

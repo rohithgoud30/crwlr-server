@@ -1,4 +1,6 @@
 # Cloud Build configuration file for CI/CD deployment to Cloud Run
+# Note: This project requires Python 3.11 for compatibility with cloud-sql-python-connector
+
 steps:
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
