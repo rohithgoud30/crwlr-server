@@ -10,7 +10,6 @@ from app.api.v1.endpoints.extract import extract_text
 from app.api.v1.endpoints.summary import generate_summary
 from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining
-from app.core.database import get_db
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
