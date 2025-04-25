@@ -378,43 +378,31 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                 search_query = f"{domain} terms of service, terms of use, user agreement, legal terms"
                 logger.info(f"Using search query: {search_query}")
                 
-                # Use the consensus approach across all search engines
+                # Use the standard search approach across search engines
                 try:
-                    logger.info("Running consensus search across all search engines...")
-                    tos_url, search_results, consensus_links = await consensus_search_fallback(search_query, page)
+                    logger.info("Running standard search using search engines...")
+                    tos_url, search_results, consensus_links = await standard_search_fallback(search_query, page)
                     
                     if tos_url:
                         # Validate the ToS URL isn't a user content page
                         if is_likely_user_generated_content(tos_url):
-                            logger.warning(f"Consensus search result appears to be user-generated content: {tos_url}")
+                            logger.warning(f"Search result appears to be user-generated content: {tos_url}")
                             # Continue to other methods
                         else:
-                            # Get consensus details for better logging
-                            consensus_count = 1
-                            engines_found = []
+                            # Get engines used for better logging
+                            engines_found = list(search_results.keys())
+                            engines_msg = f"Found by search engines: {', '.join(engines_found)}" if engines_found else ""
                             
-                            for url, count, score in consensus_links:
-                                if url == normalize_url(tos_url):
-                                    consensus_count = count
-                                    # Find which search engines found this URL
-                                    engines_found = [
-                                        engine for engine, result_url in search_results.items() 
-                                        if normalize_url(result_url) == url
-                                    ]
-                                    break
-                            
-                            consensus_msg = f"Found by {consensus_count} search engines: {', '.join(engines_found)}" if engines_found else ""
-                            
-                            logger.info(f"Found ToS via consensus search: {tos_url} {consensus_msg}")
+                            logger.info(f"Found ToS via search: {tos_url} {engines_msg}")
                             return ToSResponse(
                                 url=url,
                                 tos_url=tos_url,
                                 success=True,
-                                message=f"Terms of Service found via consensus search {consensus_msg}",
-                                method_used="consensus_search"
+                                message=f"Terms of Service found via search {engines_msg}",
+                                method_used="search_engine"
                             )
                 except Exception as e:
-                    logger.warning(f"Consensus search failed: {e}")
+                    logger.warning(f"Search failed: {e}")
                 
                 # All search methods failed
                 return ToSResponse(
@@ -547,68 +535,44 @@ async def find_tos(request: ToSRequest, from_store: bool = False) -> ToSResponse
                 search_query = f"{domain_name} terms of service, terms of use, user agreement, legal terms"
                 logger.info(f"Using search query: {search_query}")
                 
-                # Try consensus search with domain name
-                logger.info("Running consensus search with domain name...")
-                tos_url, search_results, consensus_links = await consensus_search_fallback(search_query, page)
+                # Try standard search with domain name
+                logger.info("Running standard search with domain name...")
+                tos_url, search_results, consensus_links = await standard_search_fallback(search_query, page)
                 
                 if tos_url and not is_likely_user_generated_content(tos_url):
-                    # Get consensus details for better logging
-                    consensus_count = 1
-                    engines_found = []
+                    # Get engines used for better logging
+                    engines_found = list(search_results.keys())
+                    engines_msg = f"Found by search engines: {', '.join(engines_found)}" if engines_found else ""
                     
-                    for url, count, score in consensus_links:
-                        if url == normalize_url(tos_url):
-                            consensus_count = count
-                            # Find which search engines found this URL
-                            engines_found = [
-                                engine for engine, result_url in search_results.items() 
-                                if normalize_url(result_url) == url
-                            ]
-                            break
-                    
-                    consensus_msg = f"Found by {consensus_count} search engines: {', '.join(engines_found)}" if engines_found else ""
-                    
-                    logger.info(f"Found ToS via domain consensus search: {tos_url} {consensus_msg}")
+                    logger.info(f"Found ToS via domain search: {tos_url} {engines_msg}")
                     return ToSResponse(
                         url=url,
                         tos_url=tos_url,
                         success=True,
-                        message=f"Terms of Service found via domain consensus search {consensus_msg}",
-                        method_used="domain_consensus_search"
+                        message=f"Terms of Service found via domain search {engines_msg}",
+                        method_used="domain_search"
                     )
                 
                 # Try with company name if domain search fails
                 company_search_query = f"{company_name} terms of service, terms of use, user agreement, legal terms"
                 logger.info(f"Using company search query: {company_search_query}")
                 
-                # Try consensus search with company name
-                logger.info("Running consensus search with company name...")
-                tos_url, search_results, consensus_links = await consensus_search_fallback(company_search_query, page)
+                # Try standard search with company name
+                logger.info("Running standard search with company name...")
+                tos_url, search_results, consensus_links = await standard_search_fallback(company_search_query, page)
                 
                 if tos_url and not is_likely_user_generated_content(tos_url):
-                    # Get consensus details for better logging
-                    consensus_count = 1
-                    engines_found = []
+                    # Get engines used for better logging
+                    engines_found = list(search_results.keys())
+                    engines_msg = f"Found by search engines: {', '.join(engines_found)}" if engines_found else ""
                     
-                    for url, count, score in consensus_links:
-                        if url == normalize_url(tos_url):
-                            consensus_count = count
-                            # Find which search engines found this URL
-                            engines_found = [
-                                engine for engine, result_url in search_results.items() 
-                                if normalize_url(result_url) == url
-                            ]
-                            break
-                    
-                    consensus_msg = f"Found by {consensus_count} search engines: {', '.join(engines_found)}" if engines_found else ""
-                    
-                    logger.info(f"Found ToS via company consensus search: {tos_url} {consensus_msg}")
+                    logger.info(f"Found ToS via company search: {tos_url} {engines_msg}")
                     return ToSResponse(
                         url=url,
                         tos_url=tos_url,
                         success=True,
-                        message=f"Terms of Service found via company consensus search {consensus_msg}",
-                        method_used="company_consensus_search"
+                        message=f"Terms of Service found via company search {engines_msg}",
+                        method_used="company_search"
                     )
                 
                 logger.warning("Direct search approach failed to find ToS URL")
@@ -4174,141 +4138,6 @@ async def find_tos_via_html_inspection(url: str) -> str:
         logger.error(f"Error during HTML inspection: {e}")
         return None
 
-
-async def consensus_search_fallback(search_query, page):
-    """
-    Runs searches across all search engines and identifies consensus results.
-    
-    This function runs searches on Bing, Yahoo, and DuckDuckGo,
-    then analyzes the results to find URLs that appear in multiple search engines.
-    Links that appear in multiple search engines are likely to be more relevant.
-    
-    Args:
-        search_query: Search query string for finding ToS
-        page: Playwright page to use for searches
-        
-    Returns:
-        Tuple of (best_url, search_results_dict, consensus_links)
-        - best_url: The most likely ToS URL based on consensus
-        - search_results_dict: Dictionary of all search results by engine
-        - consensus_links: List of URLs that appeared in multiple search engines with counts
-    """
-    print(f"Running consensus search across all search engines for: {search_query}")
-    
-    # Dictionary to store all results by search engine
-    all_results = {}
-    
-    # Run all search engines in sequence
-    try:
-        print("Trying Bing search...")
-        bing_url = await bing_search_fallback(search_query, page)
-        if bing_url:
-            all_results["bing"] = bing_url
-            print(f"Bing result: {bing_url}")
-    except Exception as e:
-        print(f"Error in Bing search: {e}")
-    
-    try:
-        print("Trying Yahoo search...")
-        yahoo_url = await yahoo_search_fallback(search_query, page)
-        if yahoo_url:
-            all_results["yahoo"] = yahoo_url
-            print(f"Yahoo result: {yahoo_url}")
-    except Exception as e:
-        print(f"Error in Yahoo search: {e}")
-    
-    try:
-        print("Trying DuckDuckGo search...")
-        ddg_url = await duckduckgo_search_fallback(search_query, page)
-        if ddg_url:
-            all_results["duckduckgo"] = ddg_url
-            print(f"DuckDuckGo result: {ddg_url}")
-    except Exception as e:
-        print(f"Error in DuckDuckGo search: {e}")
-    
-    # Check if we have any results
-    if not all_results:
-        print("No results found from any search engine")
-        return None, {}, []
-    
-    # Normalize all URLs for comparison
-    normalized_results = {}
-    for engine, url in all_results.items():
-        normalized_results[engine] = normalize_url(url)
-    
-    # Extract the domain being searched for
-    search_domain = None
-    domain_match = re.search(r'^(\S+?)(?:\s|$)', search_query)
-    if domain_match:
-        search_domain = domain_match.group(1).lower()
-        # Clean up domain (remove https://, www., etc.)
-        search_domain = re.sub(r'^https?://(www\.)?', '', search_domain)
-        # Remove trailing slash and path
-        search_domain = search_domain.split('/')[0]
-        print(f"Extracted search domain: {search_domain}")
-    
-    # Count occurrences of each URL
-    url_counts = {}
-    for engine, url in normalized_results.items():
-        url_counts[url] = url_counts.get(url, 0) + 1
-    
-    # Create detailed analysis for each URL
-    url_analysis = []
-    
-    for url, count in url_counts.items():
-        # Basic ToS score
-        tos_score = score_tos_url_by_path_specificity(url)
-        
-        # Domain match analysis - prioritize URLs from the exact domain we're searching for
-        url_domain = urlparse(url).netloc.lower()
-        url_domain_clean = re.sub(r'^www\.', '', url_domain)
-        
-        domain_match_score = 0
-        if search_domain and search_domain in url_domain_clean:
-            # If exact domain match
-            if search_domain == url_domain_clean:
-                domain_match_score = 100
-            # If subdomain match like policies.example.com for example.com
-            elif url_domain_clean.endswith(f".{search_domain}"):
-                domain_match_score = 80
-            # If domain appears in URL as a path component, lower score
-            elif search_domain in urlparse(url).path.lower():
-                domain_match_score = 30
-        
-        # URL path analysis - look for indicators of main terms page vs product-specific terms
-        path = urlparse(url).path.lower()
-        path_parts = path.strip('/').split('/')
-        
-        # Analyze path for generality (higher score for more general terms)
-        generality_score = 0
-        
-        # Detect common product-specific terms patterns
-        product_terms = False
-        if len(path_parts) > 1:
-            # Check for patterns like /product/terms or /service/terms
-            for part in path_parts[:-1]:  # Check all parts except the last one
-                if part not in ['terms', 'tos', 'legal', 'policies']:
-                    product_terms = True
-                    break
-        
-        # Main terms usually have simpler paths
-        if not product_terms and len(path_parts) <= 2:
-            generality_score += 40
-        
-        # Root domain TOS pages get priority
-        if not product_terms and (len(path_parts) == 1 or path == '/terms'):
-            generality_score += 30
-        
-        # Add all analysis factors to the detailed list
-        url_analysis.append({
-            'url': url,
-            'consensus_count': count,  # How many engines agree
-            'tos_score': tos_score,  # Score from path specificity function
-            'domain_match_score': domain_match_score,  # How well domain matches search query
-            'generality_score': generality_score,  # How general/main the terms page is
-            'final_score': count + (tos_score * 0.5) + domain_match_score + generality_score
-        })
-    
     # Sort URLs by final score
     url_analysis.sort(key=lambda x: x['final_score'], reverse=True)
     
@@ -4333,3 +4162,102 @@ async def consensus_search_fallback(search_query, page):
         return best_url, all_results, consensus_links
     
     return None, all_results, consensus_links
+
+
+async def standard_search_fallback(search_query, page):
+    """
+    Runs a standard search approach using Bing as primary with fallbacks to other engines.
+    
+    Args:
+        search_query: Search query string for finding ToS
+        page: Playwright page to use for searches
+        
+    Returns:
+        Tuple of (best_url, search_results_dict, empty_list)
+        - best_url: The most likely ToS URL found
+        - search_results_dict: Dictionary containing the search engine used and the result
+        - empty_list: Empty list for compatibility with old consensus links return
+    """
+    print(f"Running standard search for: {search_query}")
+    
+    # Dictionary to store result
+    search_results = {}
+    best_url = None
+    
+    # Try Bing first
+    try:
+        print("Trying Bing search...")
+        bing_url = await bing_search_fallback(search_query, page)
+        if bing_url:
+            best_url = bing_url
+            search_results["bing"] = bing_url
+            print(f"Found ToS via Bing: {bing_url}")
+            # If we find a good result with Bing, return it immediately
+            if score_tos_url_by_path_specificity(bing_url) > 50:
+                return best_url, search_results, []
+    except Exception as e:
+        print(f"Error in Bing search: {e}")
+    
+    # Try Yahoo if Bing failed or gave a low-quality result
+    if not best_url or score_tos_url_by_path_specificity(best_url) < 30:
+        try:
+            print("Trying Yahoo search...")
+            yahoo_url = await yahoo_search_fallback(search_query, page)
+            if yahoo_url:
+                search_results["yahoo"] = yahoo_url
+                print(f"Found ToS via Yahoo: {yahoo_url}")
+                
+                # Replace our best URL if Yahoo's result is better or if we don't have one yet
+                if not best_url or score_tos_url_by_path_specificity(yahoo_url) > score_tos_url_by_path_specificity(best_url):
+                    best_url = yahoo_url
+        except Exception as e:
+            print(f"Error in Yahoo search: {e}")
+    
+    # Try DuckDuckGo as last resort
+    if not best_url or score_tos_url_by_path_specificity(best_url) < 30:
+        try:
+            print("Trying DuckDuckGo search...")
+            ddg_url = await duckduckgo_search_fallback(search_query, page)
+            if ddg_url:
+                search_results["duckduckgo"] = ddg_url
+                print(f"Found ToS via DuckDuckGo: {ddg_url}")
+                
+                # Replace our best URL if DuckDuckGo's result is better or if we don't have one yet
+                if not best_url or score_tos_url_by_path_specificity(ddg_url) > score_tos_url_by_path_specificity(best_url):
+                    best_url = ddg_url
+        except Exception as e:
+            print(f"Error in DuckDuckGo search: {e}")
+    
+    # If we found any results
+    if best_url:
+        # Extract the domain being searched for to check for domain match
+        search_domain = None
+        domain_match = re.search(r'^(\S+?)(?:\s|$)', search_query)
+        if domain_match:
+            search_domain = domain_match.group(1).lower()
+            # Clean up domain (remove https://, www., etc.)
+            search_domain = re.sub(r'^https?://(www\.)?', '', search_domain)
+            # Remove trailing slash and path
+            search_domain = search_domain.split('/')[0]
+            
+            # Extra verification for domain match
+            url_domain = urlparse(best_url).netloc.lower()
+            url_domain_clean = re.sub(r'^www\.', '', url_domain)
+            
+            # If the result domain doesn't match search domain at all, 
+            # but we're confident it's a ToS page, still return it
+            if search_domain and search_domain not in url_domain_clean:
+                tos_score = score_tos_url_by_path_specificity(best_url)
+                if tos_score < 70:  # If not very confident, log a warning
+                    print(f"Warning: Found ToS URL domain {url_domain_clean} doesn't match search domain {search_domain}")
+                    print(f"URL: {best_url}, ToS score: {tos_score}")
+                    # Still return it as we might not find anything better
+        
+        print(f"Best search result: {best_url}")
+        engines_used = ", ".join(search_results.keys())
+        print(f"Search engines used: {engines_used}")
+        
+        return best_url, search_results, []
+    
+    print("No results found from any search engine")
+    return None, {}, []
