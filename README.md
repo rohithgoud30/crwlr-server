@@ -174,6 +174,16 @@ The initialization process:
 3. Creates the `DocumentType` enum type for categorizing documents
 4. Creates all database tables with the correct relationships
 
+### Testing Database Connection
+
+To test your database connection, run:
+
+```bash
+python test_db_connection.py
+```
+
+This will attempt to connect to the database using your credentials and verify that the connection is working properly.
+
 ### Database Schema
 
 The database uses UUID primary keys and maintains proper relationships between tables:
@@ -195,7 +205,12 @@ app/
 │           ├── health.py    # Health check endpoint
 │           └── tos.py       # Terms of Service finder endpoint
 ├── core/
-│   └── config.py            # App configuration
+│   ├── config.py            # App configuration
+│   └── database.py          # Database configuration and schema
+├── models/                  # Pydantic models for API requests/responses
+│   ├── tos.py               # Terms of Service models
+│   ├── privacy.py           # Privacy policy models
+│   └── ...                  # Other data models
 └── main.py                  # Main application entry point
 ```
 

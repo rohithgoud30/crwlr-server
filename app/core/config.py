@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "CRWLR API"
     ENVIRONMENT: str = "development"
     
+    # Database settings
+    DB_USER: Optional[str] = None
+    DB_PASS: Optional[str] = None
+    DB_NAME: Optional[str] = None
+    DB_HOST: Optional[str] = None
+    DB_PORT: Optional[str] = "5432"
+    INSTANCE_CONNECTION_NAME: Optional[str] = None
+    
     # API Keys - try to get them directly from os.environ first, then from .env
     GEMINI_API_KEY: Optional[str] = None
     API_KEY: Optional[str] = None
