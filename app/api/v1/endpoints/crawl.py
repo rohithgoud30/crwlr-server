@@ -19,7 +19,7 @@ from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analy
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
-from app.core.database import documents, async_engine
+from app.core.database import documents, create_async_engine, get_connection_string
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
@@ -266,6 +266,14 @@ async def save_document_to_db(
                 serializable_text_mining = {"error": "Could not convert text mining metrics"}
                 logger.warning(f"Could not convert text mining metrics to dict: {type(analysis['text_mining'])}")
         
+        # Get database engine within the function context
+        logger.info("Attempting to get/create async database engine within save_document_to_db...")
+        db_engine = create_async_engine(get_connection_string()[1]) # Use async connection string
+        if not db_engine:
+            logger.error("Failed to create database engine within save_document_to_db.")
+            raise Exception("Database engine could not be initialized for saving.")
+        logger.info("Async database engine obtained/created within save_document_to_db.")
+
         # Check if a document with this URL already exists
         existing_doc = await document_crud.get_by_retrieved_url(original_url, document_type)
         
@@ -303,7 +311,7 @@ async def save_document_to_db(
             }
             
             # Explicit insert using SQLAlchemy Core
-            async with async_engine.begin() as conn:
+            async with db_engine.begin() as conn:
                 query = insert(documents).values(**document_values).returning(documents.c.id)
                 result = await conn.execute(query)
                 row = result.fetchone()
@@ -316,8 +324,19 @@ async def save_document_to_db(
         
         return document_id
     except Exception as e:
-        logger.error(f"Error saving document to database: {e}")
-        raise
+        # Log traceback for crawl_tos errors
+        logger.error(f"Error processing TOS crawl request: {e}", exc_info=True)
+        # Ensure response fields are set appropriately on error
+        response.success = False
+        response.message = f"Error processing request: {str(e)}"
+        response.one_sentence_summary = "Error"
+        response.hundred_word_summary = "Error"
+        response.word_frequencies = []
+        response.text_mining = TextMiningResults()
+        response.company_name = "Error"
+        response.logo_url = DEFAULT_LOGO_URL
+        response.document_id = None
+        return response
 
 async def find_tos_url(url: str) -> str:
     """
@@ -560,7 +579,8 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             
         return response
     except Exception as e:
-        logger.error(f"Error processing TOS crawl request: {e}")
+        # Log traceback for crawl_tos errors
+        logger.error(f"Error processing TOS crawl request: {e}", exc_info=True)
         # Ensure response fields are set appropriately on error
         response.success = False
         response.message = f"Error processing request: {str(e)}"
@@ -763,8 +783,8 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
 
         return response
     except Exception as e:
-        logger.error(f"Error processing Privacy Policy crawl request: {e}")
-        # Ensure response fields are set appropriately on error
+        # Log traceback for crawl_pp errors
+        logger.error(f"Error processing Privacy Policy crawl request: {e}", exc_info=True)
         response.success = False
         response.message = f"Error processing request: {str(e)}"
         response.one_sentence_summary = "Error"

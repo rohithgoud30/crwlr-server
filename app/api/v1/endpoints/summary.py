@@ -29,28 +29,31 @@ def clean_summary_text(text: str) -> str:
 
 def get_gemini_api_key():
     """
-    Get the Gemini API key from environment variables or settings.
-    Checks multiple possible environment variable names.
+    Get the Gemini API key from environment variables loaded via settings,
+    with a fallback to direct environment variable check during request.
     """
-    # First try settings
+    # Primary check: Rely on settings object
     api_key = settings.GEMINI_API_KEY
+    found_via_settings = bool(api_key)
     
-    # Then try various environment variable names
+    # ---> ADDED: Fallback check directly from os.environ during the request
     if not api_key:
-        for env_var in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_API_KEY"]:
-            api_key = os.environ.get(env_var)
-            if api_key:
-                logger.info(f"Found API key in environment variable: {env_var}")
-                break
-    
+        logger.warning("API Key not found via settings, attempting direct env var check...")
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            logger.info("Found API key via direct os.environ check.")
+        else:
+            logger.error("API Key not found via direct os.environ check either.")
+            
     # Log API key status (without revealing the key)
     if api_key:
-        logger.info("API key status: Available")
+        source = "settings" if found_via_settings else "direct env check"
+        logger.info(f"Gemini API Key found via {source}.")
         # Check for API key validity - minimum length and format
         if len(api_key) < 20:
             logger.warning("Gemini API key appears too short. Check for correct formatting.")
     else:
-        logger.error("Gemini API key not found in any environment variable or settings")
+        logger.error("Gemini API key NOT FOUND via settings or direct env check.")
     
     return api_key
 
@@ -225,7 +228,8 @@ Here is the document content:
                 
                 # Check if request was successful
                 if api_response.status_code != 200:
-                    error_msg = f"API request failed with status code {api_response.status_code}: {api_response.text}"
+                    error_detail = api_response.text
+                    error_msg = f"Gemini API request failed with status code {api_response.status_code}. Response: {error_detail}"
                     logger.error(error_msg)
                     
                     # Return with extraction success but failed summary
@@ -233,7 +237,7 @@ Here is the document content:
                         url=base_url,
                         document_type=document_type,
                         success=True,
-                        message=f"Text extraction succeeded but summarization failed: {error_msg[:200]}",
+                        message=f"Text extraction succeeded but summarization failed: Gemini API Error ({api_response.status_code})",
                         one_sentence_summary=None,
                         hundred_word_summary=None
                     )
