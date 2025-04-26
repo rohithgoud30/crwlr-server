@@ -57,5 +57,9 @@ COPY . .
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 
-# Run the application
-CMD ["python", "-u", "run.py"] 
+# Install Playwright browsers required by the application
+RUN python -m playwright install --with-deps
+
+# Command to run the application using Gunicorn
+# Use the standard port 8080 for Cloud Run
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--bind", "0.0.0.0:8080"] 

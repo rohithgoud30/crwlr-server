@@ -81,14 +81,18 @@ def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
                 async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
                 logger.info(f"Using asyncpg for local development with Cloud SQL proxy at {host}:{port}")
             else:
-                # For cloud environments we still use asyncpg but with cloud credentials
-                # This is not optimal but will work around the limitations for now
-                host = "127.0.0.1"  # Will be replaced by proxy in cloud
-                port = "5432"
+                # For cloud environments, use Unix socket with asyncpg
                 user = settings.DB_USER or "postgres" 
                 password = settings.DB_PASS or ""
                 dbname = settings.DB_NAME or "postgres"
-                async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
+                
+                # Construct the Cloud SQL Unix socket path
+                socket_path = f"/cloudsql/{settings.INSTANCE_CONNECTION_NAME}"
+                
+                # Use the Unix socket connection string format for asyncpg
+                async_connection_string = f"postgresql+asyncpg://{user}:{password}@/{dbname}?host={socket_path}"
+                
+                logger.info(f"Using Unix socket connection to Cloud SQL: {socket_path}")
             
             logger.info(f"Connected to Cloud SQL instance: {settings.INSTANCE_CONNECTION_NAME}")
             return connection_string, async_connection_string, getconn
@@ -146,7 +150,7 @@ try:
         echo=False,
         pool_size=5,
         max_overflow=10,
-        pool_timeout=30,
+        pool_timeout=60,  # Increase timeout to 60 seconds
         pool_recycle=1800,
     )
     

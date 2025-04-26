@@ -268,14 +268,31 @@ async def save_document_to_db(
         
         # Get database engine within the function context
         logger.info("Attempting to get/create async database engine within save_document_to_db...")
-        db_engine = create_async_engine(get_connection_string()[1]) # Use async connection string
+        connection_str, async_connection_str, _ = get_connection_string()
+        logger.info(f"Using async connection string pattern: {async_connection_str.split('@')[0]}@.../{async_connection_str.split('/')[-1]}")
+
+        # Create async engine with increased timeout
+        db_engine = create_async_engine(
+            async_connection_str,
+            echo=False,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=120,  # Increase timeout to 120 seconds for database operations
+            pool_pre_ping=True,  # Check connection before use
+            pool_recycle=1800,
+        )
+        
         if not db_engine:
             logger.error("Failed to create database engine within save_document_to_db.")
             raise Exception("Database engine could not be initialized for saving.")
         logger.info("Async database engine obtained/created within save_document_to_db.")
 
         # Check if a document with this URL already exists
-        existing_doc = await document_crud.get_by_retrieved_url(original_url, document_type)
+        try:
+            existing_doc = await document_crud.get_by_retrieved_url(original_url, document_type)
+        except asyncio.TimeoutError:
+            logger.error("Database query timed out when checking for existing document.")
+            raise Exception("Database connection timed out. Please check your database instance and configuration.")
         
         if existing_doc:
             logger.info(f"Document with URL {original_url} already exists. Using existing document.")
@@ -310,22 +327,26 @@ async def save_document_to_db(
                 "views": 0
             }
             
-            # Explicit insert using SQLAlchemy Core
-            async with db_engine.begin() as conn:
-                query = insert(documents).values(**document_values).returning(documents.c.id)
-                result = await conn.execute(query)
-                row = result.fetchone()
-                if row:
-                    document_id = row[0]
-                else:
-                    # This case should ideally not happen if insertion was successful
-                    logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url}")
-                    raise Exception("Failed to create document in database")
+            # Explicit insert using SQLAlchemy Core with timeout handling
+            try:
+                async with db_engine.begin() as conn:
+                    query = insert(documents).values(**document_values).returning(documents.c.id)
+                    result = await conn.execute(query)
+                    row = result.fetchone()
+                    if row:
+                        document_id = row[0]
+                    else:
+                        # This case should ideally not happen if insertion was successful
+                        logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url}")
+                        raise Exception("Failed to create document in database")
+            except asyncio.TimeoutError:
+                logger.error("Database insert operation timed out.")
+                raise Exception("Database connection timed out during insert. Please check your database instance and configuration.")
         
         return document_id
     except Exception as e:
         # Log traceback for crawl_tos errors
-        logger.error(f"Error processing TOS crawl request: {e}", exc_info=True)
+        logger.error(f"Error saving document to database: {e}", exc_info=True)
         raise # Re-raise the exception to be handled by the caller
 
 async def find_tos_url(url: str) -> str:
