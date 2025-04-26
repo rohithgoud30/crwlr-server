@@ -39,7 +39,7 @@ steps:
       - '--service-account'
       - '${_SERVICE_ACCOUNT}'
       - '--set-env-vars'
-      - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY},BRANCH_NAME=${BRANCH_NAME},ENVIRONMENT=production,NO_PROXY=true'
+      - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY},BRANCH_NAME=${BRANCH_NAME},ENVIRONMENT=production'
 
   # Update the Cloud Run service to set API_KEY separately for better security
   # Using a secure secret instead of hardcoding the API key

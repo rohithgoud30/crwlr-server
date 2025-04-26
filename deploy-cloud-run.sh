@@ -61,7 +61,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --max-instances=10 \
   --concurrency=50 \
   --timeout=10m \
-  --set-env-vars="ENV=production,PROJECT_ID=${PROJECT_ID},BRANCH_NAME=${BRANCH_NAME},GEMINI_API_KEY=${GEMINI_API_KEY},NO_PROXY=true" \
+  --set-env-vars="ENV=production,PROJECT_ID=${PROJECT_ID},BRANCH_NAME=${BRANCH_NAME},GEMINI_API_KEY=${GEMINI_API_KEY}" \
   --port=8000 \
   --cpu-throttling
 
