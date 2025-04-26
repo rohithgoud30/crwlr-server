@@ -52,7 +52,8 @@ RUN python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
 
 # Install Playwright and browsers
 RUN pip install playwright && \
-    playwright install chromium --with-deps
+    playwright install chromium --with-deps && \
+    playwright install-deps chromium # Make sure all system dependencies are installed
 
 # Copy application code
 COPY . .
@@ -64,7 +65,7 @@ ENV DEBUG=pw:api,pw:browser*
 
 # Playwright-specific environment variables for containerized environment
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+# ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1  # Remove or comment out this line
 ENV PLAYWRIGHT_HEADLESS=true
 
 # Run the application using run.py which handles environment variables
