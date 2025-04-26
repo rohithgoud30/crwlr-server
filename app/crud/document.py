@@ -19,7 +19,7 @@ class CRUDDocument(CRUDBase):
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
-                return dict(row)
+                return dict(row._mapping)
             return None
     
     async def get_by_retrieved_url(self, retrieved_url: str, document_type: Literal["tos", "pp"]) -> Optional[Dict[str, Any]]:
@@ -32,7 +32,7 @@ class CRUDDocument(CRUDBase):
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
-                return dict(row)
+                return dict(row._mapping)
             return None
     
     async def increment_views(self, id: UUID) -> Optional[Dict[str, Any]]:
@@ -47,7 +47,7 @@ class CRUDDocument(CRUDBase):
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
-                return dict(row)
+                return dict(row._mapping)
             return None
     
     async def search_documents(
@@ -145,7 +145,7 @@ class CRUDDocument(CRUDBase):
             # Execute query
             result = await conn.execute(base_query, params)
             rows = result.fetchall()
-            items = [dict(row) for row in rows]
+            items = [dict(row._mapping) for row in rows]
             
             # Calculate pagination info
             total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 0
@@ -204,7 +204,7 @@ class CRUDDocument(CRUDBase):
             
             # Execute query
             result = await conn.execute(query)
-            items = [dict(row) for row in result.fetchall()]
+            items = [dict(row._mapping) for row in result.fetchall()]
             
             # Calculate pagination info
             total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 0
