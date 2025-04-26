@@ -4,6 +4,9 @@ from fastapi.responses import RedirectResponse, JSONResponse
 import os
 import logging
 
+# Import the API routers
+from app.api.v1.api import api_router, test_router
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +29,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include the API routers
+app.include_router(api_router, prefix="/api/v1")
+app.include_router(test_router, prefix="/api/test")
 
 # Add a health check endpoint
 @app.get("/health", include_in_schema=False)
