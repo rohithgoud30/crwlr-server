@@ -544,11 +544,14 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             except Exception as e:
                 logger.error(f"Error saving document to database: {e}")
                 # Update response message if saving fails, but keep success=True as analysis was done
+                # Set success to False if saving fails, as per stricter requirement
+                response.success = False
                 response.message = "Successfully crawled and analyzed, but failed to save document."
         else:
             logger.warning("One or more analyses failed. Document will not be saved to database.")
-            response.success = True # Still counts as successful crawl/analysis attempt
-            response.message = "Crawled and analyzed terms of service, but some analyses failed; document not saved."
+            # Set overall success to False if any analysis failed
+            response.success = False 
+            response.message = "Crawled and extracted successfully, but one or more analyses failed."
             # Ensure document_id is None if not saved
             response.document_id = None
             
@@ -745,11 +748,13 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             except Exception as e:
                 logger.error(f"Error saving document to database: {e}")
                 # Update response message if saving fails, but keep success=True as analysis was done
+                response.success = False
                 response.message = "Successfully crawled and analyzed, but failed to save document."
         else:
             logger.warning("One or more analyses failed. Document will not be saved to database.")
-            response.success = True # Still counts as successful crawl/analysis attempt
-            response.message = "Crawled and analyzed privacy policy, but some analyses failed; document not saved."
+            # Set overall success to False if any analysis failed
+            response.success = False 
+            response.message = "Crawled and extracted successfully, but one or more analyses failed."
             # Ensure document_id is None if not saved
             response.document_id = None
 

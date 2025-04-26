@@ -244,7 +244,7 @@ def is_likely_user_generated_content(url):
 @router.post("/tos", response_model=ToSResponse, status_code=status.HTTP_200_OK)
 async def find_tos(request: ToSRequest) -> ToSResponse:
     """
-    Endpoint to find the ToS url for a given website.
+    Find the Terms of Service URL for a given website.
     """
     logger.info(f"Finding ToS for URL: {request.url}")
     url = sanitize_url(request.url)
@@ -315,283 +315,320 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
                 method_used="app_store_no_privacy_policy"
             )
     
-    # Try to setup browser if needed for subsequent operations
-    playwright = await async_playwright().start()
-    browser, browser_context, page, _ = await setup_browser(playwright)
+    playwright = None
+    browser = None
+    browser_context = None
+    page = None
     
-    # Navigate to the URL - notice we don't exit but continue with recovery methods
-    success, _, _ = await navigate_with_retry(page, url)
-    if not success:
-        logger.warning(f"Main site navigation had issues, but trying to analyze current page...")
-        
-        # We don't exit here with failure, we instead try other methods
-        # Try JS scanning approaches, then search engine fallbacks
-        
-        # First check for anti-bot patterns to log the reason
-        anti_bot_detected = await detect_anti_bot_patterns(page)
-        if anti_bot_detected:
-            logger.warning(f"Anti-bot protection detected. Will attempt search fallbacks.")
-        
-        # Try our search engine fallbacks instead of directly returning failure
-        unverified_result = None  # Will hold our best guess if we find one
-        
-        # Initialize a fresh page if possible for search fallbacks
-        try:
-            await page.close()
-            page = await browser_context.new_page()
-        except Exception as e:
-            logger.warning(f"Error creating new page for search fallbacks: {e}")
-        
-        # Domain-focused search approach
-        try:
-            # Extract clean domain name for search
-            domain = normalize_domain(url)
-            domain_name = domain.replace("www.", "")
-            
-            # Construct a proper search query
-            search_query = f"{domain_name} terms of service, terms of use, user agreement, legal terms"
-            logger.info(f"Using search query: {search_query}")
-            
-            # Try duckduckgo search first
-            logger.info(f"Trying DuckDuckGo search fallback for {domain_name}")
-            duck_result = await duckduckgo_search_fallback(search_query, page)
-            
-            if duck_result:
-                logger.info(f"Found terms of service via DuckDuckGo search: {duck_result}")
-                return ToSResponse(
-                    url=url,
-                    tos_url=duck_result,
-                    success=True,
-                    message="Terms of Service found via DuckDuckGo search (after navigation issues)",
-                    method_used="duckduckgo_search_fallback"
-                )
-            
-            # Try Yahoo search next
-            logger.info(f"Trying Yahoo search fallback for {domain_name}")
-            yahoo_result = await yahoo_search_fallback(search_query, page)
-            
-            if yahoo_result:
-                logger.info(f"Found terms of service via Yahoo search: {yahoo_result}")
-                return ToSResponse(
-                    url=url,
-                    tos_url=yahoo_result,
-                    success=True,
-                    message="Terms of Service found via Yahoo search (after navigation issues)",
-                    method_used="yahoo_search_fallback"
-                )
-            
-            # Try Bing search as last resort
-            logger.info(f"Trying Bing search fallback for {domain_name}")
-            bing_result = await bing_search_fallback(search_query, page)
-            
-            if bing_result:
-                logger.info(f"Found terms of service via Bing search: {bing_result}")
-                return ToSResponse(
-                    url=url,
-                    tos_url=bing_result,
-                    success=True,
-                    message="Terms of Service found via Bing search (after navigation issues)",
-                    method_used="bing_search_fallback"
-                )
-            
-            # All search methods failed, return failure
-            logger.warning(f"All search fallbacks failed for {domain_name}")
-            return ToSResponse(
-                url=url,
-                tos_url=None,
-                success=False,
-                message="Navigation failed and all search fallbacks exhausted",
-                method_used="all_search_failed"
-            )
-            
-        except Exception as e:
-            logger.error(f"Error during search fallbacks: {e}")
-            return ToSResponse(
-                url=url,
-                tos_url=None,
-                success=False,
-                message=f"Navigation failed and search fallbacks encountered error: {str(e)}",
-                method_used="search_fallback_error"
-            )
-            
-    # Successfully navigated to the page, now analyze it for ToS links
-    logger.info("Successfully navigated to page, analyzing...")
-    
-    # Check if there are "user" or "customer" specific terms links that we should prioritize
     try:
-        user_agreement_url = await find_user_customer_terms_links(page)
-        if user_agreement_url:
-            if is_likely_user_generated_content(user_agreement_url):
-                logger.warning(f"Found user agreement URL appears to be user-generated content: {user_agreement_url}")
-                # Don't return this result, continue to other methods
-            else:
-                logger.info(f"Found high-priority user/customer terms: {user_agreement_url}")
-                # Return immediately if found - priority link
+        # Try to setup browser if needed for subsequent operations
+        playwright = await async_playwright().start()
+        browser, browser_context, page, _ = await setup_browser(playwright)
+        
+        # Navigate to the URL - notice we don't exit but continue with recovery methods
+        success, _, _ = await navigate_with_retry(page, url)
+        if not success:
+            logger.warning(f"Main site navigation had issues, but trying to analyze current page...")
+            
+            # We don't exit here with failure, we instead try other methods
+            # Try JS scanning approaches, then search engine fallbacks
+            
+            # First check for anti-bot patterns to log the reason
+            anti_bot_detected = await detect_anti_bot_patterns(page)
+            if anti_bot_detected:
+                logger.warning(f"Anti-bot protection detected. Will attempt search fallbacks.")
+            
+            # Try our search engine fallbacks instead of directly returning failure
+            unverified_result = None  # Will hold our best guess if we find one
+            
+            # Initialize a fresh page if possible for search fallbacks
+            try:
+                await page.close()
+                page = await browser_context.new_page()
+            except Exception as e:
+                logger.warning(f"Error creating new page for search fallbacks: {e}")
+            
+            # Domain-focused search approach
+            try:
+                # Extract clean domain name for search
+                domain = normalize_domain(url)
+                domain_name = domain.replace("www.", "")
+                
+                # Construct a proper search query
+                search_query = f"{domain_name} terms of service, terms of use, user agreement, legal terms"
+                logger.info(f"Using search query: {search_query}")
+                
+                # Try duckduckgo search first
+                logger.info(f"Trying DuckDuckGo search fallback for {domain_name}")
+                duck_result = await duckduckgo_search_fallback(search_query, page)
+                
+                if duck_result:
+                    logger.info(f"Found terms of service via DuckDuckGo search: {duck_result}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=duck_result,
+                        success=True,
+                        message="Terms of Service found via DuckDuckGo search (after navigation issues)",
+                        method_used="duckduckgo_search_fallback"
+                    )
+                
+                # Try Yahoo search next
+                logger.info(f"Trying Yahoo search fallback for {domain_name}")
+                yahoo_result = await yahoo_search_fallback(search_query, page)
+                
+                if yahoo_result:
+                    logger.info(f"Found terms of service via Yahoo search: {yahoo_result}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=yahoo_result,
+                        success=True,
+                        message="Terms of Service found via Yahoo search (after navigation issues)",
+                        method_used="yahoo_search_fallback"
+                    )
+                
+                # Try Bing search as last resort
+                logger.info(f"Trying Bing search fallback for {domain_name}")
+                bing_result = await bing_search_fallback(search_query, page)
+                
+                if bing_result:
+                    logger.info(f"Found terms of service via Bing search: {bing_result}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=bing_result,
+                        success=True,
+                        message="Terms of Service found via Bing search (after navigation issues)",
+                        method_used="bing_search_fallback"
+                    )
+                
+                # All search methods failed, return failure
+                logger.warning(f"All search fallbacks failed for {domain_name}")
                 return ToSResponse(
                     url=url,
-                    tos_url=user_agreement_url,
-                    success=True,
-                    message="User agreement/terms found with high priority",
-                    method_used="user_customer_terms"
+                    tos_url=None,
+                    success=False,
+                    message="Navigation failed and all search fallbacks exhausted",
+                    method_used="all_search_failed"
                 )
-    except Exception as e:
-        logger.error(f"Error finding user/customer terms: {e}")
-    
-    # Try more comprehensive link scanning
-    logger.info("Scanning for ToS links...")
-    unverified_result = None
-    
-    # Step a: Try JS-based scanning first (key change - prioritize JS methods)
-    try:
-        tos_url = await find_all_links_js(page, browser_context)
-        if tos_url:
-            if is_likely_user_generated_content(tos_url):
-                logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
-                # Save as unverified but continue looking for better results
-                unverified_result = tos_url
-            else:
-                logger.info(f"Found ToS via JS-based link scanning: {tos_url}")
-                # Return as final result without further validation
+                
+            except Exception as e:
+                logger.error(f"Error during search fallbacks: {e}")
                 return ToSResponse(
                     url=url,
-                    tos_url=tos_url,
-                    success=True,
-                    message="Terms of Service found via JS-based link scanning",
-                    method_used="js_link_scanning"
+                    tos_url=None,
+                    success=False,
+                    message=f"Navigation failed and search fallbacks encountered error: {str(e)}",
+                    method_used="search_fallback_error"
                 )
-    except Exception as e:
-        logger.error(f"Error during JS-based link scanning: {e}")
+                
+        # Successfully navigated to the page, now analyze it for ToS links
+        logger.info("Successfully navigated to page, analyzing...")
+        
+        # Check if there are "user" or "customer" specific terms links that we should prioritize
+        try:
+            user_agreement_url = await find_user_customer_terms_links(page)
+            if user_agreement_url:
+                if is_likely_user_generated_content(user_agreement_url):
+                    logger.warning(f"Found user agreement URL appears to be user-generated content: {user_agreement_url}")
+                    # Don't return this result, continue to other methods
+                else:
+                    logger.info(f"Found high-priority user/customer terms: {user_agreement_url}")
+                    # Return immediately if found - priority link
+                    return ToSResponse(
+                        url=url,
+                        tos_url=user_agreement_url,
+                        success=True,
+                        message="User agreement/terms found with high priority",
+                        method_used="user_customer_terms"
+                    )
+        except Exception as e:
+            logger.error(f"Error finding user/customer terms: {e}")
+        
+        # Try more comprehensive link scanning
+        logger.info("Scanning for ToS links...")
+        unverified_result = None
+        
+        # Step a: Try JS-based scanning first (key change - prioritize JS methods)
+        try:
+            tos_url = await find_all_links_js(page, browser_context)
+            if tos_url:
+                if is_likely_user_generated_content(tos_url):
+                    logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                    # Save as unverified but continue looking for better results
+                    unverified_result = tos_url
+                else:
+                    logger.info(f"Found ToS via JS-based link scanning: {tos_url}")
+                    # Return as final result without further validation
+                    return ToSResponse(
+                        url=url,
+                        tos_url=tos_url,
+                        success=True,
+                        message="Terms of Service found via JS-based link scanning",
+                        method_used="js_link_scanning"
+                    )
+        except Exception as e:
+            logger.error(f"Error during JS-based link scanning: {e}")
 
-    # Step b: Try matching links based on text
-    try:
-        tos_url = await find_matching_link(page, browser_context, unverified_result)
-        if tos_url:
-            if is_likely_user_generated_content(tos_url):
-                logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
-                # Save as unverified but continue looking for better results
-                if not unverified_result:
-                    unverified_result = tos_url
-            else:
-                logger.info(f"Found ToS via text matching: {tos_url}")
-                # Return as final result without further validation
-                return ToSResponse(
-                    url=url,
-                    tos_url=tos_url,
-                    success=True,
-                    message="Terms of Service found via text match scanning",
-                    method_used="text_matching"
-                )
-    except Exception as e:
-        logger.error(f"Error during text matching: {e}")
-    
-    # If navigation failed or no TOS found with direct methods, try search fallbacks
-    domain = normalize_domain(url)
-    logger.info(f"Trying search engine fallbacks for domain: {domain}")
-    
-    # Construct a proper search query
-    search_query = f"{domain} terms of service, terms of use, user agreement, legal terms"
-    logger.info(f"Using search query: {search_query}")
-    
-    # Use the standard search approach across search engines
-    try:
-        logger.info("Running standard search using search engines...")
-        tos_url, search_results, consensus_links = await standard_search_fallback(search_query, page)
+        # Step b: Try matching links based on text
+        try:
+            tos_url = await find_matching_link(page, browser_context, unverified_result)
+            if tos_url:
+                if is_likely_user_generated_content(tos_url):
+                    logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                    # Save as unverified but continue looking for better results
+                    if not unverified_result:
+                        unverified_result = tos_url
+                else:
+                    logger.info(f"Found ToS via text matching: {tos_url}")
+                    # Return as final result without further validation
+                    return ToSResponse(
+                        url=url,
+                        tos_url=tos_url,
+                        success=True,
+                        message="Terms of Service found via text match scanning",
+                        method_used="text_matching"
+                    )
+        except Exception as e:
+            logger.error(f"Error during text matching: {e}")
         
-        if tos_url:
-            # Validate the ToS URL isn't a user content page
-            if is_likely_user_generated_content(tos_url):
-                logger.warning(f"Search result appears to be user-generated content: {tos_url}")
-                # Continue to other methods
-            else:
-                # Get engines used for better logging
-                engines_found = list(search_results.keys())
-                engines_msg = f"Found by search engines: {', '.join(engines_found)}" if engines_found else ""
-                
-                logger.info(f"Found ToS via search: {tos_url} {engines_msg}")
-                # Return as final result without further validation
-                return ToSResponse(
-                    url=url,
-                    tos_url=tos_url,
-                    success=True,
-                    message=f"Terms of Service found via search {engines_msg}",
-                    method_used="search_engine"
-                )
-    except Exception as e:
-        logger.warning(f"Search failed: {e}")
-    
-    # Step 3: Try analysis of the landing page itself
-    try:
-        tos_url = await analyze_landing_page(page, browser_context, unverified_result)
-        if tos_url:
-            if is_likely_user_generated_content(tos_url):
-                logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
-                # Save as unverified but continue looking for better results
-                if not unverified_result:
-                    unverified_result = tos_url
-            else:
-                logger.info(f"Found ToS via landing page analysis: {tos_url}")
-                return ToSResponse(
-                    url=url,
-                    tos_url=tos_url,
-                    success=True,
-                    message="Terms of Service found via landing page analysis",
-                    method_used="landing_page_analysis"
-                )
-    except Exception as e:
-        logger.error(f"Error during landing page analysis: {e}")
-    
-    # Step 4: If a verified privacy policy page exists, try to find ToS from there
-    try:
-        privacy_request = PrivacyRequest(url=url)
-        privacy_response = await find_privacy_policy(privacy_request)
+        # If navigation failed or no TOS found with direct methods, try search fallbacks
+        domain = normalize_domain(url)
+        logger.info(f"Trying search engine fallbacks for domain: {domain}")
         
-        if privacy_response and privacy_response.pp_url:
-            logger.info(f"Found privacy policy: {privacy_response.pp_url}. Checking for ToS link...")
+        # Construct a proper search query
+        search_query = f"{domain} terms of service, terms of use, user agreement, legal terms"
+        logger.info(f"Using search query: {search_query}")
+        
+        # Use the standard search approach across search engines
+        try:
+            logger.info("Running standard search using search engines...")
+            tos_url, search_results, consensus_links = await standard_search_fallback(search_query, page)
             
-            # Navigate to the privacy policy
-            pp_success, _, _ = await navigate_with_retry(page, privacy_response.pp_url)
+            if tos_url:
+                # Validate the ToS URL isn't a user content page
+                if is_likely_user_generated_content(tos_url):
+                    logger.warning(f"Search result appears to be user-generated content: {tos_url}")
+                    # Continue to other methods
+                else:
+                    # Get engines used for better logging
+                    engines_found = list(search_results.keys())
+                    engines_msg = f"Found by search engines: {', '.join(engines_found)}" if engines_found else ""
+                    
+                    logger.info(f"Found ToS via search: {tos_url} {engines_msg}")
+                    # Return as final result without further validation
+                    return ToSResponse(
+                        url=url,
+                        tos_url=tos_url,
+                        success=True,
+                        message=f"Terms of Service found via search {engines_msg}",
+                        method_used="search_engine"
+                    )
+        except Exception as e:
+            logger.warning(f"Search failed: {e}")
+        
+        # Step 3: Try analysis of the landing page itself
+        try:
+            tos_url = await analyze_landing_page(page, browser_context, unverified_result)
+            if tos_url:
+                if is_likely_user_generated_content(tos_url):
+                    logger.warning(f"Found ToS URL appears to be user-generated content: {tos_url}")
+                    # Save as unverified but continue looking for better results
+                    if not unverified_result:
+                        unverified_result = tos_url
+                else:
+                    logger.info(f"Found ToS via landing page analysis: {tos_url}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=tos_url,
+                        success=True,
+                        message="Terms of Service found via landing page analysis",
+                        method_used="landing_page_analysis"
+                    )
+        except Exception as e:
+            logger.error(f"Error during landing page analysis: {e}")
+        
+        # Step 4: If a verified privacy policy page exists, try to find ToS from there
+        try:
+            privacy_request = PrivacyRequest(url=url)
+            privacy_response = await find_privacy_policy(privacy_request)
             
-            if pp_success:
-                # Look for ToS link on the privacy policy page
-                tos_url = await find_tos_via_privacy_policy(page, browser_context)
+            if privacy_response and privacy_response.pp_url:
+                logger.info(f"Found privacy policy: {privacy_response.pp_url}. Checking for ToS link...")
                 
-                if tos_url:
-                    if is_likely_user_generated_content(tos_url):
-                        logger.warning(f"ToS URL from privacy policy appears to be user content: {tos_url}")
-                        # Save as unverified but continue looking for better results
-                        if not unverified_result:
-                            unverified_result = tos_url
-                    else:
-                        logger.info(f"Found ToS via privacy policy: {tos_url}")
-                        return ToSResponse(
-                            url=url,
-                            tos_url=tos_url,
-                            success=True,
-                            message="Terms of Service found from privacy policy page",
-                            method_used="via_privacy_policy"
-                        )
-    except Exception as e:
-        logger.error(f"Error finding ToS via privacy policy: {e}")
-    
-    # Step 5: If we have an unverified result but no better options, return it
-    if unverified_result:
-        logger.info(f"Using unverified ToS URL as fallback: {unverified_result}")
+                # Navigate to the privacy policy
+                pp_success, _, _ = await navigate_with_retry(page, privacy_response.pp_url)
+                
+                if pp_success:
+                    # Look for ToS link on the privacy policy page
+                    tos_url = await find_tos_via_privacy_policy(page, browser_context)
+                    
+                    if tos_url:
+                        if is_likely_user_generated_content(tos_url):
+                            logger.warning(f"ToS URL from privacy policy appears to be user content: {tos_url}")
+                            # Save as unverified but continue looking for better results
+                            if not unverified_result:
+                                unverified_result = tos_url
+                        else:
+                            logger.info(f"Found ToS via privacy policy: {tos_url}")
+                            return ToSResponse(
+                                url=url,
+                                tos_url=tos_url,
+                                success=True,
+                                message="Terms of Service found from privacy policy page",
+                                method_used="via_privacy_policy"
+                            )
+        except Exception as e:
+            logger.error(f"Error finding ToS via privacy policy: {e}")
+        
+        # Step 5: If we have an unverified result but no better options, return it
+        if unverified_result:
+            logger.info(f"Using unverified ToS URL as fallback: {unverified_result}")
+            return ToSResponse(
+                url=url,
+                tos_url=unverified_result,
+                success=True,
+                message="Terms of Service found (unverified, possible user content)",
+                method_used="unverified_result"
+            )
+        
+        # All methods failed
         return ToSResponse(
             url=url,
-            tos_url=unverified_result,
-            success=True,
-            message="Terms of Service found (unverified, possible user content)",
-            method_used="unverified_result"
+            tos_url=None,
+            success=False,
+            message="Could not find Terms of Service via any method",
+            method_used="all_methods_failed"
         )
-    
-    # All methods failed
-    return ToSResponse(
-        url=url,
-        tos_url=None,
-        success=False,
-        message="Could not find Terms of Service via any method",
-        method_used="all_methods_failed"
-    )
+    except Exception as e:
+        logger.error(f"Error during browser automation: {e}")
+        return handle_error(url, None, str(e))
+    finally:
+        # Always ensure browser resources are cleaned up to prevent leaks
+        try:
+            if page:
+                try:
+                    await page.close()
+                except Exception as e:
+                    logger.error(f"Error closing page: {e}")
+                    
+            if browser_context:
+                try:
+                    await browser_context.close()
+                except Exception as e:
+                    logger.error(f"Error closing browser context: {e}")
+                    
+            if browser:
+                try:
+                    await browser.close()
+                except Exception as e:
+                    logger.error(f"Error closing browser: {e}")
+                    
+            if playwright:
+                try:
+                    await playwright.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping playwright: {e}")
+        except Exception as cleanup_error:
+            logger.error(f"Error during browser cleanup: {cleanup_error}")
 
 
 async def setup_browser(playwright=None):

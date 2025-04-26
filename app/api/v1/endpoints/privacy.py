@@ -763,6 +763,8 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
     
     playwright = None
     browser = None
+    browser_context = None
+    page = None
     
     try:
         # Validate and normalize URL
@@ -1633,16 +1635,33 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         print(f"Error during browser automation: {e}")
         return handle_error(url, None, str(e))
     finally:
-        if browser:
-            try:
-                await browser.close()
-            except Exception as e:
-                print(f"Error closing browser: {e}")
-        if playwright:
-            try:
-                await playwright.stop()
-            except Exception as e:
-                print(f"Error stopping playwright: {e}")
+        # Always close the browser resources to prevent leaks
+        try:
+            if page:
+                try:
+                    await page.close()
+                except Exception as e:
+                    print(f"Error closing page: {e}")
+                    
+            if browser_context:
+                try:
+                    await browser_context.close()
+                except Exception as e:
+                    print(f"Error closing browser context: {e}")
+                    
+            if browser:
+                try:
+                    await browser.close()
+                except Exception as e:
+                    print(f"Error closing browser: {e}")
+                    
+            if playwright:
+                try:
+                    await playwright.stop()
+                except Exception as e:
+                    print(f"Error stopping playwright: {e}")
+        except Exception as cleanup_error:
+            print(f"Error during browser cleanup: {cleanup_error}")
 
 
 async def setup_browser(playwright=None):
