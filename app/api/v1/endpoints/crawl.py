@@ -326,17 +326,7 @@ async def save_document_to_db(
     except Exception as e:
         # Log traceback for crawl_tos errors
         logger.error(f"Error processing TOS crawl request: {e}", exc_info=True)
-        # Ensure response fields are set appropriately on error
-        response.success = False
-        response.message = f"Error processing request: {str(e)}"
-        response.one_sentence_summary = "Error"
-        response.hundred_word_summary = "Error"
-        response.word_frequencies = []
-        response.text_mining = TextMiningResults()
-        response.company_name = "Error"
-        response.logo_url = DEFAULT_LOGO_URL
-        response.document_id = None
-        return response
+        raise # Re-raise the exception to be handled by the caller
 
 async def find_tos_url(url: str) -> str:
     """
