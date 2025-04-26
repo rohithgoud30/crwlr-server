@@ -4050,6 +4050,11 @@ async def find_tos_via_html_inspection(url: str) -> str:
         logger.error(f"Error during HTML inspection: {e}")
         return None
 
+    # Initialize variables to prevent undefined name errors
+    url_analysis = []  # Or appropriate default like {} or None
+    normalized_results = {} # Or appropriate default
+    all_results = {} # Or appropriate default
+
     # Sort URLs by final score
     url_analysis.sort(key=lambda x: x['final_score'], reverse=True)
     
