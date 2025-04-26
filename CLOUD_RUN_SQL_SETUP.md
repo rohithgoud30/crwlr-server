@@ -85,3 +85,11 @@ If you encounter issues:
 2. Verify the Cloud SQL instance is in the same region as your Cloud Run service
 3. Confirm the service account has the necessary permissions
 4. Make sure the Cloud SQL instance name in your environment matches the one in GCP
+
+## Commit Changes
+
+Once all changes are applied, commit them with:
+
+```bash
+git commit -m "Feat(deploy): configure Cloud Run deployment with Cloud SQL Unix socket connection"
+```
