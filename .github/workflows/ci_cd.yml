@@ -81,4 +81,8 @@ jobs:
             --max-instances 100 \
             --allow-unauthenticated \
             --service-account github-actions-deployer@crwlr-server.iam.gserviceaccount.com \
-            --set-env-vars "PROJECT_ID=crwlr-server,BRANCH_NAME=${GITHUB_REF##*/}"
+            --set-env-vars "PROJECT_ID=crwlr-server,BRANCH_NAME=${GITHUB_REF##*/},ENVIRONMENT=production,DB_USER=${{ secrets.DB_USER }},DB_PASS=${{ secrets.DB_PASS }},DB_NAME=${{ secrets.DB_NAME }},DB_HOST=${{ secrets.DB_HOST }},INSTANCE_CONNECTION_NAME=${{ secrets.INSTANCE_CONNECTION_NAME }}" \
+            --add-cloudsql-instances=${{ secrets.INSTANCE_CONNECTION_NAME }} \
+            --port 8080 \
+            --startup-probe-path /health \
+            --startup-probe-initial-delay 60s
