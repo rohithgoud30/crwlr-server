@@ -115,9 +115,9 @@ async def setup_stealth_browser():
     """Setup Playwright browser with anti-detection measures"""
     playwright = await async_playwright().start()
     
-    # Launch with realistic viewport and non-headless mode (but we'll override below for production)
+    # Launch with realistic viewport and headless mode for production environment
     browser = await playwright.chromium.launch(
-        headless=False,  # Will be overridden to True in production
+        headless=True,  # Use headless for production
     )
     
     # Create a context with realistic viewport and device settings
