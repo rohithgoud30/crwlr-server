@@ -16,6 +16,7 @@ from functools import lru_cache
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
 from fake_useragent import UserAgent
 import os
+import sys
 
 # Fixed version with improved resource management and error handling
 
@@ -725,6 +726,19 @@ async def extract_with_playwright(
     url: str, doc_type: str, ret_url: str
 ) -> ExtractResponse:
     """Extract content using Playwright with improved waiting and interaction."""
+    # ---> ADDED: Log entry into this function
+    logger.info(f"Entering extract_with_playwright for {url}")
+    logging.getLogger().handlers[0].flush()
+
+    if not auth_manager.startup_complete: # Check if startup finished
+        logger.error(
+            "Playwright startup never completed or failed. Cannot extract."
+        )
+        # Log the specific startup failure if it exists
+        if auth_manager.startup_failure:
+             logger.error(f"Startup failure reason: {auth_manager.startup_failure}")
+        raise Exception("Playwright browser not initialized or startup failed")
+    
     if not auth_manager.context:
         logger.warning(
             "Playwright context not initialized - browser might not be started"
@@ -857,6 +871,10 @@ async def extract_with_playwright(
 
 @router.post("/extract", response_model=ExtractResponse)
 async def extract_text(request: ExtractRequest, response: Response) -> ExtractResponse:
+    # ---> ADDED: Log entry point immediately
+    logger.info(f"Received extraction request for URL: {request.url}, Type: {request.document_type}")
+    logging.getLogger().handlers[0].flush() # Attempt to flush immediately
+
     orig = request.url
     url = sanitize_url(orig)
     if not url:
@@ -942,23 +960,46 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
 
     tasks = []
     if is_pdf_url(url):
+        logger.info(f"Detected PDF URL, creating PDF extraction task for {url}")
         tasks.append(asyncio.create_task(extract_pdf(url, doc_type, url)))
     else:
         if use_playwright_first:
             # Try Playwright first for JS-heavy sites
             logger.info(f"Using Playwright as primary extraction method for {url}")
-            if auth_manager.context:  # Only if browser is initialized
+            # ---> ADDED: Log before potentially creating Playwright task
+            if auth_manager.startup_complete and auth_manager.context:  # Check if browser seems ready
+                logger.info(f"Playwright context seems ready, creating task for {url}")
                 tasks.append(
                     asyncio.create_task(extract_with_playwright(url, doc_type, url))
                 )
+            else:
+                 logger.warning(f"Playwright context not ready, skipping Playwright task creation for {url}. Startup complete: {auth_manager.startup_complete}")
+                 # Log the specific startup failure if it exists
+                 if auth_manager.startup_failure:
+                      logger.error(f"Startup failure reason: {auth_manager.startup_failure}")
+
+
+            # ---> ADDED: Log before creating standard task
+            logger.info(f"Creating standard HTML task (secondary) for {url}")
             tasks.append(asyncio.create_task(extract_standard_html(url, doc_type, url)))
         else:
             # Standard extraction first for most sites
+            # ---> ADDED: Log before creating standard task
+            logger.info(f"Using standard HTML as primary extraction method, creating task for {url}")
             tasks.append(asyncio.create_task(extract_standard_html(url, doc_type, url)))
-            if auth_manager.context:  # Only if browser is initialized
+
+            # ---> ADDED: Log before potentially creating Playwright task
+            if auth_manager.startup_complete and auth_manager.context: # Check if browser seems ready
+                logger.info(f"Playwright context seems ready, creating task (secondary) for {url}")
                 tasks.append(
                     asyncio.create_task(extract_with_playwright(url, doc_type, url))
                 )
+            else:
+                 logger.warning(f"Playwright context not ready, skipping Playwright task creation (secondary) for {url}. Startup complete: {auth_manager.startup_complete}")
+                  # Log the specific startup failure if it exists
+                 if auth_manager.startup_failure:
+                      logger.error(f"Startup failure reason: {auth_manager.startup_failure}")
+
 
     # Run tasks with better failure handling
     all_errors = []
@@ -984,6 +1025,8 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
         "; ".join(all_errors) if all_errors else "Unknown extraction failure"
     )
     logger.error(f"All extraction methods failed for {url}: {error_summary}")
+    # ---> ADDED: Explicitly flush logs on final failure
+    logging.getLogger().handlers[0].flush()
 
     return ExtractResponse(
         url=url,

@@ -3,16 +3,38 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
 import os
 import logging
+import sys  # Import sys
 
 # Import the API routers
 from app.api.v1.api import api_router, test_router
 
 # Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# )
+
+# ---> MODIFIED: More explicit logging configuration for Cloud Run
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# Get the root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Remove existing handlers if any (to avoid duplicates)
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
+# Add a stream handler to stdout
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(log_formatter)
+root_logger.addHandler(stream_handler)
+
+
 logger = logging.getLogger(__name__)
+
+# ---> ADDED: Log after configuration to confirm setup
+logger.info("Logging configured to stream to stdout.")
 
 # Create the FastAPI app
 app = FastAPI(
