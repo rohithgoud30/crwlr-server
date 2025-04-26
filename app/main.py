@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 # Create the FastAPI app
 app = FastAPI(
-    title="CRWLR API (Emergency Mode)",
-    description="CRWLR API in minimalist mode to establish container connectivity.",
+    title="CRWLR API",
+    description="CRWLR API for processing website terms and privacy policies.",
     version="1.0.0",
 )
 
@@ -39,9 +39,9 @@ async def health_check():
 @app.get("/", include_in_schema=False)
 def root():
     """
-    Root endpoint.
+    Root endpoint, redirects to API documentation.
     """
-    return JSONResponse(content={"message": "CRWLR API is running in emergency mode"})
+    return RedirectResponse(url="/docs")
 
 # Simple API endpoint
 @app.get("/api/v1/status")
@@ -57,13 +57,16 @@ async def status():
         "DB_USER": "Set" if os.environ.get("DB_USER") else "Not set",
         "DB_NAME": "Set" if os.environ.get("DB_NAME") else "Not set",
         "DB_HOST": "Set" if os.environ.get("DB_HOST") else "Not set",
+        "USE_CLOUD_SQL_PROXY": os.environ.get("USE_CLOUD_SQL_PROXY", "Not set"),
+        "INSTANCE_CONNECTION_NAME": os.environ.get("INSTANCE_CONNECTION_NAME", "Not set"),
+        "DB_IP_ADDRESS": os.environ.get("DB_IP_ADDRESS", "Not set")
     }
     
     return {
         "status": "running",
-        "mode": "emergency",
-        "environment": env_vars
+        "mode": os.environ.get("ENVIRONMENT", "development"),
+        "environment_variables_status": env_vars
     }
 
-# Log that we've loaded the minimal API
-logger.info("Minimal emergency API loaded successfully")
+# Log API load
+logger.info("CRWLR API loaded successfully")
