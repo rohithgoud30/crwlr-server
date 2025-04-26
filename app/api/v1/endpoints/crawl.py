@@ -184,7 +184,8 @@ async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type:
         return summary_response, word_freq_response, text_mining_response
 
 async def save_document_to_db(
-    original_url: str,
+    original_url: str, # User requested URL
+    retrieved_url: str, # Actual URL content was fetched from
     document_type: str,
     document_content: str,
     analysis: Dict,
@@ -194,14 +195,15 @@ async def save_document_to_db(
     Save document to database after crawling.
     
     Args:
-        original_url: The original URL crawled
-        document_type: Type of document (TOS or PP)
-        document_content: The parsed content
-        analysis: Dictionary of analysis results
-        user_id: Optional user ID for submission tracking
+        original_url: The original URL requested by the user.
+        retrieved_url: The actual URL the content was retrieved from.
+        document_type: Type of document (TOS or PP).
+        document_content: The parsed content.
+        analysis: Dictionary of analysis results.
+        user_id: Optional user ID for submission tracking.
         
     Returns:
-        UUID of created/existing document or None if operation fails
+        UUID of created/existing document or None if operation fails.
     """
     content_length = len(document_content) if document_content else 0
     # Log the length and beginning of the document content
@@ -220,7 +222,7 @@ async def save_document_to_db(
         
         # Only extract company name and logo if not already provided in analysis
         if not company_name or not logo_url:
-            # Extract from URL
+            # Extract from the ORIGINAL URL for fallback info
             parsed_url = urlparse(original_url)
             domain = parsed_url.netloc
             
@@ -287,22 +289,23 @@ async def save_document_to_db(
             raise Exception("Database engine could not be initialized for saving.")
         logger.info("Async database engine obtained/created within save_document_to_db.")
 
-        # Check if a document with this URL already exists
+        # Check if a document with this RETRIEVED URL already exists
         try:
-            existing_doc = await document_crud.get_by_retrieved_url(original_url, document_type)
+            # Use the actual retrieved URL for checking existence
+            existing_doc = await document_crud.get_by_retrieved_url(retrieved_url, document_type)
         except asyncio.TimeoutError:
-            logger.error("Database query timed out when checking for existing document.")
+            logger.error(f"Database query timed out when checking for existing document with retrieved_url: {retrieved_url}")
             raise Exception("Database connection timed out. Please check your database instance and configuration.")
         
         if existing_doc:
-            logger.info(f"Document with URL {original_url} already exists. Using existing document.")
+            logger.info(f"Document with retrieved URL {retrieved_url} already exists. Using existing document.")
             document_id = existing_doc['id']
             
             # Update the document's views count
             await document_crud.increment_views(document_id)
         else:
             # Create a new document
-            logger.info(f"Creating new document for URL: {original_url}")
+            logger.info(f"Creating new document for originally requested URL: {original_url} (Retrieved from: {retrieved_url})")
             
             # Check and set default values for optional fields
             one_sentence_summary = analysis.get('one_sentence_summary', '')
@@ -312,18 +315,18 @@ async def save_document_to_db(
             word_freq_json = json.dumps(serializable_word_freqs if serializable_word_freqs else [])
             text_mining_json = json.dumps(serializable_text_mining if serializable_text_mining else {})
             
-            # Create document data dictionary (excluding id, created_at, updated_at which are auto-generated)
+            # Create document data dictionary
             document_values = {
-                "url": original_url,
+                "url": original_url, # Store the original request URL
                 "document_type": document_type,
-                "retrieved_url": original_url,
+                "retrieved_url": retrieved_url, # Store the actual URL content came from
                 "company_name": company_name,
                 "logo_url": logo_url,
                 "raw_text": document_content,
                 "one_sentence_summary": one_sentence_summary,
                 "hundred_word_summary": hundred_word_summary,
-                "word_frequencies": word_freq_json, # Use JSON string
-                "text_mining_metrics": text_mining_json, # Use JSON string
+                "word_frequencies": word_freq_json, 
+                "text_mining_metrics": text_mining_json,
                 "views": 0
             }
             
@@ -336,8 +339,7 @@ async def save_document_to_db(
                     if row:
                         document_id = row[0]
                     else:
-                        # This case should ideally not happen if insertion was successful
-                        logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url}")
+                        logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url} (retrieved: {retrieved_url})")
                         raise Exception("Failed to create document in database")
             except asyncio.TimeoutError:
                 logger.error("Database insert operation timed out.")
@@ -554,10 +556,10 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             logger.info("All analyses successful. Proceeding to save document.")
             response.success = True
             response.message = "Successfully crawled and analyzed terms of service."
-            # Save document to database
             try:
                 document_id = await save_document_to_db(
-                    original_url=request.url,
+                    original_url=request.url, # The user's requested URL
+                    retrieved_url=tos_url,   # The actual URL the TOS was found at
                     document_type="tos",
                     document_content=extracted_text,
                     analysis={
@@ -759,10 +761,10 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             logger.info("All analyses successful. Proceeding to save document.")
             response.success = True
             response.message = "Successfully crawled and analyzed privacy policy."
-            # Save document to database
             try:
                 document_id = await save_document_to_db(
-                    original_url=request.url,
+                    original_url=request.url, # The user's requested URL
+                    retrieved_url=pp_url,    # The actual URL the PP was found at
                     document_type="pp",
                     document_content=extracted_text,
                     analysis={
