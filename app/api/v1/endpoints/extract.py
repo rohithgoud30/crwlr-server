@@ -607,7 +607,25 @@ async def extract_standard_html(
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        # Explicitly handle encoding
+        content_bytes = resp.content
+        encoding = resp.encoding if resp.encoding else 'utf-8' 
+        # Fallback if requests guesses poorly (e.g., ISO-8859-1 is often a fallback for failed UTF-8 detection)
+        if encoding.lower() == 'iso-8859-1':
+            logger.warning(f"Requests detected ISO-8859-1 encoding for {url}, falling back to UTF-8.")
+            encoding = 'utf-8'
+            
+        try:
+            # Decode using determined encoding, ignoring errors
+            html_content = content_bytes.decode(encoding, errors='ignore')
+            logger.info(f"Decoded content from {url} using encoding: {encoding}")
+        except Exception as decode_error:
+             logger.error(f"Failed to decode content from {url} with encoding {encoding}: {decode_error}. Falling back to UTF-8.")
+             # Final fallback decoding attempt
+             html_content = content_bytes.decode('utf-8', errors='ignore')
+
+
+        soup = BeautifulSoup(html_content, "html.parser")
         text = extract_content_from_soup(soup)
 
         if len(text) < MIN_CONTENT_LENGTH:
