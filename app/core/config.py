@@ -103,4 +103,4 @@ if not settings.API_KEY and os.environ.get("API_KEY"):
 # Log whether API keys are set (without printing them)
 logger.info(f"GEMINI_API_KEY is {'SET' if settings.GEMINI_API_KEY else 'NOT SET'}")
 logger.info(f"API_KEY is {'SET' if settings.API_KEY else 'NOT SET'}")
-logger.info(f"Environment: {settings.ENVIRONMENT}") 
+logger.info(f"Environment: {settings.ENVIRONMENT}")

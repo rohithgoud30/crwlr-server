@@ -1,0 +1,40 @@
+#!/bin/bash
+set -e
+
+# Set default project ID if not provided
+PROJECT_ID=${PROJECT_ID:-crwlr-server}
+REGION=${REGION:-us-east4}
+SERVICE_NAME=${SERVICE_NAME:-crwlr-server}
+
+echo "Building emergency minimal container..."
+
+# Create a directory just for emergency deployment
+mkdir -p emergency
+cp run.py emergency/
+mkdir -p emergency/app
+cp app/main.py emergency/app/
+cp Dockerfile.emergency emergency/Dockerfile
+
+# Build and push a minimal container
+echo "Building and pushing emergency container..."
+cd emergency
+gcloud builds submit --tag us-east4-docker.pkg.dev/$PROJECT_ID/crwlr-repo/crwlr-server:emergency
+
+echo "Deploying emergency container..."
+gcloud run deploy $SERVICE_NAME \
+  --image us-east4-docker.pkg.dev/$PROJECT_ID/crwlr-repo/crwlr-server:emergency \
+  --region $REGION \
+  --platform managed \
+  --memory 512Mi \
+  --cpu 1 \
+  --concurrency 80 \
+  --min-instances 0 \
+  --max-instances 10 \
+  --allow-unauthenticated \
+  --service-account github-actions-deployer@crwlr-server.iam.gserviceaccount.com \
+  --set-env-vars "PROJECT_ID=crwlr-server,ENVIRONMENT=emergency,API_KEY=6e878bf1-c92d-4ba1-99c9-50e3343efd5d" \
+  --port 8080
+
+cd ..
+echo "Emergency deployment completed!"
+echo "The API should be available at: https://crwlr-server-$REGION.a.run.app/api/v1/status"

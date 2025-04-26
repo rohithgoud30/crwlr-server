@@ -22,15 +22,26 @@ def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
     """
     Returns database connection string and optional creator function based on environment variables
     """
+    # Check environment variables and log them
+    logger.info(f"Database Configuration:")
+    logger.info(f"DB_USER: {'Set' if settings.DB_USER else 'Not Set'}")
+    logger.info(f"DB_PASS: {'Set' if settings.DB_PASS else 'Not Set'}")
+    logger.info(f"DB_NAME: {'Set' if settings.DB_NAME else 'Not Set'}")
+    logger.info(f"DB_HOST: {'Set' if settings.DB_HOST else 'Not Set'}")
+    logger.info(f"DB_PORT: {'Set' if settings.DB_PORT else 'Not Set'}")
+    logger.info(f"INSTANCE_CONNECTION_NAME: {'Set' if settings.INSTANCE_CONNECTION_NAME else 'Not Set'}")
+    logger.info(f"NO_PROXY: {'True' if os.environ.get('NO_PROXY', '').lower() == 'true' else 'False'}")
+    logger.info(f"ENVIRONMENT: {settings.ENVIRONMENT}")
+    
     # Check if NO_PROXY environment variable is set (for Cloud Run without proxy)
     if os.environ.get("NO_PROXY", "").lower() == "true":
         logger.info("NO_PROXY mode: Using direct connection to Cloud SQL without proxy")
         # Direct connection to Cloud SQL using public IP
-        host = settings.DB_HOST
-        port = settings.DB_PORT
-        user = settings.DB_USER
-        password = settings.DB_PASS
-        dbname = settings.DB_NAME
+        host = settings.DB_HOST or "127.0.0.1"  # Default to localhost if not set
+        port = settings.DB_PORT or "5432"
+        user = settings.DB_USER or "postgres"
+        password = settings.DB_PASS or ""
+        dbname = settings.DB_NAME or "postgres"
         
         connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
         async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
@@ -38,7 +49,7 @@ def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
         return connection_string, async_connection_string, None
     
     # Check if running on Google Cloud with Cloud SQL Proxy
-    elif hasattr(settings, 'INSTANCE_CONNECTION_NAME') and settings.INSTANCE_CONNECTION_NAME:
+    elif settings.INSTANCE_CONNECTION_NAME:
         try:
             # Import cloud SQL connector - only needed in cloud environments
             from google.cloud.sql.connector import Connector, IPTypes
@@ -64,9 +75,9 @@ def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
             if settings.ENVIRONMENT == "development":
                 host = "127.0.0.1"  # Local proxy address
                 port = "5432"       # Default PostgreSQL port
-                user = settings.DB_USER
-                password = settings.DB_PASS
-                dbname = settings.DB_NAME
+                user = settings.DB_USER or "postgres"
+                password = settings.DB_PASS or ""
+                dbname = settings.DB_NAME or "postgres"
                 async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
                 logger.info(f"Using asyncpg for local development with Cloud SQL proxy at {host}:{port}")
             else:
@@ -74,9 +85,9 @@ def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
                 # This is not optimal but will work around the limitations for now
                 host = "127.0.0.1"  # Will be replaced by proxy in cloud
                 port = "5432"
-                user = settings.DB_USER
-                password = settings.DB_PASS
-                dbname = settings.DB_NAME
+                user = settings.DB_USER or "postgres" 
+                password = settings.DB_PASS or ""
+                dbname = settings.DB_NAME or "postgres"
                 async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
             
             logger.info(f"Connected to Cloud SQL instance: {settings.INSTANCE_CONNECTION_NAME}")
@@ -92,12 +103,12 @@ def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
         port = "5432"
         logger.info(f"Using Cloud SQL Proxy for local development (localhost:{port})")
     else:
-        host = settings.DB_HOST
-        port = settings.DB_PORT
+        host = settings.DB_HOST or "127.0.0.1"
+        port = settings.DB_PORT or "5432"
     
-    user = settings.DB_USER
-    password = settings.DB_PASS
-    dbname = settings.DB_NAME
+    user = settings.DB_USER or "postgres"
+    password = settings.DB_PASS or ""
+    dbname = settings.DB_NAME or "postgres"
     
     connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
     async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
@@ -114,10 +125,20 @@ try:
         engine = create_engine(
             connection_string,
             creator=creator_func,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,  # Check connection before use
+            pool_recycle=3600,   # Recycle connections hourly
         )
     else:
         # Standard direct connection
-        engine = create_engine(connection_string)
+        engine = create_engine(
+            connection_string,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,  # Check connection before use
+            pool_recycle=3600,   # Recycle connections hourly
+        )
     
     # Create async engine (always using asyncpg)
     async_engine = create_async_engine(
@@ -130,10 +151,13 @@ try:
     )
     
     logger.info("Database engines created successfully")
-    logger.info(f"Async engine: {async_connection_string}")
+    
 except Exception as e:
     logger.error(f"Error creating database engine: {str(e)}")
-    raise
+    # Instead of raising, we'll continue without a database and handle it in the application
+    engine = None
+    async_engine = None
+    logger.warning("Continuing without database connection")
 
 # Define metadata object
 metadata = MetaData()
@@ -199,6 +223,10 @@ def create_tables():
     """
     Creates all database tables if they don't exist.
     """
+    if engine is None:
+        logger.error("Cannot create tables - database engine is not initialized")
+        return
+        
     try:
         # Create pgcrypto extension for UUID generation
         with engine.connect() as conn:
