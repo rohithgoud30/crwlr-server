@@ -410,6 +410,48 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
     response = CrawlTosResponse(url=request.url, success=False, message="Processing request...")
     
     try:
+        # First check if the original URL is already in the database
+        # This avoids any processing if we've already handled this URL
+        try:
+            existing_doc = await document_crud.get_by_url(request.url, "tos")
+            if existing_doc:
+                logger.info(f"Document with original URL {request.url} already exists in database. Skipping processing.")
+                
+                # Update views count for the existing document
+                await document_crud.increment_views(existing_doc['id'])
+                
+                # Return the existing document data
+                response.success = True
+                response.message = "Document already exists in database."
+                response.document_id = existing_doc['id']
+                response.tos_url = existing_doc.get('retrieved_url', '')
+                response.one_sentence_summary = existing_doc.get('one_sentence_summary', '')
+                response.hundred_word_summary = existing_doc.get('hundred_word_summary', '')
+                
+                # Parse JSON fields if needed
+                try:
+                    if isinstance(existing_doc.get('word_frequencies'), str):
+                        response.word_frequencies = json.loads(existing_doc.get('word_frequencies', '[]'))
+                    else:
+                        response.word_frequencies = existing_doc.get('word_frequencies', [])
+                        
+                    if isinstance(existing_doc.get('text_mining_metrics'), str):
+                        response.text_mining = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                    else:
+                        response.text_mining = existing_doc.get('text_mining_metrics', {})
+                except Exception as e:
+                    logger.warning(f"Error parsing JSON fields from existing document: {e}")
+                    response.word_frequencies = []
+                    response.text_mining = TextMiningResults()
+                
+                response.company_name = existing_doc.get('company_name', '')
+                response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
+                
+                return response
+        except Exception as e:
+            logger.warning(f"Error checking for existing document by URL: {e}")
+            # Continue with processing if the check fails
+        
         # Find TOS URL
         tos_url = await find_tos_url(request.url)
         if not tos_url:
@@ -656,6 +698,48 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
     response = CrawlPrivacyResponse(url=request.url, success=False, message="Processing request...")
     
     try:
+        # First check if the original URL is already in the database
+        # This avoids any processing if we've already handled this URL
+        try:
+            existing_doc = await document_crud.get_by_url(request.url, "pp")
+            if existing_doc:
+                logger.info(f"Document with original URL {request.url} already exists in database. Skipping processing.")
+                
+                # Update views count for the existing document
+                await document_crud.increment_views(existing_doc['id'])
+                
+                # Return the existing document data
+                response.success = True
+                response.message = "Document already exists in database."
+                response.document_id = existing_doc['id']
+                response.pp_url = existing_doc.get('retrieved_url', '')
+                response.one_sentence_summary = existing_doc.get('one_sentence_summary', '')
+                response.hundred_word_summary = existing_doc.get('hundred_word_summary', '')
+                
+                # Parse JSON fields if needed
+                try:
+                    if isinstance(existing_doc.get('word_frequencies'), str):
+                        response.word_frequencies = json.loads(existing_doc.get('word_frequencies', '[]'))
+                    else:
+                        response.word_frequencies = existing_doc.get('word_frequencies', [])
+                        
+                    if isinstance(existing_doc.get('text_mining_metrics'), str):
+                        response.text_mining = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                    else:
+                        response.text_mining = existing_doc.get('text_mining_metrics', {})
+                except Exception as e:
+                    logger.warning(f"Error parsing JSON fields from existing document: {e}")
+                    response.word_frequencies = []
+                    response.text_mining = TextMiningResults()
+                
+                response.company_name = existing_doc.get('company_name', '')
+                response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
+                
+                return response
+        except Exception as e:
+            logger.warning(f"Error checking for existing document by URL: {e}")
+            # Continue with processing if the check fails
+        
         # Find Privacy Policy URL
         pp_url = await find_privacy_policy_url(request.url)
         if not pp_url:
