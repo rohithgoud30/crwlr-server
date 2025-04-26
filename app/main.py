@@ -5,6 +5,7 @@ import os
 import logging
 import sys  # Import sys
 import asyncio # Import asyncio
+import git # Added GitPython import
 
 # Import the API routers
 from app.api.v1.api import api_router, test_router
@@ -42,8 +43,24 @@ logger = logging.getLogger(__name__)
 # ---> ADDED: Log after configuration to confirm setup
 logger.info("Logging configured to stream to stdout.")
 
-# ---> MODIFIED: Get branch name for title
-branch_name = os.environ.get("BRANCH_NAME", "local") # Default to 'local' if not set
+# ---> MODIFIED: Automatically detect Git branch name
+def get_git_branch_name():
+    try:
+        repo = git.Repo(search_parent_directories=True)
+        branch = repo.active_branch.name
+        logger.info(f"Detected Git branch: {branch}")
+        return branch
+    except git.InvalidGitRepositoryError:
+        logger.warning("Not a Git repository, cannot detect branch name.")
+        return "no-repo"
+    except TypeError: # Handles detached HEAD state
+        logger.warning("HEAD is detached, cannot detect branch name.")
+        return "detached"
+    except Exception as e:
+        logger.error(f"Error detecting Git branch: {e}")
+        return "unknown"
+
+branch_name = get_git_branch_name()
 app_title = f"{settings.PROJECT_NAME} ({branch_name})"
 
 # Create the FastAPI app
