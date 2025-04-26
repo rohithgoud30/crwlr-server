@@ -127,10 +127,56 @@ class PlaywrightManager:
             logger.info("Test page navigation successful. Attempting to close...")
             await test_page.close()
             logger.info("Test page created and closed successfully")
-            
+
+            # --- MODIFICATION START ---
+            # Close the initial non-headless browser context and browser after the check
+            logger.info("Closing initial non-headless browser after startup check...")
+            if self.context:
+                await self.context.close()
+                self.context = None
+            if self.browser:
+                await self.browser.close()
+                self.browser = None
+            logger.info("Initial non-headless browser closed.")
+
+            # Now, re-launch the browser in headless mode for actual use
+            logger.info("Re-launching browser in headless mode for operational use...")
+            self.browser = await self.playwright.chromium.launch(
+                headless=True, # Use headless=True now
+                args=browser_args,
+                executable_path=chrome_path,
+                timeout=60000,
+            )
+            logger.info("Headless browser launched successfully.")
+
+            # Re-create the browser context for headless operation
+            logger.info("Attempting to create headless browser context...")
+            self.context = await self.browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                ignore_https_errors=True,
+                locale="en-US",
+                timezone_id="America/New_York",
+                user_agent=get_random_user_agent()
+            )
+            logger.info("Headless browser context created successfully.")
+
+            # Re-apply the init script to the new headless context
+            logger.info("Attempting to add init script to headless context...")
+            await self.context.add_init_script(
+                """
+            () => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            }
+            """
+            )
+            logger.info("Stealth script injected into headless context successfully.")
+            # --- MODIFICATION END ---
+
             # Mark startup as complete
             self.startup_complete = True
-            logger.info("PlaywrightManager ready and operational")
+            logger.info("PlaywrightManager ready and operational (headless)")
             return True
             
         except Exception as e:
