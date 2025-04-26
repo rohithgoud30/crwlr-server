@@ -35,21 +35,16 @@ fi
 
 echo "All required environment variables are set."
 
-echo "Building emergency minimal container..."
+# Define image tag - using 'latest' for simplicity in manual script
+IMAGE_TAG="latest"
+IMAGE_URI="us-east4-docker.pkg.dev/$PROJECT_ID/crwlr-repo/$SERVICE_NAME:$IMAGE_TAG"
 
-# Create a directory just for emergency deployment
-mkdir -p emergency
-cp run.py emergency/
-mkdir -p emergency/app
-cp app/main.py emergency/app/
-cp Dockerfile.emergency emergency/Dockerfile
+# Build and push the full container using the default Dockerfile
+echo "Building and pushing container image: $IMAGE_URI"
+# Use gcloud builds submit with the default Dockerfile in the current directory
+gcloud builds submit --tag "$IMAGE_URI" .
 
-# Build and push a minimal container
-echo "Building and pushing emergency container..."
-cd emergency
-gcloud builds submit --tag us-east4-docker.pkg.dev/$PROJECT_ID/crwlr-repo/crwlr-server:emergency
-
-echo "Deploying emergency container..."
+echo "Deploying container..."
 
 # Construct the --set-env-vars string dynamically
 env_vars_string="PROJECT_ID=$PROJECT_ID"
@@ -63,20 +58,23 @@ env_vars_string+=",INSTANCE_CONNECTION_NAME=$INSTANCE_CONNECTION_NAME"
 env_vars_string+=",DB_IP_ADDRESS=$DB_IP_ADDRESS"
 env_vars_string+=",USE_CLOUD_SQL_PROXY=$USE_CLOUD_SQL_PROXY"
 
+# Deploy using the newly built image tag
+# Adjust memory/cpu/etc. as needed for full deployment vs emergency
 gcloud run deploy $SERVICE_NAME \
-  --image us-east4-docker.pkg.dev/$PROJECT_ID/crwlr-repo/crwlr-server:emergency \
+  --image "$IMAGE_URI" \
   --region $REGION \
   --platform managed \
-  --memory 512Mi \
+  --memory 2Gi \
   --cpu 1 \
   --concurrency 80 \
   --min-instances 0 \
-  --max-instances 10 \
+  --max-instances 100 \
   --allow-unauthenticated \
   --service-account github-actions-deployer@crwlr-server.iam.gserviceaccount.com \
   --set-env-vars "$env_vars_string" \
   --port 8080
 
-cd ..
-echo "Emergency deployment completed!"
-echo "The API should be available at: https://crwlr-server-$REGION.a.run.app/api/v1/status"
+echo "Deployment completed!"
+# Construct the service URL dynamically
+SERVICE_URL=$(gcloud run services describe $SERVICE_NAME --platform managed --region $REGION --format='value(status.url)')
+echo "The service should be available at: $SERVICE_URL"
