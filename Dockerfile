@@ -10,6 +10,7 @@ ENV BRANCH_NAME=${BRANCH_NAME}
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
+    git \
     libglib2.0-0 \
     libnss3 \
     libnspr4 \

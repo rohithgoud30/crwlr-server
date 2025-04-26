@@ -5,7 +5,7 @@ import os
 import logging
 import sys  # Import sys
 import asyncio # Import asyncio
-# import git # Removed GitPython import
+import subprocess # For git command execution
 
 # Import the API routers
 from app.api.v1.api import api_router, test_router
@@ -43,8 +43,37 @@ logger = logging.getLogger(__name__)
 # ---> ADDED: Log after configuration to confirm setup
 logger.info("Logging configured to stream to stdout.")
 
-# ---> REVERTED: Get branch name from environment variable
-branch_name = os.environ.get("BRANCH_NAME", "local") # Default to 'local' if not set
+# ---> Improved branch name detection without external dependencies
+def get_branch_name():
+    """Get the current Git branch name using environment variable or git command"""
+    # First try environment variable (will be set in Cloud Run)
+    branch_from_env = os.environ.get("BRANCH_NAME")
+    if branch_from_env and branch_from_env != "unknown":
+        logger.info(f"Using branch name from environment: {branch_from_env}")
+        return branch_from_env
+    
+    # Try to detect using git command directly
+    try:
+        # Use subprocess to execute git command
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False  # Don't raise exception
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            if branch and branch != "HEAD":
+                logger.info(f"Detected git branch: {branch}")
+                return branch
+    except Exception as e:
+        logger.warning(f"Error executing git command: {str(e)}")
+    
+    # Default fallback
+    logger.warning("Using default branch name: local")
+    return "local"
+
+branch_name = get_branch_name()
 app_title = f"{settings.PROJECT_NAME} ({branch_name})"
 
 # Create the FastAPI app
@@ -97,7 +126,7 @@ async def health_check():
     """
     Simple health check endpoint.
     """
-    return JSONResponse(content={"status": "running"})
+    return JSONResponse(content={"status": "running", "branch": branch_name})
 
 # Root endpoint
 @app.get("/", include_in_schema=False)
@@ -123,14 +152,16 @@ async def status():
         "DB_HOST": "Set" if os.environ.get("DB_HOST") else "Not set",
         "USE_CLOUD_SQL_PROXY": os.environ.get("USE_CLOUD_SQL_PROXY", "Not set"),
         "INSTANCE_CONNECTION_NAME": os.environ.get("INSTANCE_CONNECTION_NAME", "Not set"),
-        "DB_IP_ADDRESS": os.environ.get("DB_IP_ADDRESS", "Not set")
+        "DB_IP_ADDRESS": os.environ.get("DB_IP_ADDRESS", "Not set"),
+        "BRANCH_NAME": branch_name
     }
     
     return {
         "status": "running",
         "mode": os.environ.get("ENVIRONMENT", "development"),
+        "branch": branch_name,
         "environment_variables_status": env_vars
     }
 
 # Log API load
-logger.info("CRWLR API loaded successfully")
+logger.info(f"CRWLR API ({branch_name}) loaded successfully")
