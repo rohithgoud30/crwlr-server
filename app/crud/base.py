@@ -2,7 +2,7 @@ from typing import Any, Dict, Generic, List, Optional, Type, TypeVar, Union
 from uuid import UUID
 from sqlalchemy import Table, select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import engine
+from app.core.database import async_engine
 
 ModelType = TypeVar("ModelType")
 
@@ -16,16 +16,13 @@ class CRUDBase:
     
     async def get(self, id: UUID) -> Optional[Dict[str, Any]]:
         """Get a record by ID."""
-        conn = await engine.connect()
-        try:
+        async with async_engine.connect() as conn:
             query = select(self.table).where(self.table.c.id == id)
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
                 return dict(row)
             return None
-        finally:
-            await conn.close()
     
     async def get_multi(
         self, 
@@ -34,8 +31,7 @@ class CRUDBase:
         filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Get multiple records with optional filtering."""
-        conn = await engine.connect()
-        try:
+        async with async_engine.connect() as conn:
             query = select(self.table).offset(skip).limit(limit)
             
             # Apply filters if provided
@@ -46,55 +42,40 @@ class CRUDBase:
                         
             result = await conn.execute(query)
             return [dict(row) for row in result.fetchall()]
-        finally:
-            await conn.close()
     
     async def create(self, obj_in: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new record."""
-        conn = await engine.connect()
-        try:
+        async with async_engine.begin() as conn:
             query = insert(self.table).values(**obj_in).returning(*self.table.columns)
             result = await conn.execute(query)
-            await conn.commit()
             row = result.fetchone()
             if row:
                 return dict(row)
             return {}
-        finally:
-            await conn.close()
     
     async def update(self, id: UUID, obj_in: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update a record by ID."""
-        conn = await engine.connect()
-        try:
+        async with async_engine.begin() as conn:
             query = update(self.table).where(self.table.c.id == id).values(**obj_in).returning(*self.table.columns)
             result = await conn.execute(query)
-            await conn.commit()
             row = result.fetchone()
             if row:
                 return dict(row)
             return None
-        finally:
-            await conn.close()
     
     async def remove(self, id: UUID) -> Optional[Dict[str, Any]]:
         """Delete a record by ID."""
-        conn = await engine.connect()
-        try:
+        async with async_engine.begin() as conn:
             query = delete(self.table).where(self.table.c.id == id).returning(*self.table.columns)
             result = await conn.execute(query)
-            await conn.commit()
             row = result.fetchone()
             if row:
                 return dict(row)
             return None
-        finally:
-            await conn.close()
     
     async def count(self, filters: Optional[Dict[str, Any]] = None) -> int:
         """Count records with optional filtering."""
-        conn = await engine.connect()
-        try:
+        async with async_engine.connect() as conn:
             query = select(func.count()).select_from(self.table)
             
             # Apply filters if provided
@@ -105,8 +86,6 @@ class CRUDBase:
                         
             result = await conn.execute(query)
             return result.scalar() or 0
-        finally:
-            await conn.close()
             
     async def paginate(
         self,
@@ -131,8 +110,7 @@ class CRUDBase:
         Returns:
         - Dictionary with items, total count, and pagination info
         """
-        conn = await engine.connect()
-        try:
+        async with async_engine.connect() as conn:
             # Validate and normalize parameters
             if per_page not in valid_per_page:
                 per_page = valid_per_page[0]
@@ -188,6 +166,4 @@ class CRUDBase:
                 "total_pages": total_pages,
                 "has_next": page < total_pages,
                 "has_prev": page > 1
-            }
-        finally:
-            await conn.close() 
+            } 

@@ -3,11 +3,13 @@ import logging
 import asyncio
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import insert
 from urllib.parse import urlparse
 import requests
 import random
 from typing import Dict, Optional, Tuple, Any
 import string
+import json
 
 from app.api.v1.endpoints.tos import find_tos
 from app.api.v1.endpoints.privacy import find_privacy_policy
@@ -17,6 +19,7 @@ from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analy
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
+from app.core.database import documents, async_engine
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
@@ -77,7 +80,7 @@ async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type:
         url=doc_url,
         document_type=doc_type,
         text=extracted_text,
-        max_words=50  # Explicitly setting max_words to avoid potential issues
+        max_words=20  # Changed from 50 to 20
     )
     
     text_mining_request = TextMiningRequest(
@@ -200,6 +203,16 @@ async def save_document_to_db(
     Returns:
         UUID of created/existing document or None if operation fails
     """
+    content_length = len(document_content) if document_content else 0
+    # Log the length and beginning of the document content
+    logger.info(f"Saving document content (Length: {content_length}, First 1000 chars): {document_content[:1000]}") 
+    
+    # Log incoming analysis data types and content
+    wf_data = analysis.get('word_frequencies')
+    tm_data = analysis.get('text_mining')
+    logger.info(f"Incoming word_frequencies type: {type(wf_data)}, content snippet: {str(wf_data)[:500]}")
+    logger.info(f"Incoming text_mining type: {type(tm_data)}, content snippet: {str(tm_data)[:500]}")
+
     try:
         # Use company_name and logo_url from analysis if available
         company_name = analysis.get('company_name', None)
@@ -207,56 +220,51 @@ async def save_document_to_db(
         
         # Only extract company name and logo if not already provided in analysis
         if not company_name or not logo_url:
-            # Set a default logo URL
-            default_logo_url = "/placeholder.svg?height=48&width=48"
-            logo_url = logo_url or default_logo_url
-            
-            # Get the domain
+            # Extract from URL
             parsed_url = urlparse(original_url)
             domain = parsed_url.netloc
             
-            # Extract company name from domain only if not already provided
-            if not company_name and domain:
+            if not company_name:
                 company_name = extract_company_name_from_domain(domain)
-            elif not company_name:
-                company_name = "Unknown"
-            
-            # Get logo from Google's favicon service if not already provided
-            if logo_url == default_logo_url and domain:
-                try:
-                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-                    # Test if logo exists with a head request
-                    response = requests.head(logo_url, timeout=5)
-                    if response.status_code != 200:
-                        logo_url = default_logo_url
-                except Exception as e:
-                    logger.warning(f"Failed to get logo for {domain}: {e}")
-                    logo_url = default_logo_url
-        
-        logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
-        
-        # Handle serialization of word frequencies
+                
+            if not logo_url:
+                logo_url = DEFAULT_LOGO_URL
+                
+        # Safely transform analysis data for storage in PostgreSQL JSONB
+        # Fix for word_frequencies - ensure it's a JSON-serializable list of objects
         serializable_word_freqs = []
-        try:
-            if isinstance(analysis['word_frequencies'], list):
-                serializable_word_freqs = [
-                    wf.dict() if hasattr(wf, "dict") and callable(getattr(wf, "dict")) else wf
-                    for wf in analysis['word_frequencies']
-                ]
-            else:
-                serializable_word_freqs = analysis['word_frequencies']
-        except Exception as e:
-            logger.error(f"Error serializing word frequencies: {e}")
-            serializable_word_freqs = []
         
-        # Handle serialization of text mining metrics
+        if 'word_frequencies' in analysis and isinstance(analysis['word_frequencies'], list):
+            for item in analysis['word_frequencies']:
+                # Explicitly check and convert known types to dictionary
+                if isinstance(item, dict):
+                    serializable_word_freqs.append(item)
+                elif hasattr(item, 'dict') and callable(getattr(item, 'dict')):
+                    # Pydantic model or similar with dict() method
+                    serializable_word_freqs.append(item.dict())
+                elif hasattr(item, '__dict__'):
+                    # Convert object to dict
+                    serializable_word_freqs.append(item.__dict__)
+                else:
+                    # If it's none of the above, log a warning and skip or handle explicitly if structure is known
+                    logger.warning(f"Skipping word frequency item of unexpected type: {type(item)}")
+                    # Optional: Add specific handling if there's a known alternative structure
+                    # Example: if isinstance(item, MyWordFrequencyObject): serializable_word_freqs.append(item.to_dict())
+        elif 'word_frequencies' in analysis:
+             logger.warning(f"word_frequencies is not a list: {type(analysis['word_frequencies'])}")
+        
+        # Similarly handle text_mining metrics
         serializable_text_mining = {}
-        if isinstance(analysis['text_mining'], dict):
-            serializable_text_mining = analysis['text_mining']
-        elif hasattr(analysis['text_mining'], "dict") and callable(getattr(analysis['text_mining'], "dict")):
-            serializable_text_mining = analysis['text_mining'].dict()
-        else:
-            serializable_text_mining = analysis['text_mining']
+        if 'text_mining' in analysis:
+            if isinstance(analysis['text_mining'], dict):
+                serializable_text_mining = analysis['text_mining']
+            elif hasattr(analysis['text_mining'], "dict") and callable(getattr(analysis['text_mining'], "dict")):
+                serializable_text_mining = analysis['text_mining'].dict()
+            elif hasattr(analysis['text_mining'], "__dict__"):
+                serializable_text_mining = analysis['text_mining'].__dict__
+            else:
+                serializable_text_mining = {"error": "Could not convert text mining metrics"}
+                logger.warning(f"Could not convert text mining metrics to dict: {type(analysis['text_mining'])}")
         
         # Check if a document with this URL already exists
         existing_doc = await document_crud.get_by_retrieved_url(original_url, document_type)
@@ -271,23 +279,40 @@ async def save_document_to_db(
             # Create a new document
             logger.info(f"Creating new document for URL: {original_url}")
             
-            # Create document data dictionary
-            document_data = {
+            # Check and set default values for optional fields
+            one_sentence_summary = analysis.get('one_sentence_summary', '')
+            hundred_word_summary = analysis.get('hundred_word_summary', '')
+            
+            # Encode JSON fields explicitly
+            word_freq_json = json.dumps(serializable_word_freqs if serializable_word_freqs else [])
+            text_mining_json = json.dumps(serializable_text_mining if serializable_text_mining else {})
+            
+            # Create document data dictionary (excluding id, created_at, updated_at which are auto-generated)
+            document_values = {
                 "url": original_url,
                 "document_type": document_type,
                 "retrieved_url": original_url,
                 "company_name": company_name,
                 "logo_url": logo_url,
                 "raw_text": document_content,
-                "one_sentence_summary": analysis['one_sentence_summary'],
-                "hundred_word_summary": analysis['hundred_word_summary'],
-                "word_frequencies": serializable_word_freqs,
-                "text_mining_metrics": serializable_text_mining,
+                "one_sentence_summary": one_sentence_summary,
+                "hundred_word_summary": hundred_word_summary,
+                "word_frequencies": word_freq_json, # Use JSON string
+                "text_mining_metrics": text_mining_json, # Use JSON string
                 "views": 0
             }
             
-            document = await document_crud.create(document_data)
-            document_id = document['id']
+            # Explicit insert using SQLAlchemy Core
+            async with async_engine.begin() as conn:
+                query = insert(documents).values(**document_values).returning(documents.c.id)
+                result = await conn.execute(query)
+                row = result.fetchone()
+                if row:
+                    document_id = row[0]
+                else:
+                    # This case should ideally not happen if insertion was successful
+                    logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url}")
+                    raise Exception("Failed to create document in database")
         
         return document_id
     except Exception as e:
@@ -478,52 +503,71 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         summary_context_url = f"{tos_url}?company={company_name}"
         
         # Perform analysis in parallel with the company name context
-        analyses = await perform_parallel_analysis(summary_context_url, extracted_text, "tos")
+        summary_response, word_freq_response, text_mining_response = await perform_parallel_analysis(summary_context_url, extracted_text, "tos")
         
-        # Set response fields
-        one_sentence_summary = analyses[0].one_sentence_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
-        hundred_word_summary = analyses[0].hundred_word_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
-        word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
-        text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
-        
-        response.one_sentence_summary = one_sentence_summary
-        response.hundred_word_summary = hundred_word_summary
-        response.word_frequencies = word_frequencies
-        response.text_mining = text_mining_metrics
+        # Set response fields from analysis results regardless of success
+        response.one_sentence_summary = summary_response.one_sentence_summary if summary_response else "Analysis failed"
+        response.hundred_word_summary = summary_response.hundred_word_summary if summary_response else "Analysis failed"
+        response.word_frequencies = word_freq_response.word_frequencies if word_freq_response else []
+        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults()
         response.company_name = company_name
         response.logo_url = logo_url
-        response.success = True
-        response.message = "Successfully crawled and analyzed terms of service."
         
-        # Log extracted company name and logo URL
+        # Check if all analyses were successful before attempting to save
+        all_analyses_successful = (
+            summary_response and summary_response.success and
+            word_freq_response and word_freq_response.success and
+            text_mining_response and text_mining_response.success
+        )
+        
+        if all_analyses_successful:
+            logger.info("All analyses successful. Proceeding to save document.")
+            response.success = True
+            response.message = "Successfully crawled and analyzed terms of service."
+            # Save document to database
+            try:
+                document_id = await save_document_to_db(
+                    original_url=request.url,
+                    document_type="tos",
+                    document_content=extracted_text,
+                    analysis={
+                        "one_sentence_summary": response.one_sentence_summary,
+                        "hundred_word_summary": response.hundred_word_summary,
+                        "word_frequencies": response.word_frequencies,
+                        "text_mining": response.text_mining,
+                        "company_name": company_name,
+                        "logo_url": logo_url
+                    },
+                    user_id=None
+                )
+                response.document_id = document_id
+            except Exception as e:
+                logger.error(f"Error saving document to database: {e}")
+                # Update response message if saving fails, but keep success=True as analysis was done
+                response.message = "Successfully crawled and analyzed, but failed to save document."
+        else:
+            logger.warning("One or more analyses failed. Document will not be saved to database.")
+            response.success = True # Still counts as successful crawl/analysis attempt
+            response.message = "Crawled and analyzed terms of service, but some analyses failed; document not saved."
+            # Ensure document_id is None if not saved
+            response.document_id = None
+            
+        # Log extracted company name and logo URL (moved here to always log)
         logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
-        
-        # Save document to database
-        try:
-            document_id = await save_document_to_db(
-                original_url=request.url,
-                document_type="tos",
-                document_content=extracted_text,
-                analysis={
-                    "one_sentence_summary": one_sentence_summary,
-                    "hundred_word_summary": hundred_word_summary,
-                    "word_frequencies": word_frequencies,
-                    "text_mining": text_mining_metrics,
-                    "company_name": company_name,
-                    "logo_url": logo_url
-                },
-                user_id=None
-            )
-            response.document_id = document_id
-        except Exception as e:
-            logger.error(f"Error saving document to database: {e}")
-            # Continue with response even if database save fails
-        
+            
         return response
     except Exception as e:
         logger.error(f"Error processing TOS crawl request: {e}")
+        # Ensure response fields are set appropriately on error
         response.success = False
         response.message = f"Error processing request: {str(e)}"
+        response.one_sentence_summary = "Error"
+        response.hundred_word_summary = "Error"
+        response.word_frequencies = []
+        response.text_mining = TextMiningResults()
+        response.company_name = "Error"
+        response.logo_url = DEFAULT_LOGO_URL
+        response.document_id = None
         return response
         
 @router.post("/crawl-pp", response_model=CrawlPrivacyResponse)
@@ -660,52 +704,71 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         summary_context_url = f"{pp_url}?company={company_name}"
         
         # Perform analysis in parallel with the company name context
-        analyses = await perform_parallel_analysis(summary_context_url, extracted_text, "pp")
+        summary_response, word_freq_response, text_mining_response = await perform_parallel_analysis(summary_context_url, extracted_text, "pp")
         
-        # Set response fields
-        one_sentence_summary = analyses[0].one_sentence_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
-        hundred_word_summary = analyses[0].hundred_word_summary if isinstance(analyses[0], SummaryResponse) else "Analysis failed"
-        word_frequencies = analyses[1].word_frequencies if isinstance(analyses[1], WordFrequencyResponse) else []
-        text_mining_metrics = analyses[2].text_mining if isinstance(analyses[2], TextMiningResponse) else TextMiningResults()
-        
-        response.one_sentence_summary = one_sentence_summary
-        response.hundred_word_summary = hundred_word_summary
-        response.word_frequencies = word_frequencies
-        response.text_mining = text_mining_metrics
+        # Set response fields from analysis results regardless of success
+        response.one_sentence_summary = summary_response.one_sentence_summary if summary_response else "Analysis failed"
+        response.hundred_word_summary = summary_response.hundred_word_summary if summary_response else "Analysis failed"
+        response.word_frequencies = word_freq_response.word_frequencies if word_freq_response else []
+        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults()
         response.company_name = company_name
         response.logo_url = logo_url
-        response.success = True
-        response.message = "Successfully crawled and analyzed privacy policy."
+
+        # Check if all analyses were successful before attempting to save
+        all_analyses_successful = (
+            summary_response and summary_response.success and
+            word_freq_response and word_freq_response.success and
+            text_mining_response and text_mining_response.success
+        )
         
-        # Log extracted company name and logo URL
+        if all_analyses_successful:
+            logger.info("All analyses successful. Proceeding to save document.")
+            response.success = True
+            response.message = "Successfully crawled and analyzed privacy policy."
+            # Save document to database
+            try:
+                document_id = await save_document_to_db(
+                    original_url=request.url,
+                    document_type="pp",
+                    document_content=extracted_text,
+                    analysis={
+                        "one_sentence_summary": response.one_sentence_summary,
+                        "hundred_word_summary": response.hundred_word_summary,
+                        "word_frequencies": response.word_frequencies,
+                        "text_mining": response.text_mining,
+                        "company_name": company_name,
+                        "logo_url": logo_url
+                    },
+                    user_id=None
+                )
+                response.document_id = document_id
+            except Exception as e:
+                logger.error(f"Error saving document to database: {e}")
+                # Update response message if saving fails, but keep success=True as analysis was done
+                response.message = "Successfully crawled and analyzed, but failed to save document."
+        else:
+            logger.warning("One or more analyses failed. Document will not be saved to database.")
+            response.success = True # Still counts as successful crawl/analysis attempt
+            response.message = "Crawled and analyzed privacy policy, but some analyses failed; document not saved."
+            # Ensure document_id is None if not saved
+            response.document_id = None
+
+        # Log extracted company name and logo URL (moved here to always log)
         logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
-        
-        # Save document to database
-        try:
-            document_id = await save_document_to_db(
-                original_url=request.url,
-                document_type="pp",
-                document_content=extracted_text,
-                analysis={
-                    "one_sentence_summary": one_sentence_summary,
-                    "hundred_word_summary": hundred_word_summary,
-                    "word_frequencies": word_frequencies,
-                    "text_mining": text_mining_metrics,
-                    "company_name": company_name,
-                    "logo_url": logo_url
-                },
-                user_id=None
-            )
-            response.document_id = document_id
-        except Exception as e:
-            logger.error(f"Error saving document to database: {e}")
-            # Continue with response even if database save fails
-        
+
         return response
     except Exception as e:
         logger.error(f"Error processing Privacy Policy crawl request: {e}")
+        # Ensure response fields are set appropriately on error
         response.success = False
         response.message = f"Error processing request: {str(e)}"
+        response.one_sentence_summary = "Error"
+        response.hundred_word_summary = "Error"
+        response.word_frequencies = []
+        response.text_mining = TextMiningResults()
+        response.company_name = "Error"
+        response.logo_url = DEFAULT_LOGO_URL
+        response.document_id = None
         return response
 
 async def extract_text_from_url(url: str) -> Optional[Tuple[str, str]]:

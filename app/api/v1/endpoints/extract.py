@@ -232,99 +232,128 @@ def extract_content_from_soup(soup: BeautifulSoup) -> str:
             "Bot verification page detected - unable to access actual content"
         )
 
-    # First remove known non-content elements
+    # Remove known non-content elements first
     for tag in soup(
-        ["script", "style", "nav", "header", "footer", "noscript", "iframe"]
+        ["script", "style", "nav", "header", "footer", "noscript", "iframe", "aside"]
     ):
         tag.decompose()
+        
+    # Attempt to remove common sidebars/TOCs specifically (like eBay's "On this page")
+    for toc_selector in ['div[class*="on-this-page"]', 'div[id*="toc"]', 'nav[class*="toc"]']: 
+        toc = soup.select_one(toc_selector)
+        if toc:
+            logger.info(f"Removing potential Table of Contents element: {toc_selector}")
+            toc.decompose()
 
-    # Try multiple extraction strategies in order of specificity
+    potential_containers = []
 
-    # 1. Look for TOS or privacy-specific containers
-    for selector in [
-        '[id*="terms"]',
-        '[id*="tos"]',
-        '[id*="agreement"]',
-        '[id*="legal"]',
-        '[id*="policy"]',
-        '[class*="terms"]',
-        '[class*="tos"]',
-        '[class*="agreement"]',
-        '[class*="legal"]',
-        '[class*="policy"]',
-        "article",
-        "main",
-        '[role="main"]',
-        "#content",
-        ".content",
-        "#main-content",
-        ".main-content",
-    ]:
-        try:
+    # 1. Prioritize semantic containers: <article>, <main>, role="main"
+    for selector in ["article", "main", '[role="main"]']:
+        elements = soup.select(selector)
+        if elements:
+            potential_containers.extend(elements)
+            break 
+
+    # 2. If no semantic container, try common content IDs/classes
+    if not potential_containers:
+        for selector in [
+            "#content",
+            ".content",
+            "#main-content",
+            ".main-content",
+            "#main",
+            ".main",
+            ".entry-content", # Common in blogs/CMS
+            '[class*="page-content"]',
+            # Add TOS/Policy specific selectors as lower priority fallbacks
+            '[id*="terms"]',
+            '[id*="tos"]',
+            '[id*="agreement"]',
+            '[id*="legal"]',
+            '[id*="policy"]',
+            '[class*="terms"]',
+            '[class*="tos"]',
+            '[class*="agreement"]',
+            '[class*="legal"]',
+            '[class*="policy"]',
+        ]:
             elements = soup.select(selector)
             if elements:
-                # Sort by content length to find the most substantial element
-                elements_with_text = [
-                    (el, len(el.get_text(strip=True))) for el in elements
-                ]
-                elements_with_text.sort(key=lambda x: x[1], reverse=True)
+                potential_containers.extend(elements)
+                if selector.startswith( ('#', '.') ):
+                    break
 
-                # Get the element with the most text
-                main_element, text_length = elements_with_text[0]
-                if text_length >= MIN_CONTENT_LENGTH:
-                    content = main_element.get_text(separator="\n", strip=True)
-                    logger.info(
-                        f"Found content using selector '{selector}' with {text_length} characters"
-                    )
-                    return content
-        except Exception as e:
-            logger.debug(f"Error using selector {selector}: {str(e)}")
-            continue
+    # Select the best container or fall back to body
+    best_container = None
+    if potential_containers:
+        # Simplification: Pick the first semantic one found, or the first specific ID/class
+        best_container = potential_containers[0]
+        container_id = best_container.get('id', '')
+        container_class = best_container.get('class', '')
+        logger.info(f"Selected container: <{best_container.name}> id='{container_id}' class='{container_class}'")
+    else:
+        best_container = soup.body
+        if not best_container:
+             logger.warning("No <body> tag found, falling back to root soup object.")
+             best_container = soup # Fallback if no body
+        logger.info("No specific container found, using <body> as container.")
 
-    # 2. Extract paragraphs
-    ps = [
-        p.get_text(strip=True)
-        for p in soup.find_all("p")
-        if len(p.get_text(strip=True)) > 10
-    ]
-    if ps:
-        text = "\n\n".join(ps)
-        if len(text) >= MIN_CONTENT_LENGTH:
-            logger.info(f"Found content from paragraphs: {len(text)} characters")
-            return text
 
-    # 3. Try to find sections with numbered lists (common in legal docs)
-    list_elements = soup.find_all(["ol", "ul"])
-    if list_elements:
-        lists_text = []
-        for list_el in list_elements:
-            items = [
-                li.get_text(strip=True)
-                for li in list_el.find_all("li")
-                if len(li.get_text(strip=True)) > 10
-            ]
-            if items:
-                lists_text.append("\n".join(items))
+    # 3. Extract meaningful text from the selected container
+    text_parts = []
+    if best_container:
+        # Find primarily block-level text elements
+        # Avoid generic divs/spans here as they are often UI elements
+        relevant_elements = best_container.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'], recursive=True)
+        
+        min_line_length = 10 # Adjust minimum length slightly
+        
+        processed_elements = set() # Keep track of elements already processed to avoid duplicates from nesting
+        
+        for element in relevant_elements:
+            # Skip if element or its text content has already been processed via a parent
+            if element in processed_elements: 
+                continue
 
-        if lists_text:
-            combined_text = "\n\n".join(lists_text)
-            if len(combined_text) >= MIN_CONTENT_LENGTH:
-                logger.info(
-                    f"Found content from lists: {len(combined_text)} characters"
-                )
-                return combined_text
-
-    # 4. Last resort: get all text
-    text = soup.get_text(separator="\n", strip=True)
-
-    # Double check if this might be a bot verification page that we missed
-    if len(text) < 1000 and is_likely_bot_page(text):
+            # Skip if element is inside a known non-content area that wasn't fully removed
+            # (e.g., if a button or form somehow survived initial decomposition)
+            if element.find_parent(['button', 'form', 'select']): 
+                continue
+            
+            # Extract text 
+            element_text = element.get_text(separator=' ', strip=True)
+             
+            if len(element_text) >= min_line_length:
+                text_parts.append(element_text)
+                
+                # Mark this element and all its children as processed
+                processed_elements.add(element)
+                processed_elements.update(element.find_all()) # Mark children too
+                      
+    if text_parts:
+        # Join parts with single newlines for better readability before final cleaning
+        content = "\n".join(text_parts) 
+        logger.info(f"Extracted content parts from selected container: {len(content)} characters")
+    else:
+        # Ultimate fallback: Get all text from the originally selected best container
+        logger.warning("No specific text parts found in container, falling back to full container text.")
+        if best_container:
+            content = best_container.get_text(separator="\n", strip=True)
+        else:
+             content = "" 
+             
+    # Final check for missed bot page based on extracted content
+    if len(content) < 1000 and is_likely_bot_page(content):
         raise Exception(
             "Bot verification content detected - unable to access actual document"
         )
 
-    logger.info(f"Using full page text as fallback: {len(text)} characters")
-    return text
+    # Basic post-cleaning: remove extra whitespace and blank lines
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+    cleaned_content = '\n'.join(lines)
+
+    logger.info(f"Final cleaned content length: {len(cleaned_content)} characters")
+    return cleaned_content
 
 
 def detect_bot_verification_page(soup: BeautifulSoup) -> bool:
@@ -837,5 +866,5 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
         text=None,
         success=False,
         message=f"Extraction failed - all methods exhausted: {error_summary[:200]}",
-        method_used="standard_failed",
+        method_used="standard",
     )

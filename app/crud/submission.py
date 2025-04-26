@@ -1,101 +1,93 @@
 from typing import Optional, Dict, Any, List, Literal
 from uuid import UUID
+from sqlalchemy import desc, asc, select
+from datetime import datetime, timedelta
 
 from app.crud.base import CRUDBase
-from app.core.database import submissions, engine
+from app.core.database import submissions, async_engine
 
 
 class CRUDSubmission(CRUDBase):
     """CRUD operations for submissions."""
     
-    async def get_by_user(
+    async def get_recent_submissions(
+        self, 
+        hours: int = 24, 
+        document_type: Optional[Literal["tos", "pp"]] = None,
+        status: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get submissions created within the last specified hours.
+        
+        Args:
+            hours: Number of hours to look back
+            document_type: Optional filter by document type
+            status: Optional filter by status
+            
+        Returns:
+            List of submissions
+        """
+        async with async_engine.connect() as conn:
+            # Calculate cutoff time
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            
+            # Start with base query
+            query = self.table.select().where(
+                self.table.c.created_at >= cutoff
+            )
+            
+            # Add optional filters
+            if document_type:
+                query = query.where(self.table.c.document_type == document_type)
+                
+            if status:
+                query = query.where(self.table.c.status == status)
+                
+            # Order by most recent
+            query = query.order_by(self.table.c.created_at.desc())
+            
+            # Execute query
+            result = await conn.execute(query)
+            return [dict(row) for row in result.fetchall()]
+    
+    async def get_user_submissions(
         self, 
         user_id: UUID, 
-        page: int = 1, 
-        per_page: int = 6,
-        sort_by: str = "most_recent"
-    ) -> Dict[str, Any]:
+        document_type: Optional[Literal["tos", "pp"]] = None,
+        status: Optional[str] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
         """
-        Get submissions by user ID with pagination.
+        Get submissions for a specific user.
         
-        Parameters:
-        - user_id: UUID of the user
-        - page: Page number (1-based)
-        - per_page: Items per page
-        - sort_by: Sorting option (most_recent, oldest_first)
-        
+        Args:
+            user_id: User ID to filter by
+            document_type: Optional filter by document type
+            status: Optional filter by status
+            limit: Maximum number of submissions to return
+            
         Returns:
-        - Dictionary with items, total count, and pagination info
+            List of submissions
         """
-        # Create filters
-        filters = {"user_id": user_id}
-        
-        # Map sort options
-        order_by = "created_at"
-        order_direction = "desc"
-        
-        if sort_by == "oldest_first":
-            order_direction = "asc"
-        
-        # Use base paginate method
-        return await self.paginate(
-            page=page,
-            per_page=per_page,
-            filters=filters,
-            order_by=order_by,
-            order_direction=order_direction,
-            valid_per_page=[6, 9, 12, 15]
-        )
-    
-    async def get_pending_submissions(
-        self, 
-        page: int = 1,
-        per_page: int = 10
-    ) -> Dict[str, Any]:
-        """
-        Get submissions with 'pending' status with pagination.
-        
-        Parameters:
-        - page: Page number (1-based)
-        - per_page: Items per page
-        
-        Returns:
-        - Dictionary with items, total count, and pagination info
-        """
-        # Use base paginate method with status filter
-        return await self.paginate(
-            page=page,
-            per_page=per_page,
-            filters={"status": "pending"},
-            order_by="created_at",
-            order_direction="asc"
-        )
-    
-    async def get_submissions_by_status(
-        self, 
-        status: str,
-        page: int = 1,
-        per_page: int = 10
-    ) -> Dict[str, Any]:
-        """
-        Get submissions by status with pagination.
-        
-        Parameters:
-        - status: Status to filter by (pending, in_progress, done, error)
-        - page: Page number (1-based)
-        - per_page: Items per page
-        
-        Returns:
-        - Dictionary with items, total count, and pagination info
-        """
-        # Use base paginate method with status filter
-        return await self.paginate(
-            page=page,
-            per_page=per_page,
-            filters={"status": status},
-            order_by="created_at",
-            order_direction="desc"
-        )
+        async with async_engine.connect() as conn:
+            # Start with base query
+            query = self.table.select().where(
+                self.table.c.user_id == user_id
+            )
+            
+            # Add optional filters
+            if document_type:
+                query = query.where(self.table.c.document_type == document_type)
+                
+            if status:
+                query = query.where(self.table.c.status == status)
+                
+            # Order by most recent and limit
+            query = query.order_by(self.table.c.created_at.desc()).limit(limit)
+            
+            # Execute query
+            result = await conn.execute(query)
+            return [dict(row) for row in result.fetchall()]
     
     async def update_status(
         self, 
@@ -121,7 +113,7 @@ class CRUDSubmission(CRUDBase):
         document_type: Literal["tos", "pp"]
     ) -> Optional[Dict[str, Any]]:
         """Get most recent submission by URL and document type."""
-        async with engine.connect() as conn:
+        async with async_engine.connect() as conn:
             query = self.table.select().where(
                 (self.table.c.requested_url == requested_url) &
                 (self.table.c.document_type == document_type)
@@ -134,5 +126,5 @@ class CRUDSubmission(CRUDBase):
             return None
 
 
-# Create an instance of CRUDSubmission for use throughout the application
+# Create CRUD instance
 submission_crud = CRUDSubmission(submissions) 

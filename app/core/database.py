@@ -1,11 +1,12 @@
 import os
 import logging
 import warnings
-from typing import Optional
+from typing import Optional, Tuple, Callable
 from sqlalchemy import create_engine, MetaData, Column, Table, String, DateTime, Text, ForeignKey, Enum, JSON, BigInteger
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import text, func
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 
 # Filter out CryptographyDeprecationWarning related to not_valid_after
 warnings.filterwarnings('ignore', category=Warning, module='google.cloud.sql.connector.instance')
@@ -17,9 +18,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configure database connection based on environment
-def get_connection_string() -> str:
+def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
     """
-    Returns database connection string based on environment variables
+    Returns database connection string and optional creator function based on environment variables
     """
     # Check if running on Google Cloud with Cloud SQL Proxy
     if hasattr(settings, 'INSTANCE_CONNECTION_NAME') and settings.INSTANCE_CONNECTION_NAME:
@@ -43,25 +44,56 @@ def get_connection_string() -> str:
             
             # Create connection string for PostgreSQL with Cloud SQL Proxy
             connection_string = f"postgresql+pg8000://"
+            
+            # For local development, use direct connection with asyncpg
+            if settings.ENVIRONMENT == "development":
+                host = "127.0.0.1"  # Local proxy address
+                port = "5432"       # Default PostgreSQL port
+                user = settings.DB_USER
+                password = settings.DB_PASS
+                dbname = settings.DB_NAME
+                async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
+                logger.info(f"Using asyncpg for local development with Cloud SQL proxy at {host}:{port}")
+            else:
+                # For cloud environments we still use asyncpg but with cloud credentials
+                # This is not optimal but will work around the limitations for now
+                host = "127.0.0.1"  # Will be replaced by proxy in cloud
+                port = "5432"
+                user = settings.DB_USER
+                password = settings.DB_PASS
+                dbname = settings.DB_NAME
+                async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
+            
             logger.info(f"Connected to Cloud SQL instance: {settings.INSTANCE_CONNECTION_NAME}")
-            return connection_string, getconn
+            return connection_string, async_connection_string, getconn
         except ImportError:
             logger.warning("Cloud SQL libraries not available, falling back to direct PostgreSQL connection")
     
     # Fall back to direct PostgreSQL connection
-    host = settings.DB_HOST
-    port = settings.DB_PORT
+    # For local development with Cloud SQL proxy, use 127.0.0.1 as host
+    if settings.ENVIRONMENT == "development" and os.environ.get("USE_CLOUD_SQL_PROXY", "").lower() == "true":
+        # When using Cloud SQL proxy locally, it forwards to localhost:5432
+        host = "127.0.0.1"
+        port = "5432"
+        logger.info(f"Using Cloud SQL Proxy for local development (localhost:{port})")
+    else:
+        host = settings.DB_HOST
+        port = settings.DB_PORT
+    
     user = settings.DB_USER
     password = settings.DB_PASS
     dbname = settings.DB_NAME
     
     connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
     logger.info(f"Using direct PostgreSQL connection to {host}:{port}")
-    return connection_string, None
+    return connection_string, async_connection_string, None
 
-# Create SQLAlchemy engine
+# Create SQLAlchemy engines
 try:
-    connection_string, creator_func = get_connection_string()
+    connection_string, async_connection_string, creator_func = get_connection_string()
+    
+    # Create sync engine for schema operations
     if creator_func:
         # If we got a creator function for Cloud SQL connector
         engine = create_engine(
@@ -71,7 +103,19 @@ try:
     else:
         # Standard direct connection
         engine = create_engine(connection_string)
-    logger.info("Database engine created successfully")
+    
+    # Create async engine (always using asyncpg)
+    async_engine = create_async_engine(
+        async_connection_string,
+        echo=False,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_recycle=1800,
+    )
+    
+    logger.info("Database engines created successfully")
+    logger.info(f"Async engine: {async_connection_string}")
 except Exception as e:
     logger.error(f"Error creating database engine: {str(e)}")
     raise
