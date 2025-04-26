@@ -13,7 +13,7 @@ if __name__ == "__main__":
     try:
         # Get port from environment variable
         port = int(os.environ.get("PORT", 8080))
-        logger.info(f"Starting server on port {port} in emergency mode")
+        logger.info(f"Starting server on port {port}")
         
         # Start the server with minimal settings
         uvicorn.run(
