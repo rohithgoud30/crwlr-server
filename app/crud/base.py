@@ -16,13 +16,16 @@ class CRUDBase:
     
     async def get(self, id: UUID) -> Optional[Dict[str, Any]]:
         """Get a record by ID."""
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
             query = select(self.table).where(self.table.c.id == id)
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
                 return dict(row)
             return None
+        finally:
+            await conn.close()
     
     async def get_multi(
         self, 
@@ -31,7 +34,8 @@ class CRUDBase:
         filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Get multiple records with optional filtering."""
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
             query = select(self.table).offset(skip).limit(limit)
             
             # Apply filters if provided
@@ -42,42 +46,67 @@ class CRUDBase:
                         
             result = await conn.execute(query)
             return [dict(row) for row in result.fetchall()]
+        finally:
+            await conn.close()
     
     async def create(self, obj_in: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new record."""
-        async with engine.connect() as conn:
-            # Filter out None values for optional fields
-            filtered_data = {k: v for k, v in obj_in.items() if v is not None}
-            query = insert(self.table).values(**filtered_data).returning(*self.table.columns)
+        conn = await engine.connect()
+        try:
+            query = insert(self.table).values(**obj_in).returning(*self.table.columns)
             result = await conn.execute(query)
             await conn.commit()
-            return dict(result.fetchone())
+            row = result.fetchone()
+            if row:
+                return dict(row)
+            return {}
+        finally:
+            await conn.close()
     
     async def update(self, id: UUID, obj_in: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update a record by ID."""
-        async with engine.connect() as conn:
-            # Filter out None values for optional fields
-            filtered_data = {k: v for k, v in obj_in.items() if v is not None}
-            query = (
-                update(self.table)
-                .where(self.table.c.id == id)
-                .values(**filtered_data)
-                .returning(*self.table.columns)
-            )
+        conn = await engine.connect()
+        try:
+            query = update(self.table).where(self.table.c.id == id).values(**obj_in).returning(*self.table.columns)
             result = await conn.execute(query)
             await conn.commit()
             row = result.fetchone()
             if row:
                 return dict(row)
             return None
+        finally:
+            await conn.close()
     
-    async def delete(self, id: UUID) -> bool:
+    async def remove(self, id: UUID) -> Optional[Dict[str, Any]]:
         """Delete a record by ID."""
-        async with engine.connect() as conn:
-            query = delete(self.table).where(self.table.c.id == id)
+        conn = await engine.connect()
+        try:
+            query = delete(self.table).where(self.table.c.id == id).returning(*self.table.columns)
             result = await conn.execute(query)
             await conn.commit()
-            return result.rowcount > 0
+            row = result.fetchone()
+            if row:
+                return dict(row)
+            return None
+        finally:
+            await conn.close()
+    
+    async def count(self, filters: Optional[Dict[str, Any]] = None) -> int:
+        """Count records with optional filtering."""
+        conn = await engine.connect()
+        try:
+            query = select(func.count()).select_from(self.table)
+            
+            # Apply filters if provided
+            if filters:
+                for field, value in filters.items():
+                    if hasattr(self.table.c, field):
+                        query = query.where(getattr(self.table.c, field) == value)
+                        
+            result = await conn.execute(query)
+            return result.scalar() or 0
+        finally:
+            await conn.close()
             
     async def paginate(
         self,
@@ -102,7 +131,8 @@ class CRUDBase:
         Returns:
         - Dictionary with items, total count, and pagination info
         """
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
             # Validate and normalize parameters
             if per_page not in valid_per_page:
                 per_page = valid_per_page[0]
@@ -158,4 +188,6 @@ class CRUDBase:
                 "total_pages": total_pages,
                 "has_next": page < total_pages,
                 "has_prev": page > 1
-            } 
+            }
+        finally:
+            await conn.close() 

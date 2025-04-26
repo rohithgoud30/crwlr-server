@@ -201,27 +201,37 @@ async def save_document_to_db(
         UUID of created/existing document or None if operation fails
     """
     try:
-        # Set a default logo URL
-        default_logo_url = "/placeholder.svg?height=48&width=48"
-        logo_url = default_logo_url
+        # Use company_name and logo_url from analysis if available
+        company_name = analysis.get('company_name', None)
+        logo_url = analysis.get('logo_url', None)
         
-        # Get the domain
-        parsed_url = urlparse(original_url)
-        domain = parsed_url.netloc
-        
-        # Extract company name from domain
-        company_name = extract_company_name_from_domain(domain)
-        
-        # Try to get a logo from Google's favicon service
-        try:
-            logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-            # Test if logo exists with a head request
-            response = requests.head(logo_url, timeout=5)
-            if response.status_code != 200:
-                logo_url = default_logo_url
-        except Exception as e:
-            logger.warning(f"Failed to get logo for {domain}: {e}")
-            logo_url = default_logo_url
+        # Only extract company name and logo if not already provided in analysis
+        if not company_name or not logo_url:
+            # Set a default logo URL
+            default_logo_url = "/placeholder.svg?height=48&width=48"
+            logo_url = logo_url or default_logo_url
+            
+            # Get the domain
+            parsed_url = urlparse(original_url)
+            domain = parsed_url.netloc
+            
+            # Extract company name from domain only if not already provided
+            if not company_name and domain:
+                company_name = extract_company_name_from_domain(domain)
+            elif not company_name:
+                company_name = "Unknown"
+            
+            # Get logo from Google's favicon service if not already provided
+            if logo_url == default_logo_url and domain:
+                try:
+                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+                    # Test if logo exists with a head request
+                    response = requests.head(logo_url, timeout=5)
+                    if response.status_code != 200:
+                        logo_url = default_logo_url
+                except Exception as e:
+                    logger.warning(f"Failed to get logo for {domain}: {e}")
+                    logo_url = default_logo_url
         
         logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
         

@@ -21,7 +21,7 @@ class User(UserBase):
     updated_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class DocumentBase(BaseModel):
@@ -48,7 +48,7 @@ class Document(DocumentBase):
     updated_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class SubmissionBase(BaseModel):
@@ -70,4 +70,4 @@ class Submission(SubmissionBase):
     updated_at: datetime
 
     class Config:
-        orm_mode = True 
+        from_attributes = True 

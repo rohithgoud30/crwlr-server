@@ -41,13 +41,10 @@ def get_connection_string() -> str:
                 )
                 return conn
             
-            # Create connection pool with cloud SQL connector
-            engine = create_engine(
-                "postgresql+pg8000://",
-                creator=getconn,
-            )
+            # Create connection string for PostgreSQL with Cloud SQL Proxy
+            connection_string = f"postgresql+pg8000://"
             logger.info(f"Connected to Cloud SQL instance: {settings.INSTANCE_CONNECTION_NAME}")
-            return engine
+            return connection_string, getconn
         except ImportError:
             logger.warning("Cloud SQL libraries not available, falling back to direct PostgreSQL connection")
     
@@ -60,16 +57,20 @@ def get_connection_string() -> str:
     
     connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
     logger.info(f"Using direct PostgreSQL connection to {host}:{port}")
-    return connection_string
+    return connection_string, None
 
 # Create SQLAlchemy engine
 try:
-    connection_string = get_connection_string()
-    if isinstance(connection_string, str):
-        engine = create_engine(connection_string)
+    connection_string, creator_func = get_connection_string()
+    if creator_func:
+        # If we got a creator function for Cloud SQL connector
+        engine = create_engine(
+            connection_string,
+            creator=creator_func,
+        )
     else:
-        # If we got an engine from Cloud SQL connector
-        engine = connection_string
+        # Standard direct connection
+        engine = create_engine(connection_string)
     logger.info("Database engine created successfully")
 except Exception as e:
     logger.error(f"Error creating database engine: {str(e)}")

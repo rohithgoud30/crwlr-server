@@ -11,7 +11,8 @@ class CRUDDocument(CRUDBase):
     
     async def get_by_url(self, url: str, document_type: Literal["tos", "pp"]) -> Optional[Dict[str, Any]]:
         """Get a document by URL and type."""
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
             query = self.table.select().where(
                 (self.table.c.url == url) & 
                 (self.table.c.document_type == document_type)
@@ -21,10 +22,13 @@ class CRUDDocument(CRUDBase):
             if row:
                 return dict(row)
             return None
+        finally:
+            await conn.close()
     
     async def get_by_retrieved_url(self, retrieved_url: str, document_type: Literal["tos", "pp"]) -> Optional[Dict[str, Any]]:
         """Get a document by retrieved URL and type."""
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
             query = self.table.select().where(
                 (self.table.c.retrieved_url == retrieved_url) & 
                 (self.table.c.document_type == document_type)
@@ -34,10 +38,13 @@ class CRUDDocument(CRUDBase):
             if row:
                 return dict(row)
             return None
+        finally:
+            await conn.close()
     
     async def increment_views(self, id: UUID) -> Optional[Dict[str, Any]]:
         """Increment the view counter for a document."""
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
             query = (
                 self.table.update()
                 .where(self.table.c.id == id)
@@ -50,6 +57,8 @@ class CRUDDocument(CRUDBase):
             if row:
                 return dict(row)
             return None
+        finally:
+            await conn.close()
     
     async def search_documents(
         self, 
@@ -70,7 +79,8 @@ class CRUDDocument(CRUDBase):
         Returns:
         - Dictionary with items, total count, and pagination info
         """
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
             # Calculate offset
             offset = (page - 1) * per_page
             
@@ -123,13 +133,16 @@ class CRUDDocument(CRUDBase):
                 "has_next": page < total_pages,
                 "has_prev": page > 1
             }
+        finally:
+            await conn.close()
     
     async def get_documents(
         self,
         document_type: Optional[Literal["tos", "pp"]] = None,
         sort_by: str = "most_recent",
         page: int = 1,
-        per_page: int = 6
+        per_page: int = 6,
+        search_text: str = ""
     ) -> Dict[str, Any]:
         """
         Get documents with sorting, filtering, and pagination
@@ -139,73 +152,13 @@ class CRUDDocument(CRUDBase):
         - sort_by: Sorting option (most_recent, oldest_first, a_to_z, z_to_a, most_viewed)
         - page: Page number (1-based)
         - per_page: Number of items per page (6, 9, 12, or 15)
+        - search_text: Optional search text for filtering
         
         Returns:
         - Dictionary with items, total count, and pagination info
         """
-        # Create filters dictionary
-        filters = {}
-        if document_type:
-            filters["document_type"] = document_type
-            
-        # Map sort_by values to column names and directions
-        sort_mapping = {
-            "most_recent": ("created_at", "desc"),
-            "oldest_first": ("created_at", "asc"),
-            "a_to_z": ("url", "asc"),
-            "z_to_a": ("url", "desc"),
-            "most_viewed": ("views", "desc"),
-        }
-        
-        # Set sorting parameters based on sort_by
-        if sort_by in sort_mapping:
-            order_by, order_direction = sort_mapping[sort_by]
-        else:
-            # Default to most_recent
-            order_by, order_direction = "created_at", "desc"
-        
-        # Use the base paginate method
-        return await self.paginate(
-            page=page,
-            per_page=per_page,
-            filters=filters,
-            order_by=order_by,
-            order_direction=order_direction,
-            valid_per_page=[6, 9, 12, 15]
-        )
-    
-    async def filter_documents(
-        self,
-        document_type: Optional[Literal["tos", "pp"]] = None,
-        search_text: Optional[str] = None,
-        sort_by: str = "most_recent",
-        page: int = 1,
-        per_page: int = 6
-    ) -> Dict[str, Any]:
-        """
-        Filter documents with search, sorting, and pagination
-        
-        Parameters:
-        - document_type: Filter by document type (tos or pp)
-        - search_text: Text to search for in various document fields
-        - sort_by: Sorting option (most_recent, oldest_first, a_to_z, z_to_a, most_viewed)
-        - page: Page number (1-based)
-        - per_page: Number of items per page (6, 9, 12, or 15)
-        
-        Returns:
-        - Dictionary with items, total count, and pagination info
-        """
-        # If no search text, use the simpler get_documents method
-        if not search_text:
-            return await self.get_documents(
-                document_type=document_type,
-                sort_by=sort_by,
-                page=page,
-                per_page=per_page
-            )
-            
-        # For text search, we need a custom implementation
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
             # Validate parameters
             valid_per_page = [6, 9, 12, 15]
             if per_page not in valid_per_page:
@@ -282,6 +235,8 @@ class CRUDDocument(CRUDBase):
                 "has_next": page < total_pages,
                 "has_prev": page > 1
             }
+        finally:
+            await conn.close()
 
 
 # Create an instance of CRUDDocument for use throughout the application
