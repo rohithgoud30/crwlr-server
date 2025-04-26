@@ -4,9 +4,12 @@ from fastapi.responses import RedirectResponse, JSONResponse
 import os
 import logging
 import sys  # Import sys
+import asyncio # Import asyncio
 
 # Import the API routers
 from app.api.v1.api import api_router, test_router
+# ---> ADDED: Import the Playwright Manager
+from app.api.v1.endpoints.extract import auth_manager 
 
 # Setup logging
 # logging.basicConfig(
@@ -42,6 +45,30 @@ app = FastAPI(
     description="CRWLR API for processing website terms and privacy policies.",
     version="1.0.0",
 )
+
+# ---> ADDED: Startup and Shutdown Events for Playwright
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Application startup: Initializing Playwright...")
+    try:
+        # Start Playwright with a timeout
+        await asyncio.wait_for(auth_manager.startup(), timeout=90.0) # 90 second timeout
+        logger.info("Playwright startup successful.")
+    except asyncio.TimeoutError:
+        logger.error("Playwright startup timed out after 90 seconds.")
+        # Optionally prevent app startup or set a flag
+        auth_manager.startup_failure = "Startup timed out"
+    except Exception as e:
+        logger.error(f"Playwright startup failed during app startup: {str(e)}", exc_info=True)
+        # Ensure startup_failure reflects the error
+        if not auth_manager.startup_failure:
+            auth_manager.startup_failure = str(e)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Application shutdown: Shutting down Playwright...")
+    await auth_manager.shutdown()
+    logger.info("Playwright shut down complete.")
 
 # Set up CORS middleware with explicit origins
 app.add_middleware(

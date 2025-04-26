@@ -57,8 +57,10 @@ class PlaywrightManager:
         try:
             # Get Chrome executable path from environment if provided
             chrome_path = os.environ.get("CHROME_PATH", None)
+            logger.info(f"Using Chrome executable path: {chrome_path if chrome_path else 'Default'}")
             
             # Start the Playwright process
+            logger.info("Attempting to start Playwright process...")
             self.playwright = await async_playwright().start()
             logger.info("Playwright process started successfully")
             
@@ -79,6 +81,8 @@ class PlaywrightManager:
             # Log browser launch details
             logger.info(f"Launching browser with args: {browser_args}")
             
+            # ---> ADDED: More logging around browser launch
+            logger.info("Attempting to launch browser...")
             # Launch the browser with appropriate arguments
             self.browser = await self.playwright.chromium.launch(
                 headless=True,
@@ -89,6 +93,8 @@ class PlaywrightManager:
             logger.info("Browser launched successfully")
             
             # Create a new browser context
+            # ---> ADDED: More logging around context creation
+            logger.info("Attempting to create browser context...")
             self.context = await self.browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 ignore_https_errors=True,
@@ -99,6 +105,8 @@ class PlaywrightManager:
             logger.info("Browser context created successfully")
             
             # Inject minimal stealth script
+            # ---> ADDED: More logging around init script
+            logger.info("Attempting to add init script...")
             await self.context.add_init_script(
                 """
             () => {
@@ -111,8 +119,12 @@ class PlaywrightManager:
             logger.info("Stealth script injected successfully")
             
             # Create test page to verify everything is working
+            # ---> ADDED: More logging around test page
+            logger.info("Attempting to create test page...")
             test_page = await self.context.new_page()
+            logger.info("Test page created. Attempting to navigate...")
             await test_page.goto("about:blank")
+            logger.info("Test page navigation successful. Attempting to close...")
             await test_page.close()
             logger.info("Test page created and closed successfully")
             
@@ -122,8 +134,9 @@ class PlaywrightManager:
             return True
             
         except Exception as e:
+            # ---> MODIFIED: Log the full traceback for startup errors
+            logger.error(f"Error during browser startup: {str(e)}", exc_info=True) # Add exc_info=True
             self.startup_failure = str(e)
-            logger.error(f"Error during browser startup: {str(e)}")
             # Try to clean up any partial initialization
             await self._cleanup_on_failure()
             raise
