@@ -3117,7 +3117,7 @@ async def bing_search_fallback(query, page):
                 .filter(item => item.title && item.url);
                 
             return results;
-        """
+        }""",
         )
 
         print(f"Found {len(search_results)} initial Bing results")
@@ -4049,36 +4049,6 @@ async def find_tos_via_html_inspection(url: str) -> str:
     except Exception as e:
         logger.error(f"Error during HTML inspection: {e}")
         return None
-
-    # Initialize variables to prevent undefined name errors
-    url_analysis = []  # Or appropriate default like {} or None
-    normalized_results = {} # Or appropriate default
-    all_results = {} # Or appropriate default
-
-    # Sort URLs by final score
-    url_analysis.sort(key=lambda x: x['final_score'], reverse=True)
-    
-    # Create the consensus links list in the expected format for compatibility with calling code
-    consensus_links = [(item['url'], item['consensus_count'], item['tos_score']) for item in url_analysis]
-    
-    # Print analysis of top results
-    print(f"Found {len(url_analysis)} unique URLs across all search engines")
-    for i, item in enumerate(url_analysis[:5]):
-        print(f"Candidate #{i+1}: {item['url']}")
-        print(f"  Score breakdown: Consensus ({item['consensus_count']}), ToS ({item['tos_score']}), Domain match ({item['domain_match_score']}), Generality ({item['generality_score']})")
-        print(f"  Final score: {item['final_score']}")
-        
-        # List which engines found this URL
-        engines_found = [engine for engine, norm_url in normalized_results.items() if norm_url == item['url']]
-        print(f"  Found by: {', '.join(engines_found)}")
-    
-    # Return the URL with highest final score
-    if url_analysis:
-        best_url = url_analysis[0]['url']
-        print(f"Best result: {best_url} (Final score: {url_analysis[0]['final_score']})")
-        return best_url, all_results, consensus_links
-    
-    return None, all_results, consensus_links
 
 
 async def standard_search_fallback(search_query, page):
