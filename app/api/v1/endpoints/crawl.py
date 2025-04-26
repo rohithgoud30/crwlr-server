@@ -421,7 +421,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 await document_crud.increment_views(existing_doc['id'])
                 
                 # Return the existing document data
-                response.success = True
+                response.success = False  # Changed to False - indicates the document already exists
                 response.message = "Document already exists in database."
                 response.document_id = existing_doc['id']
                 response.tos_url = existing_doc.get('retrieved_url', '')
@@ -538,7 +538,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 await document_crud.increment_views(existing_doc['id'])
                 
                 # Return the existing document data
-                response.success = True
+                response.success = False  # Changed to False - indicates the document already exists
                 response.message = "Document already exists in database."
                 response.document_id = existing_doc['id']
                 response.one_sentence_summary = existing_doc.get('one_sentence_summary', '')
@@ -835,7 +835,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 await document_crud.increment_views(existing_doc['id'])
                 
                 # Return the existing document data
-                response.success = True
+                response.success = False  # Changed to False - indicates the document already exists
                 response.message = "Document already exists in database."
                 response.document_id = existing_doc['id']
                 response.pp_url = existing_doc.get('retrieved_url', '')
@@ -952,7 +952,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 await document_crud.increment_views(existing_doc['id'])
                 
                 # Return the existing document data
-                response.success = True
+                response.success = False  # Changed to False - indicates the document already exists
                 response.message = "Document already exists in database."
                 response.document_id = existing_doc['id']
                 response.one_sentence_summary = existing_doc.get('one_sentence_summary', '')
