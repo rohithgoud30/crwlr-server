@@ -1,12 +1,13 @@
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from contextlib import asynccontextmanager
 import subprocess
 import os
 import re
 import logging
 import asyncio
+import traceback
 
 from app.api.v1.api import api_router, test_router
 from app.core.config import settings
@@ -15,7 +16,10 @@ from app.core.database import create_tables
 from app.api.v1.endpoints.extract import auth_manager
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Reduce logging for specific libraries
@@ -73,26 +77,58 @@ def get_branch_name():
 async def lifespan(app: FastAPI):
     """
     Context manager for FastAPI app lifespan.
-    Handles startup and shutdown events.
+    Handles startup and shutdown events with detailed error handling.
     """
     # Startup: Initialize database
     cleanup_task = None
+    app.state.db_initialized = False
+    app.state.playwright_initialized = False
+    
+    # Try to initialize the database
     try:
+        logger.info("Initializing database tables...")
         create_tables()
         logger.info("Database tables setup complete")
-        
-        # Initialize Playwright browser
+        app.state.db_initialized = True
+    except Exception as e:
+        logger.error(f"Error setting up database tables: {str(e)}")
+        logger.error(traceback.format_exc())
+        # Continue anyway - we'll handle uninitialized DB in the endpoints
+    
+    # Try to initialize Playwright browser separately
+    try:
+        logger.info("Initializing Playwright browser...")
+        # Set a timeout for browser initialization
         try:
-            await auth_manager.startup()
+            # Use asyncio.wait_for to set a timeout on browser startup
+            await asyncio.wait_for(auth_manager.startup(), timeout=30)
             logger.info("Playwright browser started successfully")
+            app.state.playwright_initialized = True
             
-            # Start background task for tab cleanup
+            # Start background task for tab cleanup only if browser is initialized
             cleanup_task = asyncio.create_task(cleanup_browser_tabs())
             logger.info("Started background task for browser tab cleanup")
+        except asyncio.TimeoutError:
+            logger.error("Timeout while starting Playwright browser - continuing without it")
         except Exception as e:
-            logger.error(f"Error starting Playwright browser: {e}")
+            logger.error(f"Error during Playwright browser startup: {str(e)}")
+            logger.error(traceback.format_exc())
     except Exception as e:
-        logger.error(f"Error setting up database tables: {e}")
+        logger.error(f"Error setting up Playwright browser: {str(e)}")
+        logger.error(traceback.format_exc())
+        # Continue anyway - we'll handle uninitialized browser in the endpoints
+    
+    # Log the system state
+    initialized_components = []
+    if app.state.db_initialized:
+        initialized_components.append("Database")
+    if app.state.playwright_initialized:
+        initialized_components.append("Playwright")
+        
+    if initialized_components:
+        logger.info(f"Application started with: {', '.join(initialized_components)}")
+    else:
+        logger.warning("Application started without any initialized components!")
     
     yield  # This is where the app runs
     
@@ -109,11 +145,12 @@ async def lifespan(app: FastAPI):
             pass
     
     # Shutdown Playwright browser
-    try:
-        await auth_manager.shutdown()
-        logger.info("Playwright browser shut down successfully")
-    except Exception as e:
-        logger.error(f"Error shutting down Playwright browser: {e}")
+    if app.state.playwright_initialized:
+        try:
+            await auth_manager.shutdown()
+            logger.info("Playwright browser shut down successfully")
+        except Exception as e:
+            logger.error(f"Error shutting down Playwright browser: {e}")
 
 branch_name = get_branch_name()
 # Ensure we don't have raw template strings in the version
@@ -191,6 +228,20 @@ else:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+# Add a health check endpoint that doesn't rely on database or Playwright
+@app.get("/health", include_in_schema=False)
+async def health_check():
+    """
+    Simple health check endpoint that doesn't rely on any initialized components.
+    This helps Cloud Run confirm the application is running.
+    """
+    status = {
+        "status": "running",
+        "database_initialized": getattr(app.state, "db_initialized", False),
+        "playwright_initialized": getattr(app.state, "playwright_initialized", False),
+    }
+    return JSONResponse(content=status)
 
 # Include API router with authentication
 app.include_router(api_router, prefix=settings.API_V1_STR)

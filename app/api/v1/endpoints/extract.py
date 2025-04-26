@@ -15,6 +15,7 @@ from fastapi import APIRouter, Response
 from functools import lru_cache
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
 from fake_useragent import UserAgent
+import os
 
 # Fixed version with improved resource management and error handling
 
@@ -41,46 +42,134 @@ class PlaywrightManager:
         self.active_pages = set()  # Track active pages to ensure cleanup
         self.last_cleanup = time.time()
         self.cleanup_interval = 300  # Clean unused tabs every 5 minutes
+        self.startup_complete = False
+        self.startup_failure = None
 
     async def startup(self):
+        """Start the browser with improved error handling for containerized environments"""
+        # Don't try to start if we've already failed
+        if self.startup_failure:
+            logger.warning(f"Not attempting browser startup due to previous failure: {self.startup_failure}")
+            raise RuntimeError(f"Browser startup previously failed: {self.startup_failure}")
+        
         logger.info("Launching Playwright browser...")
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=True,
-            args=[
+        try:
+            # Get Chrome executable path from environment if provided
+            chrome_path = os.environ.get("CHROME_PATH", None)
+            
+            # Start the Playwright process
+            self.playwright = await async_playwright().start()
+            logger.info("Playwright process started successfully")
+            
+            # Browser launch arguments for containerized environment
+            browser_args = [
                 "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--ignore-certificate-errors",
-            ],
-        )
-        self.context = await self.browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            ignore_https_errors=True,
-            locale="en-US",
-            timezone_id="America/New_York",
-        )
-        # Inject minimal stealth script
-        await self.context.add_init_script(
+                "--no-sandbox",                        # Required in containerized environments
+                "--disable-dev-shm-usage",            # Overcome limited resource in containers
+                "--disable-gpu",                       # Disable GPU acceleration
+                "--disable-setuid-sandbox",            # Additional sandbox protection
+                "--single-process",                    # Use single process (helpful in containers)
+                "--ignore-certificate-errors",         # Ignore SSL issues
+                "--disable-accelerated-2d-canvas",     # Disable canvas acceleration 
+                "--disable-accelerated-video-decode",  # Disable video acceleration
+                "--disable-web-security"               # Disable web security for testing
+            ]
+            
+            # Log browser launch details
+            logger.info(f"Launching browser with args: {browser_args}")
+            
+            # Launch the browser with appropriate arguments
+            self.browser = await self.playwright.chromium.launch(
+                headless=True,
+                args=browser_args,
+                executable_path=chrome_path,
+                timeout=60000,  # 60 second timeout for browser launch
+            )
+            logger.info("Browser launched successfully")
+            
+            # Create a new browser context
+            self.context = await self.browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                ignore_https_errors=True,
+                locale="en-US",
+                timezone_id="America/New_York",
+                user_agent=get_random_user_agent()
+            )
+            logger.info("Browser context created successfully")
+            
+            # Inject minimal stealth script
+            await self.context.add_init_script(
+                """
+            () => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            }
             """
-        () => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        }
-        """
-        )
-        logger.info("PlaywrightManager ready.")
+            )
+            logger.info("Stealth script injected successfully")
+            
+            # Create test page to verify everything is working
+            test_page = await self.context.new_page()
+            await test_page.goto("about:blank")
+            await test_page.close()
+            logger.info("Test page created and closed successfully")
+            
+            # Mark startup as complete
+            self.startup_complete = True
+            logger.info("PlaywrightManager ready and operational")
+            return True
+            
+        except Exception as e:
+            self.startup_failure = str(e)
+            logger.error(f"Error during browser startup: {str(e)}")
+            # Try to clean up any partial initialization
+            await self._cleanup_on_failure()
+            raise
+
+    async def _cleanup_on_failure(self):
+        """Clean up resources after a failed startup"""
+        logger.info("Cleaning up after failed browser startup")
+        try:
+            if self.context:
+                await self.context.close()
+                self.context = None
+                
+            if self.browser:
+                await self.browser.close()
+                self.browser = None
+                
+            if self.playwright:
+                await self.playwright.stop()
+                self.playwright = None
+        except Exception as e:
+            logger.error(f"Error during cleanup after failed startup: {str(e)}")
 
     async def get_page(self):
+        """Get a new browser page with semaphore control and fallback mechanism"""
+        if not self.startup_complete:
+            logger.error("Cannot get page - browser not initialized")
+            raise RuntimeError("Browser not initialized")
+            
         await self.semaphore.acquire()
-        page = await self.context.new_page()
-        self.active_pages.add(page)
-
-        # Check if we need to clean up unused tabs
-        if time.time() - self.last_cleanup > self.cleanup_interval:
-            await self.cleanup_stale_pages()
-
-        return page
+        try:
+            page = await self.context.new_page()
+            self.active_pages.add(page)
+            
+            # Check if we need to clean up unused tabs
+            current_time = time.time()
+            if current_time - self.last_cleanup > self.cleanup_interval:
+                await self.cleanup_stale_pages()
+                
+            return page
+        except Exception as e:
+            # Release semaphore on error
+            self.semaphore.release()
+            logger.error(f"Error getting browser page: {str(e)}")
+            raise
 
     async def release_page(self, page):
+        """Release a page back to the pool"""
         try:
             if page in self.active_pages:
                 self.active_pages.remove(page)
@@ -110,6 +199,7 @@ class PlaywrightManager:
             logger.error(f"Error during stale page cleanup: {str(e)}")
 
     async def shutdown(self):
+        """Shut down the browser"""
         logger.info("Shutting down Playwright browser...")
         try:
             # Close all active pages first
@@ -122,10 +212,17 @@ class PlaywrightManager:
 
             if self.context:
                 await self.context.close()
+                self.context = None
+                
             if self.browser:
                 await self.browser.close()
+                self.browser = None
+                
             if self.playwright:
                 await self.playwright.stop()
+                self.playwright = None
+                
+            self.startup_complete = False
             logger.info("PlaywrightManager shut down.")
         except Exception as e:
             logger.error(f"Error during browser shutdown: {str(e)}")

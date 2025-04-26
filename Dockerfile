@@ -59,6 +59,13 @@ COPY . .
 
 # Set environment variables
 ENV PORT=8080
+ENV PYTHONUNBUFFERED=1
+ENV DEBUG=pw:api,pw:browser*
+
+# Playwright-specific environment variables for containerized environment
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PLAYWRIGHT_HEADLESS=true
 
 # Run the application using run.py which handles environment variables
-CMD ["python", "run.py"] 
+CMD ["python", "-u", "run.py"] 
