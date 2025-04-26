@@ -173,7 +173,7 @@ class PlaywrightManager:
             )
             logger.info("Stealth script injected into headless context successfully.")
             # --- MODIFICATION END ---
-
+            
             # Mark startup as complete
             self.startup_complete = True
             logger.info("PlaywrightManager ready and operational (headless)")
