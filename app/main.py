@@ -136,32 +136,5 @@ def root():
     """
     return RedirectResponse(url="/docs")
 
-# Simple API endpoint
-@app.get("/api/v1/status")
-async def status():
-    """
-    Return status information.
-    """
-    env_vars = {
-        "PROJECT_ID": os.environ.get("PROJECT_ID", "Not set"),
-        "ENVIRONMENT": os.environ.get("ENVIRONMENT", "Not set"),
-        "API_KEY": "Set" if os.environ.get("API_KEY") else "Not set",
-        "GEMINI_API_KEY": "Set" if os.environ.get("GEMINI_API_KEY") else "Not set",
-        "DB_USER": "Set" if os.environ.get("DB_USER") else "Not set",
-        "DB_NAME": "Set" if os.environ.get("DB_NAME") else "Not set",
-        "DB_HOST": "Set" if os.environ.get("DB_HOST") else "Not set",
-        "USE_CLOUD_SQL_PROXY": os.environ.get("USE_CLOUD_SQL_PROXY", "Not set"),
-        "INSTANCE_CONNECTION_NAME": os.environ.get("INSTANCE_CONNECTION_NAME", "Not set"),
-        "DB_IP_ADDRESS": os.environ.get("DB_IP_ADDRESS", "Not set"),
-        "BRANCH_NAME": branch_name
-    }
-    
-    return {
-        "status": "running",
-        "mode": os.environ.get("ENVIRONMENT", "development"),
-        "branch": branch_name,
-        "environment_variables_status": env_vars
-    }
-
 # Log API load
 logger.info(f"CRWLR API ({branch_name}) loaded successfully")

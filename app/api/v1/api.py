@@ -17,7 +17,7 @@ api_router.include_router(company_info.router, tags=["company"])
 # Test router without authentication for debugging
 test_router = APIRouter()
 
-@test_router.get("/test", tags=["test"])
+@test_router.get("/", tags=["test"])
 async def test_endpoint():
     """
     Test endpoint without authentication for debugging purposes.
