@@ -238,8 +238,11 @@ async def save_document_to_db(
         
         if 'word_frequencies' in analysis and isinstance(analysis['word_frequencies'], list):
             for item in analysis['word_frequencies']:
+                # If it's already a WordFrequency instance, convert to dict
+                if isinstance(item, WordFrequency):
+                    serializable_word_freqs.append(safe_model_dump(item))
                 # Explicitly check and convert known types to dictionary
-                if isinstance(item, dict):
+                elif isinstance(item, dict):
                     serializable_word_freqs.append(item)
                 elif hasattr(item, 'dict') and callable(getattr(item, 'dict')):
                     # Pydantic model or similar with dict() method
@@ -250,15 +253,16 @@ async def save_document_to_db(
                 else:
                     # If it's none of the above, log a warning and skip or handle explicitly if structure is known
                     logger.warning(f"Skipping word frequency item of unexpected type: {type(item)}")
-                    # Optional: Add specific handling if there's a known alternative structure
-                    # Example: if isinstance(item, MyWordFrequencyObject): serializable_word_freqs.append(item.to_dict())
         elif 'word_frequencies' in analysis:
              logger.warning(f"word_frequencies is not a list: {type(analysis['word_frequencies'])}")
         
         # Similarly handle text_mining metrics
         serializable_text_mining = {}
         if 'text_mining' in analysis:
-            if isinstance(analysis['text_mining'], dict):
+            # If it's already a TextMiningResults instance, convert to dict
+            if isinstance(analysis['text_mining'], TextMiningResults):
+                serializable_text_mining = safe_model_dump(analysis['text_mining'])
+            elif isinstance(analysis['text_mining'], dict):
                 serializable_text_mining = analysis['text_mining']
             elif hasattr(analysis['text_mining'], "dict") and callable(getattr(analysis['text_mining'], "dict")):
                 serializable_text_mining = analysis['text_mining'].dict()
@@ -750,7 +754,20 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         response.one_sentence_summary = summary_response.one_sentence_summary if summary_response else "Analysis failed"
         response.hundred_word_summary = summary_response.hundred_word_summary if summary_response else "Analysis failed"
         response.word_frequencies = word_freq_response.word_frequencies if word_freq_response else []
-        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults()
+        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults(
+            word_count=0,
+            avg_word_length=0.0,
+            sentence_count=0,
+            avg_sentence_length=0.0,
+            readability_score=0.0,
+            readability_interpretation="Analysis failed",
+            unique_word_ratio=0.0,
+            capital_letter_freq=0.0,
+            punctuation_density=0.0,
+            question_frequency=0.0,
+            paragraph_count=0,
+            common_word_percentage=0.0
+        )
         response.company_name = company_name
         response.logo_url = logo_url
         
@@ -809,7 +826,20 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         response.one_sentence_summary = "Error"
         response.hundred_word_summary = "Error"
         response.word_frequencies = []
-        response.text_mining = TextMiningResults()
+        response.text_mining = TextMiningResults(
+            word_count=0,
+            avg_word_length=0.0,
+            sentence_count=0,
+            avg_sentence_length=0.0,
+            readability_score=0.0,
+            readability_interpretation="Analysis failed",
+            unique_word_ratio=0.0,
+            capital_letter_freq=0.0,
+            punctuation_density=0.0,
+            question_frequency=0.0,
+            paragraph_count=0,
+            common_word_percentage=0.0
+        )
         response.company_name = "Error"
         response.logo_url = DEFAULT_LOGO_URL
         response.document_id = None
@@ -1164,7 +1194,20 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         response.one_sentence_summary = summary_response.one_sentence_summary if summary_response else "Analysis failed"
         response.hundred_word_summary = summary_response.hundred_word_summary if summary_response else "Analysis failed"
         response.word_frequencies = word_freq_response.word_frequencies if word_freq_response else []
-        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults()
+        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults(
+            word_count=0,
+            avg_word_length=0.0,
+            sentence_count=0,
+            avg_sentence_length=0.0,
+            readability_score=0.0,
+            readability_interpretation="Analysis failed",
+            unique_word_ratio=0.0,
+            capital_letter_freq=0.0,
+            punctuation_density=0.0,
+            question_frequency=0.0,
+            paragraph_count=0,
+            common_word_percentage=0.0
+        )
         response.company_name = company_name
         response.logo_url = logo_url
 
@@ -1221,7 +1264,20 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         response.one_sentence_summary = "Error"
         response.hundred_word_summary = "Error"
         response.word_frequencies = []
-        response.text_mining = TextMiningResults()
+        response.text_mining = TextMiningResults(
+            word_count=0,
+            avg_word_length=0.0,
+            sentence_count=0,
+            avg_sentence_length=0.0,
+            readability_score=0.0,
+            readability_interpretation="Analysis failed",
+            unique_word_ratio=0.0,
+            capital_letter_freq=0.0,
+            punctuation_density=0.0,
+            question_frequency=0.0,
+            paragraph_count=0,
+            common_word_percentage=0.0
+        )
         response.company_name = "Error"
         response.logo_url = DEFAULT_LOGO_URL
         response.document_id = None
@@ -1411,4 +1467,16 @@ def extract_text_mining_metrics(text: str):
     Returns:
         TextMiningResults object
     """
-    return perform_text_mining(text) 
+    return perform_text_mining(text)
+
+# For backwards compatibility with different Pydantic versions
+def safe_model_dump(model):
+    """Convert Pydantic model to dict, supporting both v1 and v2 APIs."""
+    if hasattr(model, 'model_dump'):
+        return model.model_dump()
+    elif hasattr(model, 'dict'):
+        return model.dict()
+    elif hasattr(model, '__dict__'):
+        return model.__dict__
+    else:
+        raise ValueError(f"Cannot convert model of type {type(model)} to dict") 
