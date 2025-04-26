@@ -25,7 +25,7 @@ from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
 from app.models.extract import ExtractRequest
 from app.models.summary import SummaryRequest, SummaryResponse
-from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse
+from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse, WordFrequency
 from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMiningResults
 from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse
 from app.models.database import DocumentCreate, SubmissionCreate
@@ -431,18 +431,81 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 # Parse JSON fields if needed
                 try:
                     if isinstance(existing_doc.get('word_frequencies'), str):
-                        response.word_frequencies = json.loads(existing_doc.get('word_frequencies', '[]'))
+                        # Parse the JSON string to a list of dictionaries
+                        word_freq_data = json.loads(existing_doc.get('word_frequencies', '[]'))
+                        # Convert each dictionary to a WordFrequency model instance
+                        response.word_frequencies = [
+                            WordFrequency(
+                                word=item.get('word', ''),
+                                count=item.get('count', 0),
+                                percentage=item.get('percentage', 0.0)
+                            ) 
+                            for item in word_freq_data
+                        ]
                     else:
-                        response.word_frequencies = existing_doc.get('word_frequencies', [])
+                        # Create WordFrequency instances from the list of dictionaries
+                        word_freq_data = existing_doc.get('word_frequencies', [])
+                        response.word_frequencies = [
+                            WordFrequency(
+                                word=item.get('word', ''),
+                                count=item.get('count', 0),
+                                percentage=item.get('percentage', 0.0)
+                            ) 
+                            for item in word_freq_data
+                        ]
                         
                     if isinstance(existing_doc.get('text_mining_metrics'), str):
-                        response.text_mining = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                        # Parse the JSON string to a dictionary
+                        tm_data = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                        # Create a TextMiningResults instance from the dictionary
+                        response.text_mining = TextMiningResults(
+                            word_count=tm_data.get('word_count', 0),
+                            avg_word_length=tm_data.get('avg_word_length', 0.0),
+                            sentence_count=tm_data.get('sentence_count', 0),
+                            avg_sentence_length=tm_data.get('avg_sentence_length', 0.0),
+                            readability_score=tm_data.get('readability_score', 0.0),
+                            readability_interpretation=tm_data.get('readability_interpretation', ''),
+                            unique_word_ratio=tm_data.get('unique_word_ratio', 0.0),
+                            capital_letter_freq=tm_data.get('capital_letter_freq', 0.0),
+                            punctuation_density=tm_data.get('punctuation_density', 0.0),
+                            question_frequency=tm_data.get('question_frequency', 0.0),
+                            paragraph_count=tm_data.get('paragraph_count', 0),
+                            common_word_percentage=tm_data.get('common_word_percentage', 0.0)
+                        )
                     else:
-                        response.text_mining = existing_doc.get('text_mining_metrics', {})
+                        # Create a TextMiningResults instance from the dictionary
+                        tm_data = existing_doc.get('text_mining_metrics', {})
+                        response.text_mining = TextMiningResults(
+                            word_count=tm_data.get('word_count', 0),
+                            avg_word_length=tm_data.get('avg_word_length', 0.0),
+                            sentence_count=tm_data.get('sentence_count', 0),
+                            avg_sentence_length=tm_data.get('avg_sentence_length', 0.0),
+                            readability_score=tm_data.get('readability_score', 0.0),
+                            readability_interpretation=tm_data.get('readability_interpretation', ''),
+                            unique_word_ratio=tm_data.get('unique_word_ratio', 0.0),
+                            capital_letter_freq=tm_data.get('capital_letter_freq', 0.0),
+                            punctuation_density=tm_data.get('punctuation_density', 0.0),
+                            question_frequency=tm_data.get('question_frequency', 0.0),
+                            paragraph_count=tm_data.get('paragraph_count', 0),
+                            common_word_percentage=tm_data.get('common_word_percentage', 0.0)
+                        )
                 except Exception as e:
                     logger.warning(f"Error parsing JSON fields from existing document: {e}")
                     response.word_frequencies = []
-                    response.text_mining = TextMiningResults()
+                    response.text_mining = TextMiningResults(
+                        word_count=0,
+                        avg_word_length=0.0,
+                        sentence_count=0,
+                        avg_sentence_length=0.0,
+                        readability_score=0.0,
+                        readability_interpretation="Error parsing data",
+                        unique_word_ratio=0.0,
+                        capital_letter_freq=0.0,
+                        punctuation_density=0.0,
+                        question_frequency=0.0,
+                        paragraph_count=0,
+                        common_word_percentage=0.0
+                    )
                 
                 response.company_name = existing_doc.get('company_name', '')
                 response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
@@ -484,18 +547,81 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 # Parse JSON fields if needed
                 try:
                     if isinstance(existing_doc.get('word_frequencies'), str):
-                        response.word_frequencies = json.loads(existing_doc.get('word_frequencies', '[]'))
+                        # Parse the JSON string to a list of dictionaries
+                        word_freq_data = json.loads(existing_doc.get('word_frequencies', '[]'))
+                        # Convert each dictionary to a WordFrequency model instance
+                        response.word_frequencies = [
+                            WordFrequency(
+                                word=item.get('word', ''),
+                                count=item.get('count', 0),
+                                percentage=item.get('percentage', 0.0)
+                            ) 
+                            for item in word_freq_data
+                        ]
                     else:
-                        response.word_frequencies = existing_doc.get('word_frequencies', [])
+                        # Create WordFrequency instances from the list of dictionaries
+                        word_freq_data = existing_doc.get('word_frequencies', [])
+                        response.word_frequencies = [
+                            WordFrequency(
+                                word=item.get('word', ''),
+                                count=item.get('count', 0),
+                                percentage=item.get('percentage', 0.0)
+                            ) 
+                            for item in word_freq_data
+                        ]
                         
                     if isinstance(existing_doc.get('text_mining_metrics'), str):
-                        response.text_mining = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                        # Parse the JSON string to a dictionary
+                        tm_data = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                        # Create a TextMiningResults instance from the dictionary
+                        response.text_mining = TextMiningResults(
+                            word_count=tm_data.get('word_count', 0),
+                            avg_word_length=tm_data.get('avg_word_length', 0.0),
+                            sentence_count=tm_data.get('sentence_count', 0),
+                            avg_sentence_length=tm_data.get('avg_sentence_length', 0.0),
+                            readability_score=tm_data.get('readability_score', 0.0),
+                            readability_interpretation=tm_data.get('readability_interpretation', ''),
+                            unique_word_ratio=tm_data.get('unique_word_ratio', 0.0),
+                            capital_letter_freq=tm_data.get('capital_letter_freq', 0.0),
+                            punctuation_density=tm_data.get('punctuation_density', 0.0),
+                            question_frequency=tm_data.get('question_frequency', 0.0),
+                            paragraph_count=tm_data.get('paragraph_count', 0),
+                            common_word_percentage=tm_data.get('common_word_percentage', 0.0)
+                        )
                     else:
-                        response.text_mining = existing_doc.get('text_mining_metrics', {})
+                        # Create a TextMiningResults instance from the dictionary
+                        tm_data = existing_doc.get('text_mining_metrics', {})
+                        response.text_mining = TextMiningResults(
+                            word_count=tm_data.get('word_count', 0),
+                            avg_word_length=tm_data.get('avg_word_length', 0.0),
+                            sentence_count=tm_data.get('sentence_count', 0),
+                            avg_sentence_length=tm_data.get('avg_sentence_length', 0.0),
+                            readability_score=tm_data.get('readability_score', 0.0),
+                            readability_interpretation=tm_data.get('readability_interpretation', ''),
+                            unique_word_ratio=tm_data.get('unique_word_ratio', 0.0),
+                            capital_letter_freq=tm_data.get('capital_letter_freq', 0.0),
+                            punctuation_density=tm_data.get('punctuation_density', 0.0),
+                            question_frequency=tm_data.get('question_frequency', 0.0),
+                            paragraph_count=tm_data.get('paragraph_count', 0),
+                            common_word_percentage=tm_data.get('common_word_percentage', 0.0)
+                        )
                 except Exception as e:
                     logger.warning(f"Error parsing JSON fields from existing document: {e}")
                     response.word_frequencies = []
-                    response.text_mining = TextMiningResults()
+                    response.text_mining = TextMiningResults(
+                        word_count=0,
+                        avg_word_length=0.0,
+                        sentence_count=0,
+                        avg_sentence_length=0.0,
+                        readability_score=0.0,
+                        readability_interpretation="Error parsing data",
+                        unique_word_ratio=0.0,
+                        capital_letter_freq=0.0,
+                        punctuation_density=0.0,
+                        question_frequency=0.0,
+                        paragraph_count=0,
+                        common_word_percentage=0.0
+                    )
                 
                 response.company_name = existing_doc.get('company_name', '')
                 response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
@@ -719,18 +845,81 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 # Parse JSON fields if needed
                 try:
                     if isinstance(existing_doc.get('word_frequencies'), str):
-                        response.word_frequencies = json.loads(existing_doc.get('word_frequencies', '[]'))
+                        # Parse the JSON string to a list of dictionaries
+                        word_freq_data = json.loads(existing_doc.get('word_frequencies', '[]'))
+                        # Convert each dictionary to a WordFrequency model instance
+                        response.word_frequencies = [
+                            WordFrequency(
+                                word=item.get('word', ''),
+                                count=item.get('count', 0),
+                                percentage=item.get('percentage', 0.0)
+                            ) 
+                            for item in word_freq_data
+                        ]
                     else:
-                        response.word_frequencies = existing_doc.get('word_frequencies', [])
+                        # Create WordFrequency instances from the list of dictionaries
+                        word_freq_data = existing_doc.get('word_frequencies', [])
+                        response.word_frequencies = [
+                            WordFrequency(
+                                word=item.get('word', ''),
+                                count=item.get('count', 0),
+                                percentage=item.get('percentage', 0.0)
+                            ) 
+                            for item in word_freq_data
+                        ]
                         
                     if isinstance(existing_doc.get('text_mining_metrics'), str):
-                        response.text_mining = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                        # Parse the JSON string to a dictionary
+                        tm_data = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                        # Create a TextMiningResults instance from the dictionary
+                        response.text_mining = TextMiningResults(
+                            word_count=tm_data.get('word_count', 0),
+                            avg_word_length=tm_data.get('avg_word_length', 0.0),
+                            sentence_count=tm_data.get('sentence_count', 0),
+                            avg_sentence_length=tm_data.get('avg_sentence_length', 0.0),
+                            readability_score=tm_data.get('readability_score', 0.0),
+                            readability_interpretation=tm_data.get('readability_interpretation', ''),
+                            unique_word_ratio=tm_data.get('unique_word_ratio', 0.0),
+                            capital_letter_freq=tm_data.get('capital_letter_freq', 0.0),
+                            punctuation_density=tm_data.get('punctuation_density', 0.0),
+                            question_frequency=tm_data.get('question_frequency', 0.0),
+                            paragraph_count=tm_data.get('paragraph_count', 0),
+                            common_word_percentage=tm_data.get('common_word_percentage', 0.0)
+                        )
                     else:
-                        response.text_mining = existing_doc.get('text_mining_metrics', {})
+                        # Create a TextMiningResults instance from the dictionary
+                        tm_data = existing_doc.get('text_mining_metrics', {})
+                        response.text_mining = TextMiningResults(
+                            word_count=tm_data.get('word_count', 0),
+                            avg_word_length=tm_data.get('avg_word_length', 0.0),
+                            sentence_count=tm_data.get('sentence_count', 0),
+                            avg_sentence_length=tm_data.get('avg_sentence_length', 0.0),
+                            readability_score=tm_data.get('readability_score', 0.0),
+                            readability_interpretation=tm_data.get('readability_interpretation', ''),
+                            unique_word_ratio=tm_data.get('unique_word_ratio', 0.0),
+                            capital_letter_freq=tm_data.get('capital_letter_freq', 0.0),
+                            punctuation_density=tm_data.get('punctuation_density', 0.0),
+                            question_frequency=tm_data.get('question_frequency', 0.0),
+                            paragraph_count=tm_data.get('paragraph_count', 0),
+                            common_word_percentage=tm_data.get('common_word_percentage', 0.0)
+                        )
                 except Exception as e:
                     logger.warning(f"Error parsing JSON fields from existing document: {e}")
                     response.word_frequencies = []
-                    response.text_mining = TextMiningResults()
+                    response.text_mining = TextMiningResults(
+                        word_count=0,
+                        avg_word_length=0.0,
+                        sentence_count=0,
+                        avg_sentence_length=0.0,
+                        readability_score=0.0,
+                        readability_interpretation="Error parsing data",
+                        unique_word_ratio=0.0,
+                        capital_letter_freq=0.0,
+                        punctuation_density=0.0,
+                        question_frequency=0.0,
+                        paragraph_count=0,
+                        common_word_percentage=0.0
+                    )
                 
                 response.company_name = existing_doc.get('company_name', '')
                 response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
@@ -772,18 +961,81 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 # Parse JSON fields if needed
                 try:
                     if isinstance(existing_doc.get('word_frequencies'), str):
-                        response.word_frequencies = json.loads(existing_doc.get('word_frequencies', '[]'))
+                        # Parse the JSON string to a list of dictionaries
+                        word_freq_data = json.loads(existing_doc.get('word_frequencies', '[]'))
+                        # Convert each dictionary to a WordFrequency model instance
+                        response.word_frequencies = [
+                            WordFrequency(
+                                word=item.get('word', ''),
+                                count=item.get('count', 0),
+                                percentage=item.get('percentage', 0.0)
+                            ) 
+                            for item in word_freq_data
+                        ]
                     else:
-                        response.word_frequencies = existing_doc.get('word_frequencies', [])
+                        # Create WordFrequency instances from the list of dictionaries
+                        word_freq_data = existing_doc.get('word_frequencies', [])
+                        response.word_frequencies = [
+                            WordFrequency(
+                                word=item.get('word', ''),
+                                count=item.get('count', 0),
+                                percentage=item.get('percentage', 0.0)
+                            ) 
+                            for item in word_freq_data
+                        ]
                         
                     if isinstance(existing_doc.get('text_mining_metrics'), str):
-                        response.text_mining = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                        # Parse the JSON string to a dictionary
+                        tm_data = json.loads(existing_doc.get('text_mining_metrics', '{}'))
+                        # Create a TextMiningResults instance from the dictionary
+                        response.text_mining = TextMiningResults(
+                            word_count=tm_data.get('word_count', 0),
+                            avg_word_length=tm_data.get('avg_word_length', 0.0),
+                            sentence_count=tm_data.get('sentence_count', 0),
+                            avg_sentence_length=tm_data.get('avg_sentence_length', 0.0),
+                            readability_score=tm_data.get('readability_score', 0.0),
+                            readability_interpretation=tm_data.get('readability_interpretation', ''),
+                            unique_word_ratio=tm_data.get('unique_word_ratio', 0.0),
+                            capital_letter_freq=tm_data.get('capital_letter_freq', 0.0),
+                            punctuation_density=tm_data.get('punctuation_density', 0.0),
+                            question_frequency=tm_data.get('question_frequency', 0.0),
+                            paragraph_count=tm_data.get('paragraph_count', 0),
+                            common_word_percentage=tm_data.get('common_word_percentage', 0.0)
+                        )
                     else:
-                        response.text_mining = existing_doc.get('text_mining_metrics', {})
+                        # Create a TextMiningResults instance from the dictionary
+                        tm_data = existing_doc.get('text_mining_metrics', {})
+                        response.text_mining = TextMiningResults(
+                            word_count=tm_data.get('word_count', 0),
+                            avg_word_length=tm_data.get('avg_word_length', 0.0),
+                            sentence_count=tm_data.get('sentence_count', 0),
+                            avg_sentence_length=tm_data.get('avg_sentence_length', 0.0),
+                            readability_score=tm_data.get('readability_score', 0.0),
+                            readability_interpretation=tm_data.get('readability_interpretation', ''),
+                            unique_word_ratio=tm_data.get('unique_word_ratio', 0.0),
+                            capital_letter_freq=tm_data.get('capital_letter_freq', 0.0),
+                            punctuation_density=tm_data.get('punctuation_density', 0.0),
+                            question_frequency=tm_data.get('question_frequency', 0.0),
+                            paragraph_count=tm_data.get('paragraph_count', 0),
+                            common_word_percentage=tm_data.get('common_word_percentage', 0.0)
+                        )
                 except Exception as e:
                     logger.warning(f"Error parsing JSON fields from existing document: {e}")
                     response.word_frequencies = []
-                    response.text_mining = TextMiningResults()
+                    response.text_mining = TextMiningResults(
+                        word_count=0,
+                        avg_word_length=0.0,
+                        sentence_count=0,
+                        avg_sentence_length=0.0,
+                        readability_score=0.0,
+                        readability_interpretation="Error parsing data",
+                        unique_word_ratio=0.0,
+                        capital_letter_freq=0.0,
+                        punctuation_density=0.0,
+                        question_frequency=0.0,
+                        paragraph_count=0,
+                        common_word_percentage=0.0
+                    )
                 
                 response.company_name = existing_doc.get('company_name', '')
                 response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
