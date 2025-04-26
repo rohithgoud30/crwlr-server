@@ -6,7 +6,7 @@ WORKDIR /app
 ARG BRANCH_NAME=unknown
 ENV BRANCH_NAME=${BRANCH_NAME}
 
-# Install required system dependencies for Playwright AND git
+# Install required system dependencies for Playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
@@ -36,7 +36,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-freefont-ttf \
     fonts-liberation \
     xvfb \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
