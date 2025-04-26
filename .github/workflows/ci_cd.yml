@@ -81,4 +81,4 @@ jobs:
             --max-instances 100 \
             --allow-unauthenticated \
             --service-account github-actions-deployer@crwlr-server.iam.gserviceaccount.com \
-            --set-env-vars "PROJECT_ID=crwlr-server,BRANCH_NAME=${GITHUB_REF##*/}"
+            --set-env-vars "PROJECT_ID=crwlr-server,BRANCH_NAME=${GITHUB_REF##*/},NO_PROXY=true"

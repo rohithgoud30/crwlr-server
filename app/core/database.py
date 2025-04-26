@@ -22,8 +22,23 @@ def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
     """
     Returns database connection string and optional creator function based on environment variables
     """
+    # Check if NO_PROXY environment variable is set (for Cloud Run without proxy)
+    if os.environ.get("NO_PROXY", "").lower() == "true":
+        logger.info("NO_PROXY mode: Using direct connection to Cloud SQL without proxy")
+        # Direct connection to Cloud SQL using public IP
+        host = settings.DB_HOST
+        port = settings.DB_PORT
+        user = settings.DB_USER
+        password = settings.DB_PASS
+        dbname = settings.DB_NAME
+        
+        connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+        async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
+        logger.info(f"Using direct PostgreSQL connection to {host}:{port}")
+        return connection_string, async_connection_string, None
+    
     # Check if running on Google Cloud with Cloud SQL Proxy
-    if hasattr(settings, 'INSTANCE_CONNECTION_NAME') and settings.INSTANCE_CONNECTION_NAME:
+    elif hasattr(settings, 'INSTANCE_CONNECTION_NAME') and settings.INSTANCE_CONNECTION_NAME:
         try:
             # Import cloud SQL connector - only needed in cloud environments
             from google.cloud.sql.connector import Connector, IPTypes
