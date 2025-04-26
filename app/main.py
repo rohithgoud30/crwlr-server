@@ -11,6 +11,9 @@ from app.api.v1.api import api_router, test_router
 # ---> ADDED: Import the Playwright Manager
 from app.api.v1.endpoints.extract import auth_manager 
 
+# Import settings
+from app.core.config import settings
+
 # Setup logging
 # logging.basicConfig(
 #     level=logging.INFO,
@@ -39,9 +42,13 @@ logger = logging.getLogger(__name__)
 # ---> ADDED: Log after configuration to confirm setup
 logger.info("Logging configured to stream to stdout.")
 
+# ---> MODIFIED: Get branch name for title
+branch_name = os.environ.get("BRANCH_NAME", "local") # Default to 'local' if not set
+app_title = f"{settings.PROJECT_NAME} ({branch_name})"
+
 # Create the FastAPI app
 app = FastAPI(
-    title="CRWLR API",
+    title=app_title,
     description="CRWLR API for processing website terms and privacy policies.",
     version="1.0.0",
 )
