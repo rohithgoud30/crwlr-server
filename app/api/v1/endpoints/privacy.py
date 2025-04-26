@@ -1674,9 +1674,8 @@ async def setup_browser(playwright=None):
         # Use random user agent
         user_agent = get_random_user_agent()
 
-        # Get headless setting from environment or default to True for performance
-        # For production environments, always use headless mode for better performance
-        headless = True
+        # Use headless=True for production deployment
+        headless = False # Changed from True for testing
         # Log the headless mode setting
         print(f"Browser headless mode: {headless}")
 

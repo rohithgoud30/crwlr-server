@@ -663,10 +663,8 @@ async def setup_browser(playwright=None):
         is_mobile = "Mobile" in user_agent or "Android" in user_agent
 
         # Get headless setting - use True for production deployment
-        headless = True
+        headless = False # Changed from True for testing
         # Log the setting 
-        print(f"Browser headless mode: {headless}")
-        
         print(f"Browser headless mode: {headless}")
 
         # Launch browser with optimized settings for bot-detection evasion
