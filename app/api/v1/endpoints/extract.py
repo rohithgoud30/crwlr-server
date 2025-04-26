@@ -607,22 +607,31 @@ async def extract_standard_html(
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
 
+        # Log response details AFTER successful request
+        logger.info(f"Standard request successful for {url}.")
+        logger.debug(f"Response Headers for {url}: {resp.headers}")
+        logger.debug(f"Requests detected encoding for {url}: {resp.encoding}")
+        logger.debug(f"Raw content start (first 500 bytes) for {url}: {resp.content[:500]}")
+
+
         # Explicitly handle encoding
         content_bytes = resp.content
-        encoding = resp.encoding if resp.encoding else 'utf-8' 
+        encoding = resp.encoding if resp.encoding else 'utf-8'
         # Fallback if requests guesses poorly (e.g., ISO-8859-1 is often a fallback for failed UTF-8 detection)
         if encoding.lower() == 'iso-8859-1':
             logger.warning(f"Requests detected ISO-8859-1 encoding for {url}, falling back to UTF-8.")
             encoding = 'utf-8'
-            
+
         try:
             # Decode using determined encoding, ignoring errors
             html_content = content_bytes.decode(encoding, errors='ignore')
             logger.info(f"Decoded content from {url} using encoding: {encoding}")
+            logger.debug(f"Decoded content start (first 500 chars) for {url}: {html_content[:500]}") # Log decoded content start
         except Exception as decode_error:
              logger.error(f"Failed to decode content from {url} with encoding {encoding}: {decode_error}. Falling back to UTF-8.")
              # Final fallback decoding attempt
              html_content = content_bytes.decode('utf-8', errors='ignore')
+             logger.debug(f"Decoded content start (UTF-8 fallback) for {url}: {html_content[:500]}") # Log decoded content start
 
 
         soup = BeautifulSoup(html_content, "html.parser")
@@ -791,6 +800,7 @@ async def extract_with_playwright(
 
         # Get content
         html = await page.content()
+        logger.debug(f"Playwright raw content start (first 500 chars) for {url}: {html[:500]}") # Log Playwright content start
         soup = BeautifulSoup(html, "html.parser")
         text = extract_content_from_soup(soup)
 
