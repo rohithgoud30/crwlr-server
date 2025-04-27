@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from uuid import UUID
 
@@ -21,6 +21,13 @@ class CrawlTosResponse(BaseModel):
     document_id: Optional[UUID] = None
     success: bool
     message: str
+    
+    @validator('success')
+    def validate_success(cls, v, values):
+        # If message indicates document exists, ensure success is False
+        if 'message' in values and values['message'] == "Document already exists in database.":
+            return False
+        return v
 
 class CrawlPrivacyRequest(BaseModel):
     url: str
@@ -37,4 +44,11 @@ class CrawlPrivacyResponse(BaseModel):
     word_frequencies: Optional[List[WordFrequency]] = None
     document_id: Optional[UUID] = None
     success: bool
-    message: str 
+    message: str
+    
+    @validator('success')
+    def validate_success(cls, v, values):
+        # If message indicates document exists, ensure success is False
+        if 'message' in values and values['message'] == "Document already exists in database.":
+            return False
+        return v 

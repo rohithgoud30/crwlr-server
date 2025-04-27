@@ -7,9 +7,11 @@ from sqlalchemy import insert
 from urllib.parse import urlparse
 import requests
 import random
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, Union
 import string
 import json
+import re
+import time
 
 from app.api.v1.endpoints.tos import find_tos
 from app.api.v1.endpoints.privacy import find_privacy_policy
@@ -23,8 +25,8 @@ from app.core.database import documents, create_async_engine, get_connection_str
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
-from app.models.extract import ExtractRequest
 from app.models.summary import SummaryRequest, SummaryResponse
+from app.models.extract import ExtractRequest, ExtractResponse
 from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse, WordFrequency
 from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMiningResults
 from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse
@@ -205,6 +207,9 @@ async def save_document_to_db(
     Returns:
         UUID of created/existing document or None if operation fails.
     """
+    # Handle binary content - sanitize before saving to prevent UTF-8 errors
+    document_content = sanitize_text_for_db(document_content)
+    
     content_length = len(document_content) if document_content else 0
     # Log the length and beginning of the document content
     logger.info(f"Saving document content (Length: {content_length}, First 1000 chars): {document_content[:1000]}") 
@@ -254,7 +259,7 @@ async def save_document_to_db(
                     # If it's none of the above, log a warning and skip or handle explicitly if structure is known
                     logger.warning(f"Skipping word frequency item of unexpected type: {type(item)}")
         elif 'word_frequencies' in analysis:
-             logger.warning(f"word_frequencies is not a list: {type(analysis['word_frequencies'])}")
+            logger.warning(f"word_frequencies is not a list: {type(analysis['word_frequencies'])}")
         
         # Similarly handle text_mining metrics
         serializable_text_mining = {}
@@ -293,61 +298,47 @@ async def save_document_to_db(
             raise Exception("Database engine could not be initialized for saving.")
         logger.info("Async database engine obtained/created within save_document_to_db.")
 
-        # Check if a document with this RETRIEVED URL already exists
-        try:
-            # Use the actual retrieved URL for checking existence
-            existing_doc = await document_crud.get_by_retrieved_url(retrieved_url, document_type)
-        except asyncio.TimeoutError:
-            logger.error(f"Database query timed out when checking for existing document with retrieved_url: {retrieved_url}")
-            raise Exception("Database connection timed out. Please check your database instance and configuration.")
+        # We already checked for documents with the original_url at the beginning of the handlers
+        # So we can proceed directly to inserting the new document
+        logger.info(f"Creating new document for originally requested URL: {original_url} (Retrieved from: {retrieved_url})")
         
-        if existing_doc:
-            logger.info(f"Document with retrieved URL {retrieved_url} already exists. Using existing document.")
-            document_id = existing_doc['id']
-            
-            # Update the document's views count
-            await document_crud.increment_views(document_id)
-        else:
-            # Create a new document
-            logger.info(f"Creating new document for originally requested URL: {original_url} (Retrieved from: {retrieved_url})")
-            
-            # Check and set default values for optional fields
-            one_sentence_summary = analysis.get('one_sentence_summary', '')
-            hundred_word_summary = analysis.get('hundred_word_summary', '')
-            
-            # Encode JSON fields explicitly
-            word_freq_json = json.dumps(serializable_word_freqs if serializable_word_freqs else [])
-            text_mining_json = json.dumps(serializable_text_mining if serializable_text_mining else {})
-            
-            # Create document data dictionary
-            document_values = {
-                "url": original_url, # Store the original request URL
-                "document_type": document_type,
-                "retrieved_url": retrieved_url, # Store the actual URL content came from
-                "company_name": company_name,
-                "logo_url": logo_url,
-                "raw_text": document_content,
-                "one_sentence_summary": one_sentence_summary,
-                "hundred_word_summary": hundred_word_summary,
-                "word_frequencies": word_freq_json, 
-                "text_mining_metrics": text_mining_json,
-                "views": 0
-            }
-            
-            # Explicit insert using SQLAlchemy Core with timeout handling
-            try:
-                async with db_engine.begin() as conn:
-                    query = insert(documents).values(**document_values).returning(documents.c.id)
-                    result = await conn.execute(query)
-                    row = result.fetchone()
-                    if row:
-                        document_id = row[0]
-                    else:
-                        logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url} (retrieved: {retrieved_url})")
-                        raise Exception("Failed to create document in database")
-            except asyncio.TimeoutError:
-                logger.error("Database insert operation timed out.")
-                raise Exception("Database connection timed out during insert. Please check your database instance and configuration.")
+        # Check and set default values for optional fields
+        one_sentence_summary = analysis.get('one_sentence_summary', '')
+        hundred_word_summary = analysis.get('hundred_word_summary', '')
+        
+        # Encode JSON fields explicitly
+        word_freq_json = json.dumps(serializable_word_freqs if serializable_word_freqs else [])
+        text_mining_json = json.dumps(serializable_text_mining if serializable_text_mining else {})
+        
+        # Create document data dictionary
+        document_values = {
+            "url": original_url, # Store the original request URL
+            "document_type": document_type,
+            "retrieved_url": retrieved_url, # Store the actual URL content came from
+            "company_name": company_name,
+            "logo_url": logo_url,
+            "raw_text": document_content,
+            "one_sentence_summary": one_sentence_summary,
+            "hundred_word_summary": hundred_word_summary,
+            "word_frequencies": word_freq_json, 
+            "text_mining_metrics": text_mining_json,
+            "views": 0
+        }
+        
+        # Explicit insert using SQLAlchemy Core with timeout handling
+        try:
+            async with db_engine.begin() as conn:
+                query = insert(documents).values(**document_values).returning(documents.c.id)
+                result = await conn.execute(query)
+                row = result.fetchone()
+                if row:
+                    document_id = row[0]
+                else:
+                    logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url} (retrieved: {retrieved_url})")
+                    raise Exception("Failed to create document in database")
+        except asyncio.TimeoutError:
+            logger.error("Database insert operation timed out.")
+            raise Exception("Database connection timed out during insert. Please check your database instance and configuration.")
         
         return document_id
     except Exception as e:
@@ -410,27 +401,32 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
     """
     Crawl a website to find its Terms of Service, analyze it, and save to database.
     """
-    logger.info(f"Received request to crawl TOS from URL: {request.url}")
+    logger.info(f"Received request to crawl Terms of Service from URL: {request.url}")
     response = CrawlTosResponse(url=request.url, success=False, message="Processing request...")
+    is_existing_document = False  # Flag to track if this is an existing document
     
     try:
-        # First check if the original URL is already in the database
-        # This avoids any processing if we've already handled this URL
+        # FIRST: Check if document with THIS EXACT URL already exists in database
+        # We only check by original URL and do it ONCE at the beginning
         try:
             existing_doc = await document_crud.get_by_url(request.url, "tos")
             if existing_doc:
-                logger.info(f"Document with original URL {request.url} already exists in database. Skipping processing.")
+                logger.info(f"Document for URL {request.url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
+                is_existing_document = True  # Set flag for existing document
                 
                 # Update views count for the existing document
                 await document_crud.increment_views(existing_doc['id'])
                 
-                # Return the existing document data
-                response.success = False  # Changed to False - indicates the document already exists
-                response.message = "Document already exists in database."
-                response.document_id = existing_doc['id']
-                response.tos_url = existing_doc.get('retrieved_url', '')
-                response.one_sentence_summary = existing_doc.get('one_sentence_summary', '')
-                response.hundred_word_summary = existing_doc.get('hundred_word_summary', '')
+                # Build response with success=False for existing documents
+                response = CrawlTosResponse(
+                    url=request.url,
+                    success=False,  # CRITICAL: Must be False for existing documents
+                    message="Document already exists in database.",
+                    document_id=existing_doc['id'],
+                    tos_url=existing_doc.get('retrieved_url', ''),
+                    one_sentence_summary=existing_doc.get('one_sentence_summary', ''),
+                    hundred_word_summary=existing_doc.get('hundred_word_summary', '')
+                )
                 
                 # Parse JSON fields if needed
                 try:
@@ -514,9 +510,16 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 response.company_name = existing_doc.get('company_name', '')
                 response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
                 
+                # CRITICAL: Ensure success is False for existing documents
+                response.success = False
+                
+                # Final check to ensure success is False for existing documents
+                if is_existing_document:
+                    response.success = False
+                    
                 return response
         except Exception as e:
-            logger.warning(f"Error checking for existing document by URL: {e}")
+            logger.warning(f"Error checking for existing document: {e}")
             # Continue with processing if the check fails
         
         # Find TOS URL
@@ -541,12 +544,16 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 # Update views count for the existing document
                 await document_crud.increment_views(existing_doc['id'])
                 
-                # Return the existing document data
-                response.success = False  # Changed to False - indicates the document already exists
-                response.message = "Document already exists in database."
-                response.document_id = existing_doc['id']
-                response.one_sentence_summary = existing_doc.get('one_sentence_summary', '')
-                response.hundred_word_summary = existing_doc.get('hundred_word_summary', '')
+                # Create a new response object with success=False
+                response = CrawlTosResponse(
+                    url=request.url,
+                    success=False,  # CRITICAL: Must be False for existing documents
+                    message="Document already exists in database.",
+                    document_id=existing_doc['id'],
+                    tos_url=tos_url,
+                    one_sentence_summary=existing_doc.get('one_sentence_summary', ''),
+                    hundred_word_summary=existing_doc.get('hundred_word_summary', '')
+                )
                 
                 # Parse JSON fields if needed
                 try:
@@ -630,6 +637,8 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 response.company_name = existing_doc.get('company_name', '')
                 response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
                 
+                # CRITICAL: Ensure success is False for existing documents
+                response.success = False
                 return response
         except Exception as e:
             logger.warning(f"Error checking for existing document: {e}")
@@ -799,22 +808,39 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                     user_id=None
                 )
                 response.document_id = document_id
+                # Success remains true since we saved the document and are returning valid data
             except Exception as e:
                 logger.error(f"Error saving document to database: {e}")
-                # Update response message if saving fails, but keep success=True as analysis was done
-                # Set success to False if saving fails, as per stricter requirement
+                # If saving failed but we have valid analyses, set success=false
+                # This indicates a new document was not created, even with valid data
                 response.success = False
                 response.message = "Successfully crawled and analyzed, but failed to save document."
         else:
-            logger.warning("One or more analyses failed. Document will not be saved to database.")
-            # Set overall success to False if any analysis failed
-            response.success = False 
-            response.message = "Crawled and extracted successfully, but one or more analyses failed."
+            logger.warning("One or more analyses failed, but returning available data.")
+            # Even if some analyses failed, if we have useful data, consider it partially successful
+            has_useful_data = (
+                (summary_response and (summary_response.one_sentence_summary or summary_response.hundred_word_summary)) or
+                (word_freq_response and word_freq_response.word_frequencies) or
+                (text_mining_response and text_mining_response.text_mining)
+            )
+            
+            if has_useful_data:
+                # Even with useful data, if it wasn't saved, success should be false
+                response.success = False
+                response.message = "Partial success: some analyses completed, returning available data but not saved."
+            else:
+                response.success = False
+                response.message = "Failed to analyze content properly, no useful data available."
+            
             # Ensure document_id is None if not saved
             response.document_id = None
             
         # Log extracted company name and logo URL (moved here to always log)
         logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
+            
+        # Final check before returning to ensure success is False for existing documents
+        if is_existing_document or response.message == "Document already exists in database.":
+            response.success = False
             
         return response
     except Exception as e:
@@ -852,25 +878,30 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
     """
     logger.info(f"Received request to crawl Privacy Policy from URL: {request.url}")
     response = CrawlPrivacyResponse(url=request.url, success=False, message="Processing request...")
+    is_existing_document = False  # Flag to track if this is an existing document
     
     try:
-        # First check if the original URL is already in the database
-        # This avoids any processing if we've already handled this URL
+        # FIRST: Check if document with THIS EXACT URL already exists in database
+        # We only check by original URL and do it ONCE at the beginning
         try:
             existing_doc = await document_crud.get_by_url(request.url, "pp")
             if existing_doc:
-                logger.info(f"Document with original URL {request.url} already exists in database. Skipping processing.")
+                logger.info(f"Document for URL {request.url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
+                is_existing_document = True  # Set flag for existing document
                 
                 # Update views count for the existing document
                 await document_crud.increment_views(existing_doc['id'])
                 
-                # Return the existing document data
-                response.success = False  # Changed to False - indicates the document already exists
-                response.message = "Document already exists in database."
-                response.document_id = existing_doc['id']
-                response.pp_url = existing_doc.get('retrieved_url', '')
-                response.one_sentence_summary = existing_doc.get('one_sentence_summary', '')
-                response.hundred_word_summary = existing_doc.get('hundred_word_summary', '')
+                # Create a new response object with success=False
+                response = CrawlPrivacyResponse(
+                    url=request.url,
+                    success=False,  # CRITICAL: Must be False for existing documents
+                    message="Document already exists in database.",
+                    document_id=existing_doc['id'],
+                    pp_url=existing_doc.get('retrieved_url', ''),
+                    one_sentence_summary=existing_doc.get('one_sentence_summary', ''),
+                    hundred_word_summary=existing_doc.get('hundred_word_summary', '')
+                )
                 
                 # Parse JSON fields if needed
                 try:
@@ -954,9 +985,16 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 response.company_name = existing_doc.get('company_name', '')
                 response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
                 
+                # CRITICAL: Ensure success is False for existing documents
+                response.success = False
+                
+                # Final check to ensure success is False for existing documents
+                if is_existing_document:
+                    response.success = False
+                    
                 return response
         except Exception as e:
-            logger.warning(f"Error checking for existing document by URL: {e}")
+            logger.warning(f"Error checking for existing document: {e}")
             # Continue with processing if the check fails
         
         # Find Privacy Policy URL
@@ -971,22 +1009,25 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         logger.info(f"Found Privacy Policy URL: {pp_url}")
         response.pp_url = pp_url
         
-        # Check if this URL has already been processed before continuing
-        # This avoids redundant processing for URLs that are already in the database
+        # Check if this exact pp_url has already been crawled
         try:
             existing_doc = await document_crud.get_by_retrieved_url(pp_url, "pp")
             if existing_doc:
-                logger.info(f"Document with URL {pp_url} already exists in database. Skipping processing.")
+                logger.info(f"Document for retrieved URL {pp_url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 
                 # Update views count for the existing document
                 await document_crud.increment_views(existing_doc['id'])
                 
-                # Return the existing document data
-                response.success = False  # Changed to False - indicates the document already exists
-                response.message = "Document already exists in database."
-                response.document_id = existing_doc['id']
-                response.one_sentence_summary = existing_doc.get('one_sentence_summary', '')
-                response.hundred_word_summary = existing_doc.get('hundred_word_summary', '')
+                # Create a new response object with success=False
+                response = CrawlPrivacyResponse(
+                    url=request.url,
+                    success=False,  # CRITICAL: Must be False for existing documents
+                    message="Document already exists in database.",
+                    document_id=existing_doc['id'],
+                    pp_url=existing_doc.get('retrieved_url', ''),
+                    one_sentence_summary=existing_doc.get('one_sentence_summary', ''),
+                    hundred_word_summary=existing_doc.get('hundred_word_summary', '')
+                )
                 
                 # Parse JSON fields if needed
                 try:
@@ -1070,6 +1111,13 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 response.company_name = existing_doc.get('company_name', '')
                 response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
                 
+                # CRITICAL: Ensure success is False for existing documents
+                response.success = False
+                
+                # Final check to ensure success is False for existing documents
+                if is_existing_document:
+                    response.success = False
+                    
                 return response
         except Exception as e:
             logger.warning(f"Error checking for existing document: {e}")
@@ -1241,20 +1289,37 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 response.document_id = document_id
             except Exception as e:
                 logger.error(f"Error saving document to database: {e}")
-                # Update response message if saving fails, but keep success=True as analysis was done
+                # If saving failed but we have valid analyses, set success=false
+                # This indicates a new document was not created, even with valid data
                 response.success = False
                 response.message = "Successfully crawled and analyzed, but failed to save document."
         else:
-            logger.warning("One or more analyses failed. Document will not be saved to database.")
-            # Set overall success to False if any analysis failed
-            response.success = False 
-            response.message = "Crawled and extracted successfully, but one or more analyses failed."
+            logger.warning("One or more analyses failed, but returning available data.")
+            # Even if some analyses failed, if we have useful data, consider it partially successful
+            has_useful_data = (
+                (summary_response and (summary_response.one_sentence_summary or summary_response.hundred_word_summary)) or
+                (word_freq_response and word_freq_response.word_frequencies) or
+                (text_mining_response and text_mining_response.text_mining)
+            )
+            
+            if has_useful_data:
+                # Even with useful data, if it wasn't saved, success should be false
+                response.success = False
+                response.message = "Partial success: some analyses completed, returning available data but not saved."
+            else:
+                response.success = False
+                response.message = "Failed to analyze content properly, no useful data available."
+            
             # Ensure document_id is None if not saved
             response.document_id = None
 
         # Log extracted company name and logo URL (moved here to always log)
         logger.info(f"Extracted company name: {company_name}, logo URL: {logo_url}")
 
+        # Final check before returning to ensure success is False for existing documents
+        if is_existing_document or response.message == "Document already exists in database.":
+            response.success = False
+            
         return response
     except Exception as e:
         # Log traceback for crawl_pp errors
@@ -1285,13 +1350,13 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
 
 async def extract_text_from_url(url: str) -> Optional[Tuple[str, str]]:
     """
-    Wrapper function to extract text from a URL with enhanced anti-bot protection.
+    Extracts plain text content from a URL.
     
     Args:
-        url: The URL to extract text from
+        url: URL to extract content from
         
     Returns:
-        Tuple of (extracted_text, error_message) or None if completely failed
+        Tuple of (extracted_text, error_message) or None if complete failure
     """
     logger.info(f"Extracting text from URL: {url}")
     
@@ -1321,10 +1386,19 @@ async def extract_text_from_url(url: str) -> Optional[Tuple[str, str]]:
                         logger.info(f"Retrying with different approach for URL: {url}")
                         await asyncio.sleep(random.uniform(5.0, 8.0))
                         continue
-                else:
-                    logger.info(f"Successfully extracted text from URL: {url} using method: {response.method_used}")
-                    # Return the successfully extracted text and no error
-                    return (response.text, None)
+                
+                # Check if the content appears to be binary data
+                if is_likely_binary_content(response.text):
+                    logger.warning(f"Content from {url} appears to be binary data.")
+                    
+                    # We'll keep the binary content but sanitize it before storing
+                    # This allows the summaries and analyses to still be saved
+                    logger.info(f"Successfully extracted content from URL: {url} (binary content detected)")
+                    return (response.text, "Binary content detected")
+                    
+                # Normal successful extraction
+                logger.info(f"Successfully extracted text from URL: {url} using method: {response.method_used}")
+                return (response.text, None)
             else:
                 # Log specific reason for failure if available
                 error_msg = response.message if hasattr(response, 'message') else "Unknown extraction error"
@@ -1479,4 +1553,79 @@ def safe_model_dump(model):
     elif hasattr(model, '__dict__'):
         return model.__dict__
     else:
-        raise ValueError(f"Cannot convert model of type {type(model)} to dict") 
+        raise ValueError(f"Cannot convert model of type {type(model)} to dict")
+
+def is_likely_binary_content(text: str) -> bool:
+    """
+    Detect if the content appears to be binary/encoded rather than readable text.
+    
+    Args:
+        text: The text to check
+        
+    Returns:
+        True if the text appears to be binary/encoded, False otherwise
+    """
+    if not text:
+        return False
+        
+    # Calculate the ratio of non-printable characters
+    printable_chars = set(string.printable)
+    if len(text) == 0:
+        return False
+        
+    # Sample the text if it's very long
+    sample_text = text[:10000] if len(text) > 10000 else text
+    
+    # Count non-printable characters
+    non_printable_count = sum(1 for char in sample_text if char not in printable_chars)
+    non_printable_ratio = non_printable_count / len(sample_text)
+    
+    # If more than 20% are non-printable, likely binary
+    if non_printable_ratio > 0.20:
+        return True
+        
+    # Check for common binary patterns (high frequency of control characters)
+    control_char_count = sum(1 for char in sample_text if ord(char) < 32 and char not in '\t\n\r')
+    control_char_ratio = control_char_count / len(sample_text)
+    
+    if control_char_ratio > 0.05:
+        return True
+        
+    return False
+
+def sanitize_text_for_db(text: str) -> str:
+    """
+    Sanitize text before saving to database:
+    - Removes null bytes and other invalid UTF-8 characters
+    - Returns sanitized text or empty string if full content is binary
+    
+    Args:
+        text: Original text that might contain invalid characters
+        
+    Returns:
+        Sanitized text safe for database storage
+    """
+    if not text:
+        return ""
+    
+    # If content appears to be primarily binary, return empty string with note
+    if is_likely_binary_content(text):
+        logger.warning("Content appears to be binary data; replacing with empty text")
+        return "[Binary content removed - not displayable as text]"
+        
+    # Remove null bytes which cause PostgreSQL UTF-8 encoding errors
+    sanitized = text.replace('\x00', '')
+    
+    # Replace other control characters except common whitespace
+    control_chars = ''.join(chr(i) for i in range(32) if i not in [9, 10, 13])  # Tab, LF, CR are allowed
+    for char in control_chars:
+        sanitized = sanitized.replace(char, '')
+    
+    try:
+        # Try to encode and decode to catch other UTF-8 issues
+        sanitized.encode('utf-8').decode('utf-8')
+    except UnicodeError:
+        # If encoding fails, try a more aggressive approach - keep only ASCII printable
+        sanitized = ''.join(c for c in sanitized if c in string.printable)
+    
+    return sanitized 
