@@ -646,11 +646,11 @@ async def setup_browser(playwright=None):
         # Determine platform and setup appropriate user agent
         system = platform.system()
         if system == "Darwin":
-            platform = "Macintosh; Intel Mac OS X"
+            platform_string = "Macintosh; Intel Mac OS X"
         elif system == "Windows":
-            platform = "Windows NT 10.0; Win64; x64"
+            platform_string = "Windows NT 10.0; Win64; x64"
         else:
-            platform = "Linux"
+            platform_string = "Linux"
             
         # Determine if mobile
         user_agent = get_random_user_agent()
