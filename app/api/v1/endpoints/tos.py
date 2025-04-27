@@ -330,97 +330,97 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         success, _, _ = await navigate_with_retry(page, url)
         if not success:
             logger.warning(f"Main site navigation had issues, but trying to analyze current page...")
+        
+        # We don't exit here with failure, we instead try other methods
+        # Try JS scanning approaches, then search engine fallbacks
+        
+        # First check for anti-bot patterns to log the reason
+        anti_bot_detected = await detect_anti_bot_patterns(page)
+        if anti_bot_detected:
+            logger.warning(f"Anti-bot protection detected. Will attempt search fallbacks.")
+        
+        # Try our search engine fallbacks instead of directly returning failure
+        unverified_result = None  # Will hold our best guess if we find one
+        
+        # Initialize a fresh page if possible for search fallbacks
+        try:
+            await page.close()
+            page = await browser_context.new_page()
+        except Exception as e:
+            logger.warning(f"Error creating new page for search fallbacks: {e}")
+        
+        # Domain-focused search approach
+        try:
+            # Extract clean domain name for search
+            domain = normalize_domain(url)
+            domain_name = domain.replace("www.", "")
             
-            # We don't exit here with failure, we instead try other methods
-            # Try JS scanning approaches, then search engine fallbacks
+            # Construct a proper search query
+            search_query = f"{domain_name} terms of service, terms of use, user agreement, legal terms"
+            logger.info(f"Using search query: {search_query}")
             
-            # First check for anti-bot patterns to log the reason
-            anti_bot_detected = await detect_anti_bot_patterns(page)
-            if anti_bot_detected:
-                logger.warning(f"Anti-bot protection detected. Will attempt search fallbacks.")
+            # Try duckduckgo search first
+            logger.info(f"Trying DuckDuckGo search fallback for {domain_name}")
+            duck_result = await duckduckgo_search_fallback(search_query, page)
             
-            # Try our search engine fallbacks instead of directly returning failure
-            unverified_result = None  # Will hold our best guess if we find one
-            
-            # Initialize a fresh page if possible for search fallbacks
-            try:
-                await page.close()
-                page = await browser_context.new_page()
-            except Exception as e:
-                logger.warning(f"Error creating new page for search fallbacks: {e}")
-            
-            # Domain-focused search approach
-            try:
-                # Extract clean domain name for search
-                domain = normalize_domain(url)
-                domain_name = domain.replace("www.", "")
-                
-                # Construct a proper search query
-                search_query = f"{domain_name} terms of service, terms of use, user agreement, legal terms"
-                logger.info(f"Using search query: {search_query}")
-                
-                # Try duckduckgo search first
-                logger.info(f"Trying DuckDuckGo search fallback for {domain_name}")
-                duck_result = await duckduckgo_search_fallback(search_query, page)
-                
-                if duck_result:
-                    logger.info(f"Found terms of service via DuckDuckGo search: {duck_result}")
-                    return ToSResponse(
-                        url=url,
-                        tos_url=duck_result,
-                        success=True,
-                        message="Terms of Service found via DuckDuckGo search (after navigation issues)",
-                        method_used="duckduckgo_search_fallback"
-                    )
-                
-                # Try Yahoo search next
-                logger.info(f"Trying Yahoo search fallback for {domain_name}")
-                yahoo_result = await yahoo_search_fallback(search_query, page)
-                
-                if yahoo_result:
-                    logger.info(f"Found terms of service via Yahoo search: {yahoo_result}")
-                    return ToSResponse(
-                        url=url,
-                        tos_url=yahoo_result,
-                        success=True,
-                        message="Terms of Service found via Yahoo search (after navigation issues)",
-                        method_used="yahoo_search_fallback"
-                    )
-                
-                # Try Bing search as last resort
-                logger.info(f"Trying Bing search fallback for {domain_name}")
-                bing_result = await bing_search_fallback(search_query, page)
-                
-                if bing_result:
-                    logger.info(f"Found terms of service via Bing search: {bing_result}")
-                    return ToSResponse(
-                        url=url,
-                        tos_url=bing_result,
-                        success=True,
-                        message="Terms of Service found via Bing search (after navigation issues)",
-                        method_used="bing_search_fallback"
-                    )
-                
-                # All search methods failed, return failure
-                logger.warning(f"All search fallbacks failed for {domain_name}")
+            if duck_result:
+                logger.info(f"Found terms of service via DuckDuckGo search: {duck_result}")
                 return ToSResponse(
                     url=url,
-                    tos_url=None,
-                    success=False,
-                    message="Navigation failed and all search fallbacks exhausted",
-                    method_used="all_search_failed"
+                    tos_url=duck_result,
+                    success=True,
+                    message="Terms of Service found via DuckDuckGo search (after navigation issues)",
+                    method_used="duckduckgo_search_fallback"
                 )
-                
-            except Exception as e:
-                logger.error(f"Error during search fallbacks: {e}")
+            
+            # Try Yahoo search next
+            logger.info(f"Trying Yahoo search fallback for {domain_name}")
+            yahoo_result = await yahoo_search_fallback(search_query, page)
+            
+            if yahoo_result:
+                logger.info(f"Found terms of service via Yahoo search: {yahoo_result}")
                 return ToSResponse(
                     url=url,
-                    tos_url=None,
-                    success=False,
-                    message=f"Navigation failed and search fallbacks encountered error: {str(e)}",
-                    method_used="search_fallback_error"
+                    tos_url=yahoo_result,
+                    success=True,
+                    message="Terms of Service found via Yahoo search (after navigation issues)",
+                    method_used="yahoo_search_fallback"
                 )
-                
+            
+            # Try Bing search as last resort
+            logger.info(f"Trying Bing search fallback for {domain_name}")
+            bing_result = await bing_search_fallback(search_query, page)
+            
+            if bing_result:
+                logger.info(f"Found terms of service via Bing search: {bing_result}")
+                return ToSResponse(
+                    url=url,
+                    tos_url=bing_result,
+                    success=True,
+                    message="Terms of Service found via Bing search (after navigation issues)",
+                    method_used="bing_search_fallback"
+                )
+            
+            # All search methods failed, return failure
+            logger.warning(f"All search fallbacks failed for {domain_name}")
+            return ToSResponse(
+                url=url,
+                tos_url=None,
+                success=False,
+                message="Navigation failed and all search fallbacks exhausted",
+                method_used="all_search_failed"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error during search fallbacks: {e}")
+            return ToSResponse(
+                url=url,
+                tos_url=None,
+                success=False,
+                message=f"Navigation failed and search fallbacks encountered error: {str(e)}",
+                method_used="search_fallback_error"
+            )
+        
         # Successfully navigated to the page, now analyze it for ToS links
         logger.info("Successfully navigated to page, analyzing...")
         
@@ -601,6 +601,19 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         )
     except Exception as e:
         logger.error(f"Error during browser automation: {e}")
+        
+        # Special handling for XServer-related errors
+        error_message = str(e).lower()
+        if "xserver" in error_message or "headed browser" in error_message:
+            logger.error("XServer error detected - this is a server configuration issue")
+            return ToSResponse(
+                url=url,
+                tos_url=None,
+                success=False,
+                message="Server configuration error: XServer missing but required for headed browser.",
+                method_used="server_configuration_error"
+            )
+            
         return handle_error(url, None, str(e))
     finally:
         # Always ensure browser resources are cleaned up to prevent leaks
@@ -656,25 +669,39 @@ async def setup_browser(playwright=None):
         user_agent = get_random_user_agent()
         is_mobile = "Mobile" in user_agent or "Android" in user_agent
 
-        # Get headless setting - use True for production deployment
-        headless = True  # Changed from False to True for stability
-        # Log the setting 
+        # ALWAYS use headless mode in production to avoid XServer errors
+        headless = True  # Force headless mode to prevent XServer issues
         print(f"Browser headless mode: {headless}")
 
+        # Additional args to handle potential XServer issues
+        browser_args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-infobars",
+            "--window-size=1366,768",
+            "--disable-automation",
+            "--disable-gpu",  # Disable GPU hardware acceleration
+            "--disable-software-rasterizer",  # Disable software rasterizer
+        ]
+
         # Launch browser with optimized settings for bot-detection evasion
-        browser = await playwright.chromium.launch(
-            headless=headless,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-infobars",
-                "--window-size=1366,768",
-                "--disable-automation",
-            ],
-            chromium_sandbox=False,
-            slow_mo=random.randint(10, 30),  # Randomized slight delay for more human-like behavior
-        )
+        try:
+            browser = await playwright.chromium.launch(
+                headless=headless,
+                args=browser_args,
+                chromium_sandbox=False,
+                slow_mo=random.randint(10, 30),  # Randomized slight delay for more human-like behavior
+            )
+        except Exception as browser_launch_error:
+            logger.error(f"Failed to launch browser: {browser_launch_error}")
+            # Second attempt with minimal configuration
+            logger.info("Trying fallback browser launch with minimal configuration")
+            browser = await playwright.chromium.launch(
+                headless=True,  # Force headless mode
+                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+                chromium_sandbox=False,
+            )
 
         # Create context with human-like settings and consistent client hints
         context = await browser.new_context(
@@ -775,20 +802,45 @@ async def setup_browser(playwright=None):
         return browser, context, page, random_delay
 
     except Exception as e:
+        logger.error(f"Error setting up browser: {e}")
         print(f"Error setting up browser: {e}")
+        
+        # Check for XServer-related errors
+        error_message = str(e).lower()
+        if "xserver" in error_message or "headed browser" in error_message:
+            logger.error("XServer error detected: This is likely due to running a non-headless browser in an environment without a display server")
+            logger.error("Please ensure headless=True is set or use xvfb-run if a headed browser is required")
+        
         # Cleanup resources in case of error
+        browser_logs = []
         if "browser" in locals() and browser:
             try:
+                # Try to collect browser logs if available
+                if hasattr(browser, "get_logs"):
+                    browser_logs = await browser.get_logs()
+            except Exception as log_err:
+                logger.error(f"Failed to collect browser logs: {log_err}")
+                
+            try:
                 await browser.close()
+                logger.info("Browser closed successfully after error")
             except Exception as close_err:
-                print(f"Error closing browser: {close_err}")
+                logger.error(f"Error closing browser: {close_err}")
         
-        if "playwright" in locals() and playwright and not playwright:
+        if "playwright" in locals() and playwright:
             try:
                 await playwright.stop()
+                logger.info("Playwright stopped successfully after error")
             except Exception as stop_err:
-                print(f"Error stopping playwright: {stop_err}")
+                logger.error(f"Error stopping playwright: {stop_err}")
+        
+        # Log browser logs if available
+        if browser_logs:
+            logger.error("Browser logs:")
+            for log in browser_logs:
+                logger.error(log)
                 
+        # Re-raise the exception for proper error handling
         raise
 
 
