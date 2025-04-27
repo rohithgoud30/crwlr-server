@@ -669,8 +669,8 @@ async def setup_browser(playwright=None):
         user_agent = get_random_user_agent()
         is_mobile = "Mobile" in user_agent or "Android" in user_agent
 
-        # Setting headless mode to False as requested
-        headless = False  # Set to False to enable browser UI visibility
+        # ALWAYS use headless mode in production to avoid XServer errors
+        headless = True  # Force headless mode to prevent XServer issues
         print(f"Browser headless mode: {headless}")
 
         # Additional args to handle potential XServer issues
@@ -694,15 +694,14 @@ async def setup_browser(playwright=None):
                 slow_mo=random.randint(10, 30),  # Randomized slight delay for more human-like behavior
             )
         except Exception as browser_launch_error:
-            logger.error(f"Failed to launch browser with headless={headless}: {browser_launch_error}")
-            # Second attempt with headless mode enabled as fallback
-            logger.info("Trying fallback browser launch with headless mode enabled")
+            logger.error(f"Failed to launch browser: {browser_launch_error}")
+            # Second attempt with minimal configuration
+            logger.info("Trying fallback browser launch with minimal configuration")
             browser = await playwright.chromium.launch(
-                headless=True,  # Force headless mode as fallback
+                headless=True,  # Force headless mode
                 args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
                 chromium_sandbox=False,
             )
-            logger.info("Successfully launched browser in headless mode as fallback")
 
         # Create context with human-like settings and consistent client hints
         context = await browser.new_context(
