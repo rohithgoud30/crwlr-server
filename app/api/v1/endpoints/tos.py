@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from playwright.async_api import async_playwright
 from typing import Optional, List
 from fake_useragent import UserAgent
+import platform
 
 from app.models.tos import ToSRequest, ToSResponse
 from app.models.privacy import PrivacyRequest, PrivacyResponse
@@ -633,37 +634,30 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
 
 async def setup_browser(playwright=None):
     """
-    Setup browser with optimized configurations for performance and anti-bot detection.
-    Implements more human-like behavior to avoid common bot detection mechanisms.
+    Setup browser with optimized settings to avoid detection and cloudflare protection.
+    Returns browser, context, and page objects.
     """
-    if not playwright:
-        playwright = await async_playwright().start()
     try:
-        # Generate a random user agent
-        user_agent = get_random_user_agent()
-        logger.info(f"Using user agent: {user_agent}")
+        # Initialize playwright if not provided
+        if not playwright:
+            import playwright.async_api
+            playwright = await playwright.async_api.async_playwright().start()
         
-        # Extract browser type for client hints
-        browser_type = "chrome"  # Default
-        if "Firefox" in user_agent:
-            browser_type = "firefox"
-        elif "Safari" in user_agent and "Chrome" not in user_agent:
-            browser_type = "safari"
-        elif "Edg/" in user_agent:
-            browser_type = "edge"
-            
-        # Determine platform from user agent
-        platform = "Windows"  # Default
-        if "Macintosh" in user_agent:
-            platform = "macOS"
-        elif "Linux" in user_agent:
+        # Determine platform and setup appropriate user agent
+        system = platform.system()
+        if system == "Darwin":
+            platform = "Macintosh; Intel Mac OS X"
+        elif system == "Windows":
+            platform = "Windows NT 10.0; Win64; x64"
+        else:
             platform = "Linux"
             
         # Determine if mobile
+        user_agent = get_random_user_agent()
         is_mobile = "Mobile" in user_agent or "Android" in user_agent
 
         # Get headless setting - use True for production deployment
-        headless = False # Changed from True for testing
+        headless = True  # Changed from False to True for stability
         # Log the setting 
         print(f"Browser headless mode: {headless}")
 
@@ -781,9 +775,20 @@ async def setup_browser(playwright=None):
         return browser, context, page, random_delay
 
     except Exception as e:
-        if "playwright" in locals():
-            await playwright.stop()
         print(f"Error setting up browser: {e}")
+        # Cleanup resources in case of error
+        if "browser" in locals() and browser:
+            try:
+                await browser.close()
+            except Exception as close_err:
+                print(f"Error closing browser: {close_err}")
+        
+        if "playwright" in locals() and playwright and not playwright:
+            try:
+                await playwright.stop()
+            except Exception as stop_err:
+                print(f"Error stopping playwright: {stop_err}")
+                
         raise
 
 
