@@ -136,8 +136,14 @@ class CRUDDocument(CRUDBase):
             
             result = await conn.execute(base_query, params)
             rows = result.fetchall()
-            # Map rows to dictionaries using the defined fields
-            items = [dict(zip([col.name for col in DOCUMENT_LIST_FIELDS], row)) for row in rows]
+            
+            # Map rows to dictionaries using the defined fields - use _mapping if available
+            try:
+                # First try to use _mapping attribute if available
+                items = [dict(row._mapping) for row in rows]
+            except (AttributeError, Exception):
+                # Fall back to zip method if _mapping isn't available
+                items = [dict(zip([col.name for col in DOCUMENT_LIST_FIELDS], row)) for row in rows]
             
             total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 0
             
@@ -235,8 +241,13 @@ class CRUDDocument(CRUDBase):
             result = await conn.execute(query, params)
             rows = result.fetchall()
             
-            # Map rows to dictionaries using the defined fields
-            items = [dict(zip([col.name for col in DOCUMENT_LIST_FIELDS], row)) for row in rows]
+            # Map rows to dictionaries using the defined fields - use _mapping if available
+            try:
+                # First try to use _mapping attribute if available
+                items = [dict(row._mapping) for row in rows]
+            except (AttributeError, Exception):
+                # Fall back to zip method if _mapping isn't available
+                items = [dict(zip([col.name for col in DOCUMENT_LIST_FIELDS], row)) for row in rows]
             
             total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 0
             
@@ -296,8 +307,15 @@ class CRUDDocument(CRUDBase):
             query = base_query.offset(offset).limit(per_page)
             
             result = await conn.execute(query)
-            # Map rows to dictionaries using the defined fields
-            items = [dict(zip([col.name for col in DOCUMENT_LIST_FIELDS], row)) for row in result.fetchall()]
+            rows = result.fetchall()
+            
+            # Map rows to dictionaries using the defined fields - use _mapping if available
+            try:
+                # First try to use _mapping attribute if available
+                items = [dict(row._mapping) for row in rows]
+            except (AttributeError, Exception):
+                # Fall back to zip method if _mapping isn't available
+                items = [dict(zip([col.name for col in DOCUMENT_LIST_FIELDS], row)) for row in rows]
             
             total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 0
             

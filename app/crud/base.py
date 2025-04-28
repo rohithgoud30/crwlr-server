@@ -21,7 +21,7 @@ class CRUDBase:
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
-                return dict(row)
+                return dict(row._mapping)
             return None
     
     async def get_multi(
@@ -41,7 +41,7 @@ class CRUDBase:
                         query = query.where(getattr(self.table.c, field) == value)
                         
             result = await conn.execute(query)
-            return [dict(row) for row in result.fetchall()]
+            return [dict(row._mapping) for row in result.fetchall()]
     
     async def create(self, obj_in: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new record."""
@@ -50,7 +50,7 @@ class CRUDBase:
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
-                return dict(row)
+                return dict(row._mapping)
             return {}
     
     async def update(self, id: UUID, obj_in: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -60,7 +60,7 @@ class CRUDBase:
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
-                return dict(row)
+                return dict(row._mapping)
             return None
     
     async def remove(self, id: UUID) -> Optional[Dict[str, Any]]:
@@ -70,7 +70,7 @@ class CRUDBase:
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
-                return dict(row)
+                return dict(row._mapping)
             return None
     
     async def count(self, filters: Optional[Dict[str, Any]] = None) -> int:
@@ -153,7 +153,7 @@ class CRUDBase:
             
             # Execute query
             result = await conn.execute(query)
-            items = [dict(row) for row in result.fetchall()]
+            items = [dict(row._mapping) for row in result.fetchall()]
             
             # Calculate pagination info
             total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 0
