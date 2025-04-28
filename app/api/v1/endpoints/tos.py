@@ -670,7 +670,7 @@ async def setup_browser(playwright=None):
         is_mobile = "Mobile" in user_agent or "Android" in user_agent
 
         # ALWAYS use headless mode in production to avoid XServer errors
-        headless = True  # Force headless mode to prevent XServer issues
+        headless = False  # Force headless mode to prevent XServer issues
         print(f"Browser headless mode: {headless}")
 
         # Additional args to handle potential XServer issues
