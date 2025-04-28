@@ -147,3 +147,85 @@ Once all changes related to the Cloud SQL setup are applied, commit them with:
 ```bash
 git commit -m "Feat(deploy): configure Cloud Run deployment with Cloud SQL Unix socket connection"
 ```
+
+---
+
+# Local Development with Cloud SQL Proxy
+
+When developing locally, you can connect to the Cloud SQL instance using the Cloud SQL Proxy tool. This allows you to securely connect to your production database without exposing it to the public internet.
+
+## Setting Up Cloud SQL Proxy
+
+### Mac Installation
+
+1. Install using Homebrew:
+
+   ```bash
+   brew install google-cloud-sdk-cloud-sql-proxy
+   ```
+
+2. Alternatively, download the binary directly:
+   ```bash
+   curl -o cloud-sql-proxy https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.8.1/cloud-sql-proxy.darwin.amd64
+   chmod +x cloud-sql-proxy
+   ```
+
+### Windows Installation
+
+1. Download the Windows executable from Google Cloud Storage:
+
+   ```
+   https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.8.1/cloud-sql-proxy.x64.exe
+   ```
+
+2. Rename it to `cloud-sql-proxy.exe` for ease of use
+
+3. Add the location to your PATH or move the executable to a directory that's already in your PATH
+
+## Running the Proxy
+
+Start the proxy with the following command:
+
+```bash
+cloud-sql-proxy crwlr-server:us-east4:crwlr-db --port 5432
+```
+
+This will make your Cloud SQL database available at `localhost:5432`.
+
+## Configuring Your Application
+
+When running locally with the proxy, use the following database connection string:
+
+```
+postgresql+asyncpg://USERNAME:PASSWORD@localhost:5432/DATABASE_NAME
+```
+
+You may want to set up environment variables to handle the switch between local and Cloud Run deployments:
+
+```python
+# Example code for handling different environments
+import os
+
+# Check if running in Cloud Run (INSTANCE_CONNECTION_NAME will be set)
+if "INSTANCE_CONNECTION_NAME" in os.environ:
+    # Cloud Run - use Unix socket
+    host_connection = f"/cloudsql/{os.environ.get('INSTANCE_CONNECTION_NAME')}"
+    connection_string = f"postgresql+asyncpg://{os.environ.get('DB_USER')}:{os.environ.get('DB_PASS')}@/{os.environ.get('DB_NAME')}?host={host_connection}"
+else:
+    # Local development - use TCP via Cloud SQL Proxy
+    connection_string = f"postgresql+asyncpg://{os.environ.get('DB_USER')}:{os.environ.get('DB_PASS')}@localhost:5432/{os.environ.get('DB_NAME')}"
+```
+
+## Authentication
+
+The Cloud SQL Proxy uses your gcloud authentication. Make sure you're logged in:
+
+```bash
+gcloud auth login
+```
+
+And set the correct project:
+
+```bash
+gcloud config set project crwlr-server
+```
