@@ -373,6 +373,22 @@ class CRUDDocument(CRUDBase):
                 "total_count": total_count
             }
 
+    async def delete_document(self, id: UUID) -> bool:
+        """Delete a document by ID. Returns True if successful, False if document not found."""
+        async with async_engine.begin() as conn:
+            # Delete the document and return whether anything was deleted
+            query = (
+                self.table.delete()
+                .where(self.table.c.id == id)
+                .returning(self.table.c.id)
+            )
+            
+            result = await conn.execute(query)
+            deleted = result.fetchone()
+            
+            # Return True if something was deleted, False otherwise
+            return deleted is not None
+
 
 # Create an instance of CRUDDocument for use throughout the application
 document_crud = CRUDDocument(documents) 

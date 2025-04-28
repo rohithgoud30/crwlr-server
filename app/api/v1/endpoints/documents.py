@@ -160,4 +160,37 @@ async def get_document(
         print(f"Error retrieving document: {str(e)}")
         import traceback
         print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.delete("/documents/{document_id}", response_model=dict)
+async def delete_document(
+    document_id: UUID = Path(..., description="The ID of the document to delete"),
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Delete a document by ID.
+    
+    - **document_id**: UUID of the document to delete
+    
+    Returns:
+    - **success**: Boolean indicating whether deletion was successful
+    - **message**: Status message
+    """
+    try:
+        # Check if document exists first
+        document = await document_crud.get(document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Delete the document
+        success = await document_crud.delete_document(document_id)
+        
+        if success:
+            return {"success": True, "message": "Document deleted successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete document")
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") 
