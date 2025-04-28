@@ -47,15 +47,28 @@ class CRUDDocument(CRUDBase):
             return None
     
     async def increment_views(self, id: UUID) -> Optional[Dict[str, Any]]:
-        """Increment the view counter for a document."""
+        """Increment the view counter for a document without updating the updated_at timestamp."""
         async with async_engine.begin() as conn:
-            # Return all fields after incrementing
+            # First, get the current updated_at value
+            select_query = select(self.table.c.updated_at).where(self.table.c.id == id)
+            select_result = await conn.execute(select_query)
+            current_updated_at = select_result.scalar()
+            
+            if current_updated_at is None:
+                # Document not found
+                return None
+            
+            # Update the views and explicitly set updated_at to its current value
             query = (
                 self.table.update()
                 .where(self.table.c.id == id)
-                .values(views=self.table.c.views + 1)
+                .values(
+                    views=self.table.c.views + 1,
+                    updated_at=current_updated_at  # Explicitly preserve the current timestamp
+                )
                 .returning(*self.table.columns)
             )
+            
             result = await conn.execute(query)
             row = result.fetchone()
             if row:
