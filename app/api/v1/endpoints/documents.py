@@ -40,8 +40,8 @@ class DocumentSearchRequest(BaseModel):
     document_type: Optional[Literal["tos", "pp"]] = None
     page: int = Field(1, ge=1)
     per_page: int = Field(6, ge=1, le=100)
-    sort_by: str = "created_at"
-    sort_order: Literal["asc", "desc"] = "desc"
+    sort_by: str = "company_name"
+    sort_order: Literal["asc", "desc"] = "asc"
 
 
 @router.post("/documents/search", response_model=DocumentSearchResponse)

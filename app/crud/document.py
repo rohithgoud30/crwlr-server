@@ -81,8 +81,8 @@ class CRUDDocument(CRUDBase):
         document_type: Optional[Literal["tos", "pp"]] = None,
         page: int = 1,
         per_page: int = 20,
-        sort_by: str = "created_at",
-        sort_order: str = "desc"
+        sort_by: str = "company_name",
+        sort_order: str = "asc"
     ) -> Dict[str, Any]:
         """
         Search documents by company name with pagination and sorting.
@@ -98,10 +98,10 @@ class CRUDDocument(CRUDBase):
                 "logo_url", "views", "created_at", "updated_at"
             ]
             if sort_by not in valid_columns:
-                sort_by = "created_at"
+                sort_by = "company_name"
                 
             if sort_order.lower() not in ["asc", "desc"]:
-                sort_order = "desc"
+                sort_order = "asc"
                 
             offset = (page - 1) * per_page
             order_clause = f"ORDER BY {sort_by} {sort_order.upper()}"
@@ -176,8 +176,8 @@ class CRUDDocument(CRUDBase):
         document_type: Optional[Literal["tos", "pp"]] = None,
         page: int = 1,
         per_page: int = 20,
-        sort_by: str = "created_at",
-        sort_order: str = "desc"
+        sort_by: str = "company_name",
+        sort_order: str = "asc"
     ) -> Dict[str, Any]:
         """
         Search documents by text content with pagination and sorting.
@@ -192,10 +192,10 @@ class CRUDDocument(CRUDBase):
                 "logo_url", "views", "created_at", "updated_at"
             ]
             if sort_by not in valid_columns:
-                sort_by = "created_at"
+                sort_by = "company_name"
                 
             if sort_order.lower() not in ["asc", "desc"]:
-                sort_order = "desc"
+                sort_order = "asc"
                 
             offset = (page - 1) * per_page
             order_clause = f"ORDER BY {sort_by} {sort_order.upper()}"
@@ -279,8 +279,8 @@ class CRUDDocument(CRUDBase):
         page: int = 1,
         per_page: int = 20,
         document_type: Optional[Literal["tos", "pp"]] = None,
-        order_by: str = "created_at",
-        order_direction: str = "desc"
+        order_by: str = "company_name",
+        order_direction: str = "asc"
     ) -> Dict[str, Any]:
         """
         Get documents with pagination, filtering, and sorting.
@@ -295,10 +295,10 @@ class CRUDDocument(CRUDBase):
                 "logo_url", "views", "created_at", "updated_at"
             ]
             if order_by not in valid_columns:
-                order_by = "created_at"
+                order_by = "company_name"
                 
             if order_direction.lower() not in ["asc", "desc"]:
-                order_direction = "desc"
+                order_direction = "asc"
                 
             offset = (page - 1) * per_page
             
