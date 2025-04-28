@@ -73,6 +73,28 @@ async def search_documents(
     return results
 
 
+class DocumentCountResponse(BaseModel):
+    tos_count: int
+    pp_count: int
+    total_count: int
+
+
+@router.get("/documents/stats", response_model=DocumentCountResponse)
+async def get_document_counts(
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Get total counts of ToS and Privacy Policy documents.
+    
+    Returns:
+    - **tos_count**: Total number of Terms of Service documents
+    - **pp_count**: Total number of Privacy Policy documents
+    - **total_count**: Total number of all documents
+    """
+    counts = await document_crud.get_document_counts()
+    return counts
+
+
 # Use the full Document model for fetching a single document
 @router.get("/documents/{document_id}", response_model=Document)
 async def get_document(

@@ -329,6 +329,37 @@ class CRUDDocument(CRUDBase):
                 "has_prev": page > 1
             }
 
+    async def get_document_counts(self) -> Dict[str, int]:
+        """
+        Get counts of documents by type.
+        Returns a dictionary with counts for each document type.
+        """
+        async with async_engine.connect() as conn:
+            # Get count for tos documents
+            tos_query = select(func.count()).select_from(self.table).where(
+                self.table.c.document_type == "tos"
+            )
+            tos_result = await conn.execute(tos_query)
+            tos_count = tos_result.scalar() or 0
+            
+            # Get count for pp documents
+            pp_query = select(func.count()).select_from(self.table).where(
+                self.table.c.document_type == "pp"
+            )
+            pp_result = await conn.execute(pp_query)
+            pp_count = pp_result.scalar() or 0
+            
+            # Get total count
+            total_query = select(func.count()).select_from(self.table)
+            total_result = await conn.execute(total_query)
+            total_count = total_result.scalar() or 0
+            
+            return {
+                "tos_count": tos_count,
+                "pp_count": pp_count,
+                "total_count": total_count
+            }
+
 
 # Create an instance of CRUDDocument for use throughout the application
 document_crud = CRUDDocument(documents) 
