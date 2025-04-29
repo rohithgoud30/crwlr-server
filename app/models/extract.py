@@ -25,4 +25,4 @@ class ExtractResponse(BaseModel):
     text: Optional[str] = None  # Extracted text content
     success: bool  # Indicates if the operation was successful
     message: str  # Status message or additional information about the processing result
-    method_used: Literal["standard", "playwright", "pdf"]  # Method used for extraction
+    method_used: Literal["standard", "playwright", "pdf", "simple_fetch"]  # Method used for extraction
