@@ -88,7 +88,7 @@ class PlaywrightManager:
             logger.info("Attempting to launch browser...")
             # Launch the browser with appropriate arguments
             self.browser = await self.playwright.chromium.launch(
-                headless=True,
+                headless=False,
                 args=browser_args,
                 executable_path=chrome_path,
                 timeout=60000,  # 60 second timeout for browser launch
