@@ -673,7 +673,6 @@ async def extract_standard_html(
         logger.debug(f"Requests detected encoding for {url}: {resp.encoding}")
         logger.debug(f"Raw content start (first 500 bytes) for {url}: {resp.content[:500]}")
 
-
         # Explicitly handle encoding
         content_bytes = resp.content
         encoding = resp.encoding if resp.encoding else 'utf-8'
@@ -693,10 +692,79 @@ async def extract_standard_html(
              html_content = content_bytes.decode('utf-8', errors='ignore')
              logger.debug(f"Decoded content start (UTF-8 fallback) for {url}: {html_content[:500]}") # Log decoded content start
 
-
         soup = BeautifulSoup(html_content, "html.parser")
-        text = extract_content_from_soup(soup)
-
+        
+        # Improved text extraction logic
+        logger.info("Applying enhanced content extraction with BeautifulSoup")
+        
+        # Check for bot verification page first
+        if detect_bot_verification_page(soup):
+            raise Exception("Bot verification page detected - cannot extract content")
+        
+        # Remove non-content elements
+        for tag in soup.select('script, style, nav, footer, header, noscript, iframe, aside, [class*="cookie"], [class*="banner"], [id*="banner"], [class*="popup"], [id*="popup"]'):
+            tag.extract()
+        
+        # Try to identify the main content area
+        main_content = None
+        
+        # 1. Try semantic elements first
+        for selector in ['article', 'main', '[role="main"]', 'section.content', 'div.content', '#content', '.post-content', '.entry-content']:
+            content_area = soup.select_one(selector)
+            if content_area and len(content_area.get_text(strip=True)) > 200:
+                main_content = content_area
+                logger.info(f"Found main content area using selector: {selector}")
+                break
+        
+        # 2. For terms/privacy pages specifically (based on document type)
+        if not main_content and doc_type in ['tos', 'pp']:
+            doc_type_selectors = [
+                f'[class*="{doc_type}"]', 
+                f'[id*="{doc_type}"]',
+                '[class*="terms"]',
+                '[id*="terms"]',
+                '[class*="privacy"]',
+                '[id*="privacy"]',
+                '[class*="legal"]',
+                '[id*="legal"]'
+            ]
+            
+            for selector in doc_type_selectors:
+                content_area = soup.select_one(selector)
+                if content_area and len(content_area.get_text(strip=True)) > 200:
+                    main_content = content_area
+                    logger.info(f"Found {doc_type} specific content area using selector: {selector}")
+                    break
+        
+        # 3. Fallback to body if no specific content area found
+        if not main_content:
+            main_content = soup.body or soup
+            logger.info("No specific content area found, using body element")
+        
+        # Extract meaningful text from paragraphs and headings
+        text_parts = []
+        
+        # Prioritize these content elements
+        for elem in main_content.select('p, h1, h2, h3, h4, h5, h6, li, div > text'):
+            # Skip very short elements that are likely UI components
+            elem_text = elem.get_text(strip=True)
+            if len(elem_text) > 15:  # Minimum length to filter out buttons/labels
+                text_parts.append(elem_text)
+        
+        # If we couldn't find enough paragraph content, fall back to all text
+        if len(''.join(text_parts)) < 500:
+            logger.warning("Not enough paragraph content found, using all text from content area")
+            text_parts = [main_content.get_text(separator=' ', strip=True)]
+        
+        # Join with newlines between paragraphs for better readability
+        text = '\n'.join(text_parts)
+        
+        # Final cleanup - remove excessive whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Add reasonable paragraph breaks
+        text = re.sub(r'([.!?])\s+', r'\1\n', text)
+        
         if len(text) < MIN_CONTENT_LENGTH:
             raise Exception("Insufficient content")
 
@@ -999,99 +1067,54 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
             except Exception as e:
                 logger.warning(f"Document finder failed: {str(e)}")
 
-    # Extraction tasks
-    # For certain websites, we want to try the Playwright method first as it often works better for JavaScript-heavy sites
-    use_playwright_first = any(
-        domain in url.lower()
-        for domain in [
-            "ebay.com",
-            "amazon.com",
-            "facebook.com",
-            "twitter.com",
-            "instagram.com",
-            "tiktok.com",
-            "netflix.com",
-            "airbnb.com",
-            "booking.com",
-            "expedia.com",
-        ]
-    )
-
-    tasks = []
+    # SEQUENTIAL EXTRACTION APPROACH
+    # First, check if it's a PDF and use PDF extractor if it is
     if is_pdf_url(url):
-        logger.info(f"Detected PDF URL, creating PDF extraction task for {url}")
-        tasks.append(asyncio.create_task(extract_pdf(url, doc_type, url)))
-    else:
-        if use_playwright_first:
-            # Try Playwright first for JS-heavy sites
-            logger.info(f"Using Playwright as primary extraction method for {url}")
-            # ---> ADDED: Log before potentially creating Playwright task
-            if auth_manager.startup_complete and auth_manager.context:  # Check if browser seems ready
-                logger.info(f"Playwright context seems ready, creating task for {url}")
-                tasks.append(
-                    asyncio.create_task(extract_with_playwright(url, doc_type, url))
-                )
-            else:
-                 logger.warning(f"Playwright context not ready, skipping Playwright task creation for {url}. Startup complete: {auth_manager.startup_complete}")
-                 # Log the specific startup failure if it exists
-                 if auth_manager.startup_failure:
-                      logger.error(f"Startup failure reason: {auth_manager.startup_failure}")
-
-
-            # ---> ADDED: Log before creating standard task
-            logger.info(f"Creating standard HTML task (secondary) for {url}")
-            tasks.append(asyncio.create_task(extract_standard_html(url, doc_type, url)))
-        else:
-            # Standard extraction first for most sites
-            # ---> ADDED: Log before creating standard task
-            logger.info(f"Using standard HTML as primary extraction method, creating task for {url}")
-            tasks.append(asyncio.create_task(extract_standard_html(url, doc_type, url)))
-
-            # ---> ADDED: Log before potentially creating Playwright task
-            if auth_manager.startup_complete and auth_manager.context: # Check if browser seems ready
-                logger.info(f"Playwright context seems ready, creating task (secondary) for {url}")
-                tasks.append(
-                    asyncio.create_task(extract_with_playwright(url, doc_type, url))
-                )
-            else:
-                 logger.warning(f"Playwright context not ready, skipping Playwright task creation (secondary) for {url}. Startup complete: {auth_manager.startup_complete}")
-                  # Log the specific startup failure if it exists
-                 if auth_manager.startup_failure:
-                      logger.error(f"Startup failure reason: {auth_manager.startup_failure}")
-
-
-    # Run tasks with better failure handling
-    all_errors = []
-
-    for task in tasks:
+        logger.info(f"Detected PDF URL, attempting PDF extraction for {url}")
         try:
-            res = await task
-            if res.success:
-                add_to_cache(cache_key, res.dict())
-                # Cancel remaining tasks
-                for t in tasks:
-                    if t is not task and not t.done():
-                        t.cancel()
-                return res
+            pdf_result = await extract_pdf(url, doc_type, url)
+            if pdf_result.success:
+                add_to_cache(cache_key, pdf_result.dict())
+                return pdf_result
         except Exception as e:
-            error_msg = str(e)
-            logger.warning(f"Extraction task failed: {error_msg}")
-            all_errors.append(error_msg)
-            continue
-
-    # If we get here, all methods failed
-    error_summary = (
-        "; ".join(all_errors) if all_errors else "Unknown extraction failure"
-    )
-    logger.error(f"All extraction methods failed for {url}: {error_summary}")
-    # ---> ADDED: Explicitly flush logs on final failure
+            logger.warning(f"PDF extraction failed: {str(e)}")
+            # Continue to other methods if PDF extraction fails
+    
+    # Next, try standard HTML extraction with BeautifulSoup first
+    logger.info(f"Attempting standard HTML extraction first for {url}")
+    try:
+        standard_result = await extract_standard_html(url, doc_type, url)
+        if standard_result.success:
+            add_to_cache(cache_key, standard_result.dict())
+            return standard_result
+    except Exception as e:
+        logger.warning(f"Standard HTML extraction failed: {str(e)}")
+        # If standard extraction fails, we'll try Playwright
+    
+    # Only try Playwright if standard extraction failed
+    logger.info(f"Standard extraction failed, attempting Playwright extraction for {url}")
+    if auth_manager.startup_complete and auth_manager.context:
+        try:
+            playwright_result = await extract_with_playwright(url, doc_type, url)
+            if playwright_result.success:
+                add_to_cache(cache_key, playwright_result.dict())
+                return playwright_result
+        except Exception as e:
+            logger.warning(f"Playwright extraction failed: {str(e)}")
+    else:
+        logger.warning(f"Skipping Playwright extraction - browser not initialized. Startup complete: {auth_manager.startup_complete}")
+        if auth_manager.startup_failure:
+            logger.error(f"Startup failure reason: {auth_manager.startup_failure}")
+    
+    # If we got here, all methods failed
+    logger.error(f"All extraction methods failed for {url}")
     logging.getLogger().handlers[0].flush()
-
+    
     return ExtractResponse(
         url=url,
         document_type=doc_type,
         text=None,
         success=False,
-        message=f"Extraction failed - all methods exhausted: {error_summary[:200]}",
+        message="Extraction failed - all methods exhausted",
         method_used="standard",
     )
