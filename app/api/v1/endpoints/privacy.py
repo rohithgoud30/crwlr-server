@@ -1,8 +1,8 @@
 import warnings
+import logging
 import re
 import time
 import random
-import logging
 import asyncio
 import requests
 from urllib.parse import urlparse, urljoin
