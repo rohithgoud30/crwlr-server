@@ -19,6 +19,9 @@ aiohttp==3.9.3
 beautifulsoup4==4.12.3
 html2text==2024.2.26
 PyPDF2==3.0.1
+chardet==5.2.0  # Character encoding detection
+ftfy==6.3.1     # Fixes text encoding issues
+brotli==1.0.9   # Brotli decompression support
 
 # NLP and Text Analysis
 nltk==3.8.1
