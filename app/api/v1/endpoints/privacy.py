@@ -1,11 +1,7 @@
-import warnings
-import re
 import time
 import random
-import logging
 import asyncio
-import requests
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from fastapi import APIRouter, HTTPException, Request, Response, Depends, status
 from typing import List, Dict, Tuple, Optional, Any
@@ -14,14 +10,14 @@ from playwright.async_api import async_playwright, TimeoutError
 from app.models.privacy import PrivacyRequest, PrivacyResponse
 from app.core.config import settings
 
-# Suppress XML parsed-as-HTML warnings
+# Suppress XMLParsedAsHTMLWarning from BeautifulSoup
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 def is_valid_url(url):
     try:
         result = urlparse(url)
         return all([result.scheme, result.netloc])
-    except:
+    except Exception:  # Changed bare except to except Exception
         return False
 
 router = APIRouter()
@@ -2327,7 +2323,7 @@ async def find_matching_privacy_link(page, context, unverified_result=None):
                     print(f"⭐⭐ Found 'customer privacy notice' in link text: {text} - HIGH PRIORITY")
                 elif "customer privacy policy" in text:
                     user_customer_score = 650  # High priority
-                    print(f"⭐ Found 'customer privacy policy' in link text: {text} - HIGH PRIORITY")
+                    print(f"⭐⭐ Found 'customer privacy policy' in link text: {text} - HIGH PRIORITY")
                 elif "user privacy" in text:
                     user_customer_score = 600  # Good priority
                     print(f"⭐ Found 'user privacy' in link text: {text} - GOOD PRIORITY")
@@ -3217,3 +3213,30 @@ def prefer_main_domain(links, main_domain):
     
     # Return main domain links first, then others
     return main_domain_links + other_links
+
+
+async def click_and_wait_for_navigation(page, element, timeout=2000):
+    """Click an element and wait for navigation, with optimized timeout."""
+    try:
+        # Store the current URL before clicking
+        current_url = page.url
+        
+        # Use page.wait_for_load_state instead of wait_for_navigation
+        async with page.expect_navigation(timeout=timeout, wait_until="domcontentloaded") as navigation_info:
+            await element.click()
+            
+        # Wait for navigation to complete or timeout
+        try:
+            await navigation_info.value
+            return True
+        except Exception as e:
+            print(f"Navigation error: {str(e)}")
+            # Even if navigation times out, still return True if the URL changed
+            new_url = page.url
+            if new_url != current_url:
+                setattr(page, "_last_url", new_url)
+                return True
+            return False
+    except Exception as e:
+        print(f"Error in click_and_wait_for_navigation: {str(e)}")
+        return False
