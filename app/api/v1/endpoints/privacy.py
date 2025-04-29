@@ -1648,7 +1648,7 @@ async def setup_browser(playwright=None):
         user_agent = get_user_agent()
 
         # Use headless=True for production deployment
-        headless = True # Changed from False to True for stability
+        headless = False # Changed from False to True for stability
         # Log the headless mode setting
         print(f"Browser headless mode: {headless}")
 
