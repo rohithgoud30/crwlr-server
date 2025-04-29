@@ -14,7 +14,6 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from fastapi import APIRouter, Response
 from functools import lru_cache
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
-from fake_useragent import UserAgent
 import os
 import sys
 import brotli
@@ -31,6 +30,9 @@ from app.api.v1.endpoints.privacy import find_privacy_policy
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Define consistent user agent
+CONSISTENT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
 # PlaywrightManager singleton for headful browser reuse
 
@@ -101,7 +103,7 @@ class PlaywrightManager:
                 ignore_https_errors=True,
                 locale="en-US",
                 timezone_id="America/New_York",
-                user_agent=get_random_user_agent()
+                user_agent=CONSISTENT_USER_AGENT
             )
             logger.info("Browser context created successfully")
             
@@ -157,7 +159,7 @@ class PlaywrightManager:
                 ignore_https_errors=True,
                 locale="en-US",
                 timezone_id="America/New_York",
-                user_agent=get_random_user_agent()
+                user_agent=CONSISTENT_USER_AGENT
             )
             logger.info("Headless browser context created successfully.")
 
@@ -303,29 +305,12 @@ MAX_PDF_PAGES = 30
 PDF_CHUNK = 5
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# Initialize UserAgent for random browser User-Agent strings
-ua_generator = UserAgent()
-
-# Function to get a random user agent
-
-
-def get_random_user_agent():
+# Replace random user agent function with consistent one
+def get_user_agent():
     """
-    Returns a random, realistic user agent string from the fake-useragent library.
-    Falls back to a default value if the API fails.
+    Returns a consistent user agent string.
     """
-    try:
-        return ua_generator.random
-    except Exception as e:
-        # Fallback user agents in case the API fails
-        fallback_user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-        ]
-        logger.error(f"Error getting random user agent: {e}. Using fallback.")
-        return random.choice(fallback_user_agents)
-
+    return CONSISTENT_USER_AGENT
 
 # URL sanitization
 
@@ -517,9 +502,9 @@ def fetch_text(url):
     """ Fetch all <p> text from url """
     try:
         res = requests.get(url, headers={
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Accept-Language": "en-US,en;q=0.9"
-})
+            "User-Agent": CONSISTENT_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9"
+        })
         soup = BeautifulSoup(res.text, 'html.parser')
         return soup.get_text(separator=' ', strip=True)
     except Exception as e:
@@ -631,9 +616,9 @@ async def extract_standard_html(
     url: str, doc_type: str, ret_url: str
 ) -> ExtractResponse:
     try:
-        # Enhanced browser-like headers with random user agent
+        # Enhanced browser-like headers with consistent user agent
         headers = {
-            "User-Agent": get_random_user_agent(),
+            "User-Agent": CONSISTENT_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "gzip, deflate, br",
@@ -836,9 +821,9 @@ async def extract_standard_html(
 
 async def extract_pdf(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
     try:
-        # Enhanced browser-like headers with random user agent
+        # Enhanced browser-like headers with consistent user agent
         headers = {
-            "User-Agent": get_random_user_agent(),
+            "User-Agent": CONSISTENT_USER_AGENT,
             "Accept": "application/pdf,*/*",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "gzip, deflate, br",

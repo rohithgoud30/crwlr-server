@@ -7,7 +7,6 @@ import logging
 from fastapi import APIRouter, HTTPException, status, Depends
 from playwright.async_api import async_playwright
 from typing import Optional, List
-from fake_useragent import UserAgent
 import platform
 
 from app.models.tos import ToSRequest, ToSResponse
@@ -19,26 +18,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Initialize UserAgent for random browser User-Agent strings
-ua_generator = UserAgent()
+# Define consistent user agent
+CONSISTENT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-# Function to get a random user agent
-def get_random_user_agent():
+# Replace random user agent function with consistent one
+def get_user_agent():
     """
-    Returns a random, realistic user agent string from the fake-useragent library.
-    Falls back to a default value if the API fails.
+    Returns a consistent user agent string.
     """
-    try:
-        return ua_generator.random
-    except Exception as e:
-        # Fallback user agents in case the API fails
-        fallback_user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-        ]
-        logger.error(f"Error getting random user agent: {e}. Using fallback.")
-        return random.choice(fallback_user_agents)
+    return CONSISTENT_USER_AGENT
 
 exactMatchPriorities = {
     "terms of service": 100,
@@ -666,7 +654,7 @@ async def setup_browser(playwright=None):
             platform_string = "Linux"
             
         # Determine if mobile
-        user_agent = get_random_user_agent()
+        user_agent = get_user_agent()
         is_mobile = "Mobile" in user_agent or "Android" in user_agent
 
         # ALWAYS use headless mode in production to avoid XServer errors
