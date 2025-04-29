@@ -1030,19 +1030,49 @@ async def extract_with_simple_fetch(url: str, doc_type: str, ret_url: str) -> Ex
     """Extract content using simple fetch_text method as an intermediate step."""
     try:
         logger.info(f"Attempting simple fetch extraction for: {url}")
-        
-        # Run fetch_text in a thread pool to avoid blocking
+
+        headers = {
+            "User-Agent": CONSISTENT_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br", # Ensure 'br' is accepted
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" # Added Accept header
+        }
+
+        # Run requests.get in a thread pool to avoid blocking
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(executor, fetch_text, url)
-        
+        resp = await loop.run_in_executor(
+            executor,
+            lambda: requests.get(url, headers=headers, timeout=STANDARD_TIMEOUT, allow_redirects=True)
+        )
+        resp.raise_for_status() # Check for HTTP errors
+
+        # --- Added Brotli Decompression Logic ---
+        content_bytes = resp.content
+        if resp.headers.get("Content-Encoding", "").lower() == "br":
+            try:
+                logger.info("Brotli encoding detected in simple fetch, decompressing...")
+                content_bytes = brotli.decompress(content_bytes)
+                logger.info("Decompressed Brotli content successfully for simple fetch")
+            except Exception as e:
+                logger.warning(f"Failed to decompress Brotli content in simple fetch: {e}")
+        # --- End Brotli Logic ---
+
+        # Decode content - prioritize UTF-8
+        try:
+            html_content = content_bytes.decode('utf-8', errors='replace')
+        except Exception:
+            # Fallback using detected encoding or default
+            detected_encoding = resp.encoding if resp.encoding else 'utf-8'
+            logger.warning(f"UTF-8 decoding failed in simple fetch, trying {detected_encoding}")
+            html_content = content_bytes.decode(detected_encoding, errors='replace')
+
+        # Parse with BeautifulSoup
+        soup = BeautifulSoup(html_content, 'html.parser')
+        text = soup.get_text(separator=' ', strip=True)
+
         # Log the result for debugging
         logger.info(f"Simple fetch result length: {len(text) if text else 0}")
-        
-        # Make sure we're not getting the error result
-        if text == "Not found":
-            logger.warning("Simple fetch returned 'Not found'")
-            raise Exception("Simple fetch could not retrieve content")
-            
+
         # Check if we got enough content
         if text and len(text) >= MIN_CONTENT_LENGTH:
             logger.info(
