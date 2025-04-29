@@ -1,41 +1,68 @@
-import warnings
-import logging
-import re
-import time
 import random
-import asyncio
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
-from fastapi import APIRouter, HTTPException, Request, Response, Depends, status
-from typing import List, Dict, Tuple, Optional, Any
-from playwright.async_api import async_playwright, TimeoutError
+import logging
+from typing import List, Optional, Union, Any
+import asyncio
+import re
+from fake_useragent import UserAgent
+import httpx
+import time
+
+from fastapi import APIRouter, HTTPException
+from playwright.async_api import async_playwright, Page
 
 from app.models.privacy import PrivacyRequest, PrivacyResponse
-from app.core.config import settings
 
-# Suppress XMLParsedAsHTMLWarning from BeautifulSoup
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-
-def is_valid_url(url):
+async def click_and_wait_for_navigation(page, element, timeout=2000):
+    """Click an element and wait for navigation, with optimized timeout."""
     try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except Exception:  # Changed bare except to except Exception
+        # Store the current URL before clicking
+        current_url = page.url
+        
+        # Use page.wait_for_load_state instead of wait_for_navigation
+        async with page.expect_navigation(timeout=timeout, wait_until="domcontentloaded") as navigation_info:
+            await element.click()
+            
+        # Wait for navigation to complete or timeout
+        try:
+            await navigation_info.value
+            return True
+        except Exception as e:
+            print(f"Navigation error: {str(e)}")
+            # Even if navigation times out, still return True if the URL changed
+            new_url = page.url
+            if new_url != current_url:
+                setattr(page, "_last_url", new_url)
+                return True
+            return False
+    except Exception as e:
+        print(f"Error in click_and_wait_for_navigation: {str(e)}")
         return False
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-# Define consistent user agent
-CONSISTENT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+# Initialize UserAgent for random browser User-Agent strings
+ua_generator = UserAgent()
 
-# Replace random user agent function with consistent one
-def get_user_agent():
+# Function to get a random user agent
+def get_random_user_agent():
     """
-    Returns a consistent user agent string.
+    Returns a random, realistic user agent string from the fake-useragent library.
+    Falls back to a default value if the API fails.
     """
-    return CONSISTENT_USER_AGENT
+    try:
+        return ua_generator.random
+    except Exception as e:
+        # Fallback user agents in case the API fails
+        fallback_user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        ]
+        print(f"Error getting random user agent: {e}. Using fallback.")
+        return random.choice(fallback_user_agents)
 
 """
 PRIVACY POLICY SCORING SYSTEM
@@ -1644,8 +1671,8 @@ async def setup_browser(playwright=None):
     if not playwright:
         playwright = await async_playwright().start()
     try:
-        # Use consistent user agent
-        user_agent = get_user_agent()
+        # Use random user agent
+        user_agent = get_random_user_agent()
 
         # Use headless=True for production deployment
         headless = True # Changed from False to True for production environment
@@ -2326,7 +2353,7 @@ async def find_matching_privacy_link(page, context, unverified_result=None):
                     print(f"⭐⭐ Found 'customer privacy notice' in link text: {text} - HIGH PRIORITY")
                 elif "customer privacy policy" in text:
                     user_customer_score = 650  # High priority
-                    print(f"⭐⭐ Found 'customer privacy policy' in link text: {text} - HIGH PRIORITY")
+                    print(f"⭐ Found 'customer privacy policy' in link text: {text} - HIGH PRIORITY")
                 elif "user privacy" in text:
                     user_customer_score = 600  # Good priority
                     print(f"⭐ Found 'user privacy' in link text: {text} - GOOD PRIORITY")
@@ -3216,30 +3243,3 @@ def prefer_main_domain(links, main_domain):
     
     # Return main domain links first, then others
     return main_domain_links + other_links
-
-
-async def click_and_wait_for_navigation(page, element, timeout=2000):
-    """Click an element and wait for navigation, with optimized timeout."""
-    try:
-        # Store the current URL before clicking
-        current_url = page.url
-        
-        # Use page.wait_for_load_state instead of wait_for_navigation
-        async with page.expect_navigation(timeout=timeout, wait_until="domcontentloaded") as navigation_info:
-            await element.click()
-            
-        # Wait for navigation to complete or timeout
-        try:
-            await navigation_info.value
-            return True
-        except Exception as e:
-            print(f"Navigation error: {str(e)}")
-            # Even if navigation times out, still return True if the URL changed
-            new_url = page.url
-            if new_url != current_url:
-                setattr(page, "_last_url", new_url)
-                return True
-            return False
-    except Exception as e:
-        print(f"Error in click_and_wait_for_navigation: {str(e)}")
-        return False
