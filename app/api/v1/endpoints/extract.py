@@ -513,6 +513,18 @@ def extract_content_from_soup(soup: BeautifulSoup) -> str:
     logger.info(f"Final cleaned content length: {len(cleaned_content)} characters")
     return cleaned_content
 
+def fetch_text(url):
+    """ Fetch all <p> text from url """
+    try:
+        res = requests.get(url, headers={
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept-Language": "en-US,en;q=0.9"
+})
+        soup = BeautifulSoup(res.text, 'html.parser')
+        return soup.get_text(separator=' ', strip=True)
+    except Exception as e:
+        logger.error(f"Error scraping {url}: {e}")
+        return "Not found"
 
 def detect_bot_verification_page(soup: BeautifulSoup) -> bool:
     """
@@ -1028,6 +1040,45 @@ async def extract_with_playwright(
                 logger.error(f"Error releasing Playwright page: {str(e)}")
 
 
+# Simple extraction using fetch_text
+async def extract_with_simple_fetch(url: str, doc_type: str, ret_url: str) -> ExtractResponse:
+    """Extract content using simple fetch_text method as an intermediate step."""
+    try:
+        logger.info(f"Attempting simple fetch extraction for: {url}")
+        
+        # Run fetch_text in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(executor, fetch_text, url)
+        
+        # Log the result for debugging
+        logger.info(f"Simple fetch result length: {len(text) if text else 0}")
+        
+        # Make sure we're not getting the error result
+        if text == "Not found":
+            logger.warning("Simple fetch returned 'Not found'")
+            raise Exception("Simple fetch could not retrieve content")
+            
+        # Check if we got enough content
+        if text and len(text) >= MIN_CONTENT_LENGTH:
+            logger.info(
+                f"Successfully extracted {len(text)} characters using simple fetch method"
+            )
+            return ExtractResponse(
+                url=ret_url,
+                document_type=doc_type,
+                text=text,
+                success=True,
+                message="simple_fetch",
+                method_used="simple_fetch",
+            )
+        else:
+            logger.warning(f"Simple fetch returned insufficient content: {len(text) if text else 0} characters")
+            raise Exception("Simple fetch extraction yielded insufficient content")
+    except Exception as e:
+        logger.warning(f"Simple fetch extraction failed: {str(e)}")
+        raise
+
+
 # Main endpoint
 
 
@@ -1124,10 +1175,21 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
             return standard_result
     except Exception as e:
         logger.warning(f"Standard HTML extraction failed: {str(e)}")
-        # If standard extraction fails, we'll try Playwright
+        # If standard extraction fails, we'll try simple fetch method next
     
-    # Only try Playwright if standard extraction failed
-    logger.info(f"Standard extraction failed, attempting Playwright extraction for {url}")
+    # Try simple fetch extraction before Playwright
+    logger.info(f"Standard extraction failed, attempting simple fetch extraction for {url}")
+    try:
+        simple_fetch_result = await extract_with_simple_fetch(url, doc_type, url)
+        if simple_fetch_result.success:
+            add_to_cache(cache_key, simple_fetch_result.dict())
+            return simple_fetch_result
+    except Exception as e:
+        logger.warning(f"Simple fetch extraction failed: {str(e)}")
+        # If simple fetch extraction fails, we'll try Playwright
+    
+    # Only try Playwright if both standard and simple fetch extraction failed
+    logger.info(f"Simple fetch extraction failed, attempting Playwright extraction for {url}")
     if auth_manager.startup_complete and auth_manager.context:
         try:
             playwright_result = await extract_with_playwright(url, doc_type, url)
