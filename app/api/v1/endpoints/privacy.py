@@ -1,68 +1,42 @@
-import random
-from urllib.parse import urlparse
-import logging
-from typing import List, Optional, Union, Any
-import asyncio
+import warnings
 import re
-from fake_useragent import UserAgent
-import httpx
 import time
-
-from fastapi import APIRouter, HTTPException
-from playwright.async_api import async_playwright, Page
+import random
+import logging
+import asyncio
+import requests
+from urllib.parse import urlparse, urljoin
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+from fastapi import APIRouter, HTTPException, Request, Response, Depends, status
+from typing import List, Dict, Tuple, Optional, Any
+from playwright.async_api import async_playwright, TimeoutError
 
 from app.models.privacy import PrivacyRequest, PrivacyResponse
+from app.core.config import settings
 
-async def click_and_wait_for_navigation(page, element, timeout=2000):
-    """Click an element and wait for navigation, with optimized timeout."""
+# Suppress XML parsed-as-HTML warnings
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+def is_valid_url(url):
     try:
-        # Store the current URL before clicking
-        current_url = page.url
-        
-        # Use page.wait_for_load_state instead of wait_for_navigation
-        async with page.expect_navigation(timeout=timeout, wait_until="domcontentloaded") as navigation_info:
-            await element.click()
-            
-        # Wait for navigation to complete or timeout
-        try:
-            await navigation_info.value
-            return True
-        except Exception as e:
-            print(f"Navigation error: {str(e)}")
-            # Even if navigation times out, still return True if the URL changed
-            new_url = page.url
-            if new_url != current_url:
-                setattr(page, "_last_url", new_url)
-                return True
-            return False
-    except Exception as e:
-        print(f"Error in click_and_wait_for_navigation: {str(e)}")
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except:
         return False
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-# Initialize UserAgent for random browser User-Agent strings
-ua_generator = UserAgent()
+# Define consistent user agent
+CONSISTENT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-# Function to get a random user agent
-def get_random_user_agent():
+# Replace random user agent function with consistent one
+def get_user_agent():
     """
-    Returns a random, realistic user agent string from the fake-useragent library.
-    Falls back to a default value if the API fails.
+    Returns a consistent user agent string.
     """
-    try:
-        return ua_generator.random
-    except Exception as e:
-        # Fallback user agents in case the API fails
-        fallback_user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-        ]
-        print(f"Error getting random user agent: {e}. Using fallback.")
-        return random.choice(fallback_user_agents)
+    return CONSISTENT_USER_AGENT
 
 """
 PRIVACY POLICY SCORING SYSTEM
@@ -1671,8 +1645,8 @@ async def setup_browser(playwright=None):
     if not playwright:
         playwright = await async_playwright().start()
     try:
-        # Use random user agent
-        user_agent = get_random_user_agent()
+        # Use consistent user agent
+        user_agent = get_user_agent()
 
         # Use headless=True for production deployment
         headless = False # Changed from False to True for stability

@@ -3,15 +3,21 @@ import logging
 import requests
 import asyncio
 import random
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import re
 from typing import Optional, Tuple, Dict, Any
 from urllib.parse import urlparse, urljoin
 from playwright.async_api import async_playwright
 import string
-from fake_useragent import UserAgent
+import warnings
+import time
+import aiohttp
+import tldextract
 
 from app.models.company_info import CompanyInfoRequest, CompanyInfoResponse
+
+# Suppress XML parsed-as-HTML warnings
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -19,12 +25,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Initialize the UserAgent generator once
-try:
-    ua_generator = UserAgent()
-except Exception as e:
-    logger.error(f"Failed to initialize UserAgent: {e}")
-    ua_generator = None
+# Define consistent user agent
+CONSISTENT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
 def get_base_url(url: str) -> str:
     """Extract the base URL from a given URL."""
@@ -96,20 +98,9 @@ def normalize_url(url: str) -> str:
 
 def get_random_user_agent():
     """
-    Returns a random, realistic user agent string from the fake-useragent library.
-    Falls back to a default value if the API fails.
+    Returns a consistent user agent string.
     """
-    try:
-        return ua_generator.random
-    except Exception as e:
-        # Fallback user agents in case the API fails
-        fallback_user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-        ]
-        logger.error(f"Error getting random user agent: {e}. Using fallback.")
-        return random.choice(fallback_user_agents)
+    return CONSISTENT_USER_AGENT
 
 async def setup_stealth_browser():
     """Setup Playwright browser with anti-detection measures"""
@@ -124,7 +115,7 @@ async def setup_stealth_browser():
     context = await browser.new_context(
         viewport={"width": 1366, "height": 768},
         device_scale_factor=1,
-        user_agent=get_random_user_agent(),
+        user_agent=CONSISTENT_USER_AGENT,
         is_mobile=False
     )
     
@@ -423,7 +414,7 @@ async def extract_company_info(url: str) -> tuple:
         try:
             # Try to fetch the page
             headers = {
-                'User-Agent': get_random_user_agent(),
+                'User-Agent': CONSISTENT_USER_AGENT,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5'
             }
