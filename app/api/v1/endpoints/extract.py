@@ -17,6 +17,7 @@ from playwright.async_api import async_playwright, Playwright, Browser, BrowserC
 from fake_useragent import UserAgent
 import os
 import sys
+import brotli
 
 # Fixed version with improved resource management and error handling
 
@@ -675,6 +676,14 @@ async def extract_standard_html(
         # IMPROVED ENCODING HANDLING
         # Get content bytes from response
         content_bytes = resp.content
+        
+        # Handle Brotli-compressed responses explicitly
+        if resp.headers.get("Content-Encoding", "").lower() == "br":
+            try:
+                content_bytes = brotli.decompress(content_bytes)
+                logger.info("Decompressed Brotli content successfully")
+            except Exception as e:
+                logger.warning(f"Failed to decompress Brotli content: {e}")
         
         # Try to detect encoding from headers first
         content_type = resp.headers.get('Content-Type', '')
