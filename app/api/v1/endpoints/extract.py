@@ -671,26 +671,49 @@ async def extract_standard_html(
         logger.info(f"Standard request successful for {url}.")
         logger.debug(f"Response Headers for {url}: {resp.headers}")
         logger.debug(f"Requests detected encoding for {url}: {resp.encoding}")
-        logger.debug(f"Raw content start (first 500 bytes) for {url}: {resp.content[:500]}")
-
-        # Explicitly handle encoding
+        
+        # IMPROVED ENCODING HANDLING
+        # Get content bytes from response
         content_bytes = resp.content
-        encoding = resp.encoding if resp.encoding else 'utf-8'
-        # Fallback if requests guesses poorly (e.g., ISO-8859-1 is often a fallback for failed UTF-8 detection)
-        if encoding.lower() == 'iso-8859-1':
-            logger.warning(f"Requests detected ISO-8859-1 encoding for {url}, falling back to UTF-8.")
-            encoding = 'utf-8'
-
+        
+        # Try to detect encoding from headers first
+        content_type = resp.headers.get('Content-Type', '')
+        encoding_match = re.search(r'charset=([^ ;]+)', content_type)
+        detected_encoding = encoding_match.group(1) if encoding_match else None
+        
+        # If no encoding in headers, use what requests detected, with fallbacks
+        if not detected_encoding:
+            detected_encoding = resp.encoding if resp.encoding else 'utf-8'
+        
+        # Log detailed encoding information
+        logger.info(f"Detected encoding for {url}: headers={detected_encoding}, requests={resp.encoding}")
+        
+        # Always try UTF-8 first for best compatibility
         try:
-            # Decode using determined encoding, ignoring errors
-            html_content = content_bytes.decode(encoding, errors='ignore')
-            logger.info(f"Decoded content from {url} using encoding: {encoding}")
-            logger.debug(f"Decoded content start (first 500 chars) for {url}: {html_content[:500]}") # Log decoded content start
-        except Exception as decode_error:
-             logger.error(f"Failed to decode content from {url} with encoding {encoding}: {decode_error}. Falling back to UTF-8.")
-             # Final fallback decoding attempt
-             html_content = content_bytes.decode('utf-8', errors='ignore')
-             logger.debug(f"Decoded content start (UTF-8 fallback) for {url}: {html_content[:500]}") # Log decoded content start
+            # First try UTF-8 regardless of detected encoding
+            html_content = content_bytes.decode('utf-8', errors='replace')
+            logger.info(f"Successfully decoded content using UTF-8")
+        except Exception as e:
+            logger.warning(f"UTF-8 decoding failed, trying detected encoding: {detected_encoding}")
+            try:
+                # Try the detected encoding as fallback
+                html_content = content_bytes.decode(detected_encoding, errors='replace')
+                logger.info(f"Successfully decoded content using {detected_encoding}")
+            except Exception as e:
+                # Last resort - force utf-8 with replacement for invalid chars
+                logger.error(f"All encoding attempts failed, forcing UTF-8 with error replacement")
+                html_content = content_bytes.decode('utf-8', errors='replace')
+        
+        # Additional HTML sanitization to remove any potential binary or control characters
+        html_content = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', html_content)
+        
+        # Verify decode was successful by checking for readable characters
+        if not re.search(r'[a-zA-Z0-9 ]', html_content[:1000]):
+            logger.warning("Decoded content appears to be binary or corrupted, trying ASCII fallback")
+            html_content = content_bytes.decode('ascii', errors='replace')
+
+        # Log a sample of the decoded content for verification
+        logger.debug(f"Decoded content sample: {html_content[:500]}")
 
         soup = BeautifulSoup(html_content, "html.parser")
         
@@ -764,6 +787,9 @@ async def extract_standard_html(
         
         # Add reasonable paragraph breaks
         text = re.sub(r'([.!?])\s+', r'\1\n', text)
+        
+        # Remove any remaining non-printable characters
+        text = re.sub(r'[^\x20-\x7E\x0A\x0D\u00A0-\u00FF\u0100-\u017F]', '', text)
         
         if len(text) < MIN_CONTENT_LENGTH:
             raise Exception("Insufficient content")
