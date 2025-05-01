@@ -417,7 +417,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 # Update views count for the existing document
                 await document_crud.increment_views(existing_doc['id'])
                 
-                # Build response with success=False for existing documents
+                # Create a new response object with success=False
                 response = CrawlTosResponse(
                     url=request.url,
                     success=False,  # CRITICAL: Must be False for existing documents
@@ -522,24 +522,23 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             logger.warning(f"Error checking for existing document: {e}")
             # Continue with processing if the check fails
         
-        # Find TOS URL
+        # Find Terms of Service URL
         tos_url = await find_tos_url(request.url)
         if not tos_url:
-            logger.warning(f"No TOS URL found for {request.url}")
+            logger.warning(f"No Terms of Service URL found for {request.url}")
             response.tos_url = None
             response.success = False
             response.message = "No terms of service page found."
             return response
             
-        logger.info(f"Found TOS URL: {tos_url}")
+        logger.info(f"Found Terms of Service URL: {tos_url}")
         response.tos_url = tos_url
         
-        # Check if this URL has already been processed before continuing
-        # This avoids redundant processing for URLs that are already in the database
+        # Check if this exact tos_url has already been crawled
         try:
             existing_doc = await document_crud.get_by_retrieved_url(tos_url, "tos")
             if existing_doc:
-                logger.info(f"Document with URL {tos_url} already exists in database. Skipping processing.")
+                logger.info(f"Document for retrieved URL {tos_url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 
                 # Update views count for the existing document
                 await document_crud.increment_views(existing_doc['id'])
@@ -550,7 +549,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                     success=False,  # CRITICAL: Must be False for existing documents
                     message="Document already exists in database.",
                     document_id=existing_doc['id'],
-                    tos_url=tos_url,
+                    tos_url=existing_doc.get('retrieved_url', ''),
                     one_sentence_summary=existing_doc.get('one_sentence_summary', ''),
                     hundred_word_summary=existing_doc.get('hundred_word_summary', '')
                 )
@@ -639,13 +638,18 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 
                 # CRITICAL: Ensure success is False for existing documents
                 response.success = False
+                
+                # Final check to ensure success is False for existing documents
+                if is_existing_document:
+                    response.success = False
+                    
                 return response
         except Exception as e:
             logger.warning(f"Error checking for existing document: {e}")
             # Continue with processing if the check fails
         
         # Extract content - now returns a tuple of (text, error)
-        extraction_result = await extract_text_from_url(tos_url)
+        extraction_result = await extract_text_from_url(tos_url, "tos")
         
         if not extraction_result:
             logger.warning(f"Complete failure extracting content from {tos_url}")
@@ -1124,7 +1128,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             # Continue with processing if the check fails
         
         # Extract content - now returns a tuple of (text, error)
-        extraction_result = await extract_text_from_url(pp_url)
+        extraction_result = await extract_text_from_url(pp_url, "pp")
         
         if not extraction_result:
             logger.warning(f"Complete failure extracting content from {pp_url}")
@@ -1230,7 +1234,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 logger.error(f"Error in final company name extraction: {e}")
                 company_name = request.url.capitalize()
                 logger.info(f"Emergency fallback: Using URL as company name")
-                
+        
         # Now create a modified summary request that includes the company name
         # This is done by modifying the pp_url to include context
         summary_context_url = f"{pp_url}?company={company_name}"
@@ -1348,20 +1352,21 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         response.document_id = None
         return response
 
-async def extract_text_from_url(url: str) -> Optional[Tuple[str, str]]:
+async def extract_text_from_url(url: str, document_type: str) -> Optional[Tuple[str, str]]:
     """
     Extracts plain text content from a URL.
     
     Args:
         url: URL to extract content from
+        document_type: Type of document ("tos" or "pp")
         
     Returns:
         Tuple of (extracted_text, error_message) or None if complete failure
     """
-    logger.info(f"Extracting text from URL: {url}")
+    logger.info(f"Extracting text from URL: {url} (Type: {document_type})")
     
     # Create extract request
-    extract_request = ExtractRequest(url=url, document_type="tos")
+    extract_request = ExtractRequest(url=url, document_type=document_type)
     
     # Try multiple times with different methods if needed
     max_attempts = 3
