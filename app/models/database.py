@@ -31,7 +31,7 @@ class DocumentBase(BaseModel):
     company_name: Optional[str] = None
     logo_url: Optional[str] = None
     views: int = 0
-    raw_text: str
+    raw_text: str = ""
     one_sentence_summary: Optional[str] = None
     hundred_word_summary: Optional[str] = None
     word_frequencies: Optional[List[Dict[str, Any]]] = None

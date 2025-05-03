@@ -200,7 +200,7 @@ documents = Table(
     Column("company_name", Text, nullable=True),
     Column("logo_url", Text, nullable=True),
     Column("views", BigInteger, nullable=False, server_default="0"),
-    Column("raw_text", Text, nullable=False),
+    Column("raw_text", Text, nullable=True, server_default=""),
     Column("one_sentence_summary", Text, nullable=True),
     Column("hundred_word_summary", Text, nullable=True),
     Column("word_frequencies", JSONB, nullable=True),

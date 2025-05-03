@@ -212,7 +212,7 @@ async def save_document_to_db(
     
     content_length = len(document_content) if document_content else 0
     # Log the length and beginning of the document content
-    logger.info(f"Saving document content (Length: {content_length}, First 1000 chars): {document_content[:1000]}") 
+    logger.info(f"Processing document content (Length: {content_length}, First 1000 chars): {document_content[:1000]}")
     
     # Log incoming analysis data types and content
     wf_data = analysis.get('word_frequencies')
@@ -317,7 +317,7 @@ async def save_document_to_db(
             "retrieved_url": retrieved_url, # Store the actual URL content came from
             "company_name": company_name,
             "logo_url": logo_url,
-            "raw_text": document_content,
+            "raw_text": "", # Store empty string instead of full raw text
             "one_sentence_summary": one_sentence_summary,
             "hundred_word_summary": hundred_word_summary,
             "word_frequencies": word_freq_json, 
