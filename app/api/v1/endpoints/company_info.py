@@ -96,6 +96,210 @@ def normalize_url(url: str) -> str:
         
     return url
 
+def is_app_store_url(url: str) -> bool:
+    """Check if the URL is from Apple App Store."""
+    return "apps.apple.com" in url or "itunes.apple.com" in url
+
+def is_play_store_url(url: str) -> bool:
+    """Check if the URL is from Google Play Store."""
+    return "play.google.com" in url
+
+async def extract_app_store_info(page) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract app name and logo URL from Apple App Store page.
+    
+    Args:
+        page: Playwright page object
+        
+    Returns:
+        Tuple of (app_name, logo_url)
+    """
+    try:
+        logger.info("Extracting info from App Store page")
+        
+        # Extract app name from title element
+        app_name = await page.evaluate("""
+            () => {
+                // Try the product header title first (most reliable)
+                const titleEl = document.querySelector('.product-header__title, .app-header__title');
+                if (titleEl) {
+                    // Get only the text content without any child elements (like badges)
+                    let title = '';
+                    for (const node of titleEl.childNodes) {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            title += node.textContent;
+                        }
+                    }
+                    return title.trim();
+                }
+                
+                // Fallbacks
+                // 1. Try meta title
+                const metaTitle = document.querySelector('meta[name="apple:title"]');
+                if (metaTitle && metaTitle.content) {
+                    return metaTitle.content.trim();
+                }
+                
+                // 2. Try open graph title
+                const ogTitle = document.querySelector('meta[property="og:title"]');
+                if (ogTitle && ogTitle.content) {
+                    return ogTitle.content.trim();
+                }
+                
+                // 3. Use page title
+                if (document.title) {
+                    const title = document.title.replace(' on the App Store', '');
+                    return title.trim();
+                }
+                
+                return null;
+            }
+        """)
+        
+        # Extract logo URL
+        logo_url = await page.evaluate("""
+            () => {
+                // Try multiple selectors for app icon
+                const selectors = [
+                    '.we-artwork--ios-app-icon source[type="image/webp"]',
+                    '.we-artwork--ios-app-icon img',
+                    '.product-hero__artwork source[type="image/webp"]',
+                    '.product-hero__artwork img',
+                    'meta[property="og:image"]',
+                    'link[rel="apple-touch-icon"]'
+                ];
+                
+                for (const selector of selectors) {
+                    const el = document.querySelector(selector);
+                    if (el) {
+                        // Handle different element types
+                        if (selector.includes('source') && el.srcset) {
+                            // Parse srcset to get the largest image
+                            const srcsetParts = el.srcset.split(',').map(s => s.trim());
+                            // Get the largest (last) image
+                            if (srcsetParts.length > 0) {
+                                const lastSrc = srcsetParts[srcsetParts.length - 1];
+                                // Extract URL part (before the width descriptor)
+                                const urlMatch = lastSrc.match(/^(.*?)\\s+\\d+w$/);
+                                if (urlMatch && urlMatch[1]) {
+                                    return urlMatch[1];
+                                }
+                                return lastSrc.split(' ')[0]; // Fallback
+                            }
+                        }
+                        
+                        // Try src for images
+                        if (el.src && el.src !== '/assets/artwork/1x1-42817eea7ade52607a760cbee00d1495.gif') {
+                            return el.src;
+                        }
+                        
+                        // Try content for meta tags
+                        if (el.getAttribute('content')) {
+                            return el.getAttribute('content');
+                        }
+                        
+                        // Try href for link tags
+                        if (el.getAttribute('href')) {
+                            return el.getAttribute('href');
+                        }
+                    }
+                }
+                
+                return null;
+            }
+        """)
+        
+        logger.info(f"Extracted App Store info - Name: {app_name}, Logo: {logo_url}")
+        return app_name, logo_url
+    except Exception as e:
+        logger.error(f"Error extracting App Store info: {e}")
+        return None, None
+
+async def extract_play_store_info(page) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract app name and logo URL from Google Play Store page.
+    
+    Args:
+        page: Playwright page object
+        
+    Returns:
+        Tuple of (app_name, logo_url)
+    """
+    try:
+        logger.info("Extracting info from Play Store page")
+        
+        # Extract app name
+        app_name = await page.evaluate("""
+            () => {
+                // Try app name from header
+                const titleEl = document.querySelector('h1[itemprop="name"]');
+                if (titleEl) {
+                    return titleEl.textContent.trim();
+                }
+                
+                // Fallback to generic h1
+                const h1 = document.querySelector('h1');
+                if (h1) {
+                    return h1.textContent.trim();
+                }
+                
+                // Try meta title
+                const metaTitle = document.querySelector('meta[name="title"]');
+                if (metaTitle && metaTitle.content) {
+                    return metaTitle.content.replace(' - Apps on Google Play', '').trim();
+                }
+                
+                // Try open graph title
+                const ogTitle = document.querySelector('meta[property="og:title"]');
+                if (ogTitle && ogTitle.content) {
+                    return ogTitle.content.replace(' - Apps on Google Play', '').trim();
+                }
+                
+                // Use page title
+                if (document.title) {
+                    const title = document.title.replace(' - Apps on Google Play', '');
+                    return title.trim();
+                }
+                
+                return null;
+            }
+        """)
+        
+        # Extract logo URL
+        logo_url = await page.evaluate("""
+            () => {
+                // Try app icon selectors
+                const selectors = [
+                    'img[itemprop="image"]',
+                    '.Mqg6jd img',  // Common Play Store app icon class
+                    '.T75of img',   // Alternative icon class
+                    'meta[property="og:image"]',
+                    '.hkhL9e img', // Another common class
+                    'img.R1d3vc'    // Yet another icon class
+                ];
+                
+                for (const selector of selectors) {
+                    const el = document.querySelector(selector);
+                    if (el) {
+                        if (el.src) {
+                            return el.src;
+                        }
+                        if (el.getAttribute('content')) {
+                            return el.getAttribute('content');
+                        }
+                    }
+                }
+                
+                return null;
+            }
+        """)
+        
+        logger.info(f"Extracted Play Store info - Name: {app_name}, Logo: {logo_url}")
+        return app_name, logo_url
+    except Exception as e:
+        logger.error(f"Error extracting Play Store info: {e}")
+        return None, None
+
 def get_random_user_agent():
     """
     Returns a consistent user agent string.
@@ -190,6 +394,16 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         if not response.ok:
             logger.warning(f"Failed to load page with status: {response.status}")
             return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Failed to load page: HTTP {response.status}"
+        
+        # Check if this is an App/Play Store page
+        if is_app_store_url(url):
+            app_name, app_logo = await extract_app_store_info(page)
+            if app_name and app_logo:
+                return app_name.strip(), app_logo, True, "Successfully extracted app info from App Store"
+        elif is_play_store_url(url):
+            app_name, app_logo = await extract_play_store_info(page)
+            if app_name and app_logo:
+                return app_name.strip(), app_logo, True, "Successfully extracted app info from Play Store"
         
         # Add human-like interaction - scroll down smoothly
         await page.evaluate("""
@@ -379,52 +593,36 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             await playwright.stop()
 
 async def extract_company_info(url: str) -> tuple:
-    """
-    Extract company name and logo from a given URL.
-    Uses various techniques:
-    1. First attempts with BeautifulSoup for speed
-    2. Falls back to Playwright for JavaScript-rendered sites
-    3. Uses multiple extraction methods for both company name and logo
+    """Extract company name and logo URL from a website, with robust fallbacks."""
     
-    Returns a tuple of (company_name, logo_url, success, message)
-    """
+    logger.info(f"Attempting to extract company information from URL: {url}")
+    
+    # Try using standard HTTP request and BS4 first
     try:
-        # Validate and normalize the URL
-        sanitized_url = sanitize_url(url)
-        if not sanitized_url:
-            # If sanitization fails, extract name from original URL
-            domain = urlparse(url).netloc if url else url.split('/')[0]
-            company_name = extract_company_name_from_domain(domain) if domain else url.split('/')[-1].capitalize()
-            return company_name, "/placeholder.svg?height=48&width=48", False, f"Invalid URL '{url}'"
-            
-        normalized_url = normalize_url(sanitized_url)
+        # Validate and normalize URL
+        url = sanitize_url(url)
+        if not url:
+            return "Unknown", "/placeholder.svg?height=48&width=48", False, "Invalid URL"
         
-        # Default values in case extraction fails
-        domain = urlparse(normalized_url).netloc
+        # Check if App Store or Play Store URL
+        if is_app_store_url(url) or is_play_store_url(url):
+            logger.info(f"Detected app store URL: {url}")
+            company_name, logo_url, success, message = await extract_with_playwright(url)
+            if success:
+                return company_name, logo_url, success, message
         
-        # Extract company name from domain if we can't get it from page
-        company_name = extract_company_name_from_domain(domain)
-        
-        # Initialize with defaults
-        logo_url = "/placeholder.svg?height=48&width=48"
-        success = False
-        message = "Initialization"
-        
-        # First try with BeautifulSoup for speed
+        # Attempt extraction
         try:
-            # Try to fetch the page
-            headers = {
-                'User-Agent': CONSISTENT_USER_AGENT,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5'
-            }
-            
-            response = requests.get(normalized_url, headers=headers, timeout=15)
-            response.raise_for_status()
+            headers = {"User-Agent": get_random_user_agent()}
+            response = requests.get(url, headers=headers, timeout=10)
+            if not response.ok:
+                logger.warning(f"HTTP request failed with status: {response.status_code}")
+                logger.info("Falling back to Playwright extraction")
+                return await extract_with_playwright(url)
             
             # Parse HTML
             soup = BeautifulSoup(response.text, 'html.parser')
-            base_url = get_base_url(normalized_url)
+            base_url = get_base_url(url)
             
             # 1. Try to extract company name from title tag
             if soup.title and soup.title.string:
@@ -586,13 +784,13 @@ async def extract_company_info(url: str) -> tuple:
                     logger.warning(f"Error verifying logo URL: {e}")
                     logo_url = "/placeholder.svg?height=48&width=48"
             
+            return company_name, logo_url, success, message
+        
         except Exception as e:
             logger.warning(f"BeautifulSoup extraction failed: {e}. Falling back to Playwright.")
             # Fall back to Playwright for JavaScript-rendered sites
-            company_name, logo_url, success, message = await extract_with_playwright(normalized_url)
-        
-        return company_name, logo_url, success, message
-        
+            return await extract_with_playwright(url)
+    
     except Exception as e:
         logger.error(f"Error extracting company info: {e}")
         
@@ -609,11 +807,29 @@ async def extract_company_info(url: str) -> tuple:
                     company_name = domain_part.capitalize()
                 else:
                     company_name = url.capitalize()
-        except:
+        except Exception as inner_e:
             # Final fallback - use URL directly
             company_name = url.capitalize()
+            logger.error(f"Error in fallback company name extraction: {str(inner_e)}")
+            logger.info(f"Final fallback: Using URL '{url}' as company name")
         
-        return company_name, "/placeholder.svg?height=48&width=48", False, f"Error extracting company info: {str(e)}"
+        # Use the provided logo URL if available, otherwise use placeholder
+        if hasattr(request, 'logo_url') and request.logo_url:
+            return CompanyInfoResponse(
+                url=url,
+                company_name=company_name,
+                logo_url=request.logo_url,  # Use the provided logo URL
+                success=False,
+                message=f"Error extracting company info: {str(e)}"
+            )
+        else:
+            return CompanyInfoResponse(
+                url=url,
+                company_name=company_name,
+                logo_url=logo_url,  # This will be either a favicon or placeholder
+                success=False,
+                message=f"Error extracting company info: {str(e)}"
+            ) 
 
 def extract_company_name_from_domain(domain: str) -> str:
     """Extract company name from domain.
@@ -805,49 +1021,44 @@ def extract_logo_url(soup: BeautifulSoup, domain: str) -> str:
 @router.post("/extract-company-info", response_model=CompanyInfoResponse)
 async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
     """
-    Extract the company name and logo URL from a webpage.
-    
-    Args:
-        request: CompanyInfoRequest containing the URL.
-        
-    Returns:
-        CompanyInfoResponse with extracted company name and logo_url
+    Extract company name and logo URL from a website.
     """
-    url = request.url
-    logo_url = "/placeholder.svg?height=48&width=48"  # Default fallback
-    
-    # If the request includes a logo_url, use it instead of the placeholder
-    if hasattr(request, 'logo_url') and request.logo_url:
-        logo_url = request.logo_url
-    
     try:
-        # Get the domain
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc
+        # Validate and normalize URL
+        url = request.url
+        sanitized_url = sanitize_url(url)
+        if not sanitized_url:
+            return CompanyInfoResponse(
+                url=url,
+                company_name=None,
+                logo_url=None,
+                success=False,
+                message="Invalid URL format"
+            )
         
-        # If domain is empty, try to add a protocol and parse again
-        if not domain:
-            if not url.startswith(('http://', 'https://')):
-                url = 'https://' + url
-                parsed_url = urlparse(url)
-                domain = parsed_url.netloc
-        
-        # Extract company name directly from domain
-        company_name = extract_company_name_from_domain(domain)
-        
-        # Log the extraction for debugging
-        logger.info(f"Extracted company name '{company_name}' from domain '{domain}'")
-        
-        # Use Google's favicon service for logo if no custom one was provided
-        if not hasattr(request, 'logo_url') or not request.logo_url:
-            logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+        # If this is an App Store or Play Store URL, use specialized extraction
+        if is_app_store_url(sanitized_url) or is_play_store_url(sanitized_url):
+            logger.info(f"Detected app store URL: {sanitized_url}")
+            company_name, logo_url, success, message = await extract_with_playwright(sanitized_url)
+            
+            if success and company_name and logo_url:
+                return CompanyInfoResponse(
+                    url=url,
+                    company_name=company_name,
+                    logo_url=logo_url,
+                    success=True,
+                    message=message or "Successfully extracted app info from store page"
+                )
+
+        # First try the direct extraction method
+        company_name, logo_url, success, message = await extract_company_info(sanitized_url)
         
         return CompanyInfoResponse(
             url=url,
             company_name=company_name,
             logo_url=logo_url,
-            success=True,
-            message="Company information extracted from domain"
+            success=success,
+            message=message
         )
             
     except Exception as e:
