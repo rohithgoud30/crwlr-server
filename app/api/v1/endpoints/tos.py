@@ -268,31 +268,74 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
             # Construct the base URL (scheme + domain)
             base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
             logger.info(f"Extracted base URL from privacy policy: {base_url}")
-            
-            # Create a new request with the base URL
-            base_request = ToSRequest(url=base_url)
-            logger.info(f"Making recursive call to find_tos with base URL: {base_url}")
-            
-            # Make recursive call to find_tos with the base URL - no need for from_store parameter
-            base_url_response = await find_tos(base_request)
-            
-            if base_url_response and base_url_response.tos_url:
-                # Update the original URL in the response
-                base_url_response.url = url
-                base_url_response.method_used = f"store_base_url_{base_url_response.method_used}"
-                base_url_response.message = f"Terms of Service found via App/Play Store domain: {base_url}"
-                logger.info(f"Found Terms of Service via base URL: {base_url_response.tos_url}")
-                return base_url_response
-            else:
-                # If base URL approach failed, return clear failure for app store URLs
-                logger.warning(f"Could not find Terms of Service using base URL: {base_url}")
+
+            # Fail immediately if the extracted base domain is still an App/Play Store domain
+            base_domain = parsed_url.netloc.lower()
+            if any(store in base_domain for store in ["apple.com", "itunes.apple.com", "play.google.com", "google.com"]):
+                logger.warning(f"Privacy policy link is from store domain '{base_domain}', cannot derive developer base URL")
                 return ToSResponse(
                     url=url,
                     tos_url=None,
                     success=False,
-                    message=f"Could not find Terms of Service for {base_url}",
-                    method_used="store_base_url_failed"
+                    message="Could not find developer base URL from privacy policy",
+                    method_used="app_store_no_developer_base_url"
                 )
+
+            # Perform search fallback using base domain for Terms of Service
+            domain_name = parsed_url.netloc.replace("www.", "")
+            search_query = f"{domain_name} terms of service, terms of use, user agreement, legal terms"
+            logger.info(f"Searching for Terms of Service via search fallback for base domain: {domain_name}")
+            # Initialize browser for search fallback
+            playwright_search = await async_playwright().start()
+            browser_search, context_search, page_search, _ = await setup_browser(playwright_search)
+            try:
+                # DuckDuckGo search fallback
+                duck_result = await duckduckgo_search_fallback(search_query, page_search)
+                if duck_result:
+                    logger.info(f"Found ToS via DuckDuckGo search: {duck_result}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=duck_result,
+                        success=True,
+                        message=f"Terms of Service found via DuckDuckGo search for {domain_name}",
+                        method_used="store_base_domain_duckduckgo_search_fallback"
+                    )
+                # Yahoo search fallback
+                yahoo_result = await yahoo_search_fallback(search_query, page_search)
+                if yahoo_result:
+                    logger.info(f"Found ToS via Yahoo search: {yahoo_result}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=yahoo_result,
+                        success=True,
+                        message=f"Terms of Service found via Yahoo search for {domain_name}",
+                        method_used="store_base_domain_yahoo_search_fallback"
+                    )
+                # Bing search fallback
+                bing_result = await bing_search_fallback(search_query, page_search)
+                if bing_result:
+                    logger.info(f"Found ToS via Bing search: {bing_result}")
+                    return ToSResponse(
+                        url=url,
+                        tos_url=bing_result,
+                        success=True,
+                        message=f"Terms of Service found via Bing search for {domain_name}",
+                        method_used="store_base_domain_bing_search_fallback"
+                    )
+                # All search methods failed
+                logger.warning(f"Search fallbacks failed for base domain: {domain_name}")
+                return ToSResponse(
+                    url=url,
+                    tos_url=None,
+                    success=False,
+                    message=f"Could not find Terms of Service for base domain: {domain_name}",
+                    method_used="store_base_domain_search_failed"
+                )
+            finally:
+                # Clean up search browser resources
+                await context_search.close()
+                await browser_search.close()
+                await playwright_search.stop()
         else:
             # No privacy policy found for app store URL, return failure
             logger.warning(f"No privacy policy found for App/Play Store URL: {url}")
