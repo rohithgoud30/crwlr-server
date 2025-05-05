@@ -597,6 +597,13 @@ async def extract_company_info(url: str) -> tuple:
     
     logger.info(f"Attempting to extract company information from URL: {url}")
     
+    # Define default values early
+    company_name = "Unknown"
+    logo_url = "/placeholder.svg?height=48&width=48"
+    success = False
+    message = "Extraction failed"
+    domain = ""
+    
     # Try using standard HTTP request and BS4 first
     try:
         # Validate and normalize URL
@@ -604,11 +611,24 @@ async def extract_company_info(url: str) -> tuple:
         if not url:
             return "Unknown", "/placeholder.svg?height=48&width=48", False, "Invalid URL"
         
+        # Extract domain after validation
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+            if domain:
+                company_name = extract_company_name_from_domain(domain) # Initial name from domain
+            else:
+                company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
+        except Exception as parse_err:
+            logger.error(f"Error parsing domain from URL '{url}': {parse_err}")
+            company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
+
         # Check if App Store or Play Store URL
         if is_app_store_url(url) or is_play_store_url(url):
             logger.info(f"Detected app store URL: {url}")
             company_name, logo_url, success, message = await extract_with_playwright(url)
-            if success:
+            
+            if success and company_name and logo_url:
                 return company_name, logo_url, success, message
         
         # Attempt extraction
@@ -794,42 +814,25 @@ async def extract_company_info(url: str) -> tuple:
     except Exception as e:
         logger.error(f"Error extracting company info: {e}")
         
-        # Even in error case, extract company name from domain
-        try:
-            parsed_url = urlparse(url)
-            domain = parsed_url.netloc
-            if domain:
+        # Even in error case, extract company name from domain if possible
+        if domain:
+            try:
                 company_name = extract_company_name_from_domain(domain)
-            else:
-                # Parse domain from URL if possible
-                if '/' in url:
-                    domain_part = url.split('/')[0]
-                    company_name = domain_part.capitalize()
-                else:
-                    company_name = url.capitalize()
-        except Exception as inner_e:
-            # Final fallback - use URL directly
-            company_name = url.capitalize()
-            logger.error(f"Error in fallback company name extraction: {str(inner_e)}")
-            logger.info(f"Final fallback: Using URL '{url}' as company name")
-        
-        # Use the provided logo URL if available, otherwise use placeholder
-        if hasattr(request, 'logo_url') and request.logo_url:
-            return CompanyInfoResponse(
-                url=url,
-                company_name=company_name,
-                logo_url=request.logo_url,  # Use the provided logo URL
-                success=False,
-                message=f"Error extracting company info: {str(e)}"
-            )
+                logger.info(f"Fallback: Extracted company name '{company_name}' from domain '{domain}'")
+            except Exception as inner_e:
+                logger.error(f"Error in fallback company name extraction from domain '{domain}': {str(inner_e)}")
+                # If domain extraction fails, use URL based fallback
+                company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
         else:
-            return CompanyInfoResponse(
-                url=url,
-                company_name=company_name,
-                logo_url=logo_url,  # This will be either a favicon or placeholder
-                success=False,
-                message=f"Error extracting company info: {str(e)}"
-            ) 
+            # If domain was never set, use URL based fallback
+            company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
+            logger.info(f"Final fallback (no domain): Using URL part as company name: '{company_name}'")
+
+        # Use the default logo URL in case of error
+        logo_url = "/placeholder.svg?height=48&width=48" # Reset logo url on error
+        success = False
+        message = f"Error extracting company info: {str(e)}"
+        return company_name, logo_url, success, message
 
 def extract_company_name_from_domain(domain: str) -> str:
     """Extract company name from domain.
@@ -1064,30 +1067,7 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
     except Exception as e:
         logger.error(f"Error extracting company info: {str(e)}")
         
-        # Even in error case, extract company name from domain
-        try:
-            parsed_url = urlparse(url)
-            domain = parsed_url.netloc
-            
-            if domain:
-                company_name = extract_company_name_from_domain(domain)
-                logger.info(f"Fallback: Extracted company name '{company_name}' from domain '{domain}'")
-            else:
-                # Parse domain from URL if possible
-                if '/' in url:
-                    domain_part = url.split('/')[0]
-                    company_name = domain_part.capitalize()
-                    logger.info(f"Fallback: Using domain part '{domain_part}' as company name")
-                else:
-                    company_name = url.capitalize()
-                    logger.info(f"Fallback: Using URL '{url}' as company name")
-        except Exception as inner_e:
-            # Final fallback - use URL directly
-            company_name = url.capitalize()
-            logger.error(f"Error in fallback company name extraction: {str(inner_e)}")
-            logger.info(f"Final fallback: Using URL '{url}' as company name")
-        
-        # Use the provided logo URL if available, otherwise use placeholder
+        # Even in error case, extract company name from domain if possible
         if hasattr(request, 'logo_url') and request.logo_url:
             return CompanyInfoResponse(
                 url=url,
