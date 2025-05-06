@@ -14,13 +14,13 @@ if [ -z "$PROJECT_ID" ]; then
   exit 1
 fi
 
-if [ -z "$INSTANCE_CONNECTION_NAME" ]; then
-  echo "Error: INSTANCE_CONNECTION_NAME is not set in .env file"
+if [ -z "$FIREBASE_PROJECT_ID" ]; then
+  echo "Error: FIREBASE_PROJECT_ID is not set in .env file"
   exit 1
 fi
 
 echo "Deploying to Cloud Run in project: $PROJECT_ID"
-echo "Using Cloud SQL instance: $INSTANCE_CONNECTION_NAME"
+echo "Using Firebase project: $FIREBASE_PROJECT_ID"
 
 # Deploy to Cloud Run
 gcloud run deploy crwlr-server \
@@ -37,15 +37,10 @@ gcloud run deploy crwlr-server \
   --set-env-vars="PROJECT_ID=$PROJECT_ID" \
   --set-env-vars="GEMINI_API_KEY=$GEMINI_API_KEY" \
   --set-env-vars="API_KEY=$API_KEY" \
-  --set-env-vars="DB_USER=$DB_USER" \
-  --set-env-vars="DB_PASS=$DB_PASS" \
-  --set-env-vars="DB_NAME=$DB_NAME" \
-  --set-env-vars="INSTANCE_CONNECTION_NAME=$INSTANCE_CONNECTION_NAME" \
   --set-env-vars="ENVIRONMENT=production" \
-  --set-env-vars="USE_CLOUD_SQL_PROXY=false" \
-  --set-env-vars="NO_PROXY=false" \
-  --set-secrets="DB_PASS=DB_PASSWORD:latest" \
-  --add-cloudsql-instances="$INSTANCE_CONNECTION_NAME"
+  --set-env-vars="FIREBASE_PROJECT_ID=$FIREBASE_PROJECT_ID" \
+  --set-env-vars="FIREBASE_CLIENT_EMAIL=$FIREBASE_CLIENT_EMAIL" \
+  --set-env-vars="FIREBASE_PRIVATE_KEY=$FIREBASE_PRIVATE_KEY"
 
 echo "======================================================"
 echo "  Deployment completed"

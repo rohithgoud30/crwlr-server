@@ -39,7 +39,7 @@ steps:
       - '--service-account'
       - '${_SERVICE_ACCOUNT}'
       - '--set-env-vars'
-      - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY},BRANCH_NAME=${BRANCH_NAME},ENVIRONMENT=production'
+      - 'PROJECT_ID=$PROJECT_ID,GEMINI_API_KEY=${_GEMINI_API_KEY},BRANCH_NAME=${BRANCH_NAME},ENVIRONMENT=production,FIREBASE_PROJECT_ID=${_FIREBASE_PROJECT_ID}'
       - '--startup-cpu-boost'
       - '--cpu-throttling'
       - '--port'
@@ -55,14 +55,16 @@ steps:
       - '--container-arg'
       - 'run.py'
 
-  # Update the Cloud Run service to set API_KEY separately for better security
-  # Using a secure secret instead of hardcoding the API key
+  # Update the Cloud Run service to set API_KEY and Firebase secrets separately for better security
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: bash
     args:
       - '-c'
       - |
-        gcloud run services update $_SERVICE_NAME --platform managed --region us-east4 --set-env-vars API_KEY=$${_API_KEY}
+        gcloud run services update $_SERVICE_NAME --platform managed --region us-east4 \
+        --set-env-vars API_KEY=$${_API_KEY} \
+        --set-env-vars FIREBASE_CLIENT_EMAIL=$${_FIREBASE_CLIENT_EMAIL} \
+        --set-env-vars FIREBASE_PRIVATE_KEY="$${_FIREBASE_PRIVATE_KEY}"
 
   # Add tags for latest version
   - name: 'gcr.io/cloud-builders/docker'
@@ -90,6 +92,12 @@ availableSecrets:
       env: '_API_KEY'
     - versionName: projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest
       env: '_GEMINI_API_KEY'
+    - versionName: projects/$PROJECT_ID/secrets/firebase-client-email/versions/latest
+      env: '_FIREBASE_CLIENT_EMAIL'
+    - versionName: projects/$PROJECT_ID/secrets/firebase-private-key/versions/latest
+      env: '_FIREBASE_PRIVATE_KEY'
+    - versionName: projects/$PROJECT_ID/secrets/firebase-project-id/versions/latest
+      env: '_FIREBASE_PROJECT_ID'
 
 substitutions:
   _COMMIT_SHA: ${_COMMIT_SHA}

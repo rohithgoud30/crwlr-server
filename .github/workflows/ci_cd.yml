@@ -82,13 +82,9 @@ jobs:
             --set-env-vars="PROJECT_ID=crwlr-server" \
             --set-env-vars="BRANCH_NAME=${GITHUB_REF##*/}" \
             --set-env-vars="ENVIRONMENT=production" \
-            --set-env-vars="DB_USER=${{ secrets.DB_USER }}" \
-            --set-env-vars="DB_NAME=${{ secrets.DB_NAME }}" \
-            --set-env-vars="INSTANCE_CONNECTION_NAME=crwlr-server:us-east4:crwlr-db" \
-            --set-env-vars="USE_CLOUD_SQL_PROXY=false" \
-            --set-env-vars="NO_PROXY=false" \
+            --set-env-vars="FIREBASE_PROJECT_ID=crwlr-server-ccfd2" \
             --set-secrets="API_KEY=API_KEY:latest" \
             --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest" \
-            --set-secrets="DB_PASS=DB_PASSWORD:latest" \
-            --add-cloudsql-instances="crwlr-server:us-east4:crwlr-db" \
+            --set-secrets="FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest" \
+            --set-secrets="FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest" \
             --port 8080
