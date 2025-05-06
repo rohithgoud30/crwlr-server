@@ -23,7 +23,6 @@ from app.core.database import (
     get_document_by_url, get_document_by_retrieved_url, create_document, increment_views
 )
 from app.core.firebase import db
-from app.core.gemini import generate_summary
 
 from app.models.summary import SummaryRequest, SummaryResponse
 from app.models.extract import ExtractRequest, ExtractResponse
