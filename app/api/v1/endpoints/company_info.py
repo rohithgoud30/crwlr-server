@@ -602,6 +602,8 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         
         # ALWAYS use extract_company_name_from_domain to get company name
         company_name = extract_company_name_from_domain(domain)
+        # Set default logo URL based on domain
+        default_logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
         logger.info(f"Using domain-based company name in Playwright: {company_name}")
         
         # Set up browser with anti-detection
@@ -616,7 +618,7 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         
         if not response.ok:
             logger.warning(f"Failed to load page with status: {response.status}")
-            return company_name, "/placeholder.svg?height=48&width=48", False, f"Failed to load page: HTTP {response.status}"
+            return company_name, default_logo_url, False, f"Failed to load page: HTTP {response.status}"
         
         # Check if this is an App/Play Store page
         if is_app_store_url(url):
@@ -753,7 +755,7 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         
         # If no logo found, use favicon from Google service
         if not logo_url:
-            logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+            logo_url = default_logo_url
         
         # Make sure the logo URL is absolute
         if logo_url and not logo_url.startswith(('http://', 'https://')):
@@ -766,10 +768,12 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             verify_response = await page.request.head(logo_url, timeout=5000)
             if not verify_response.ok:
                 logger.warning(f"Logo URL validation failed: {verify_response.status}")
-                logo_url = "/placeholder.svg?height=48&width=48"
+                # Use domain-based favicon as fallback
+                logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
         except Exception as e:
             logger.warning(f"Error validating logo URL: {e}")
-            logo_url = "/placeholder.svg?height=48&width=48"
+            # Use domain-based favicon as fallback
+            logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
         
         return company_name, logo_url, True, "Successfully extracted company information with Playwright"
     
@@ -780,13 +784,13 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             domain = urlparse(url).netloc if url else ""
             if domain:
                 # Consistent use of extract_company_name_from_domain
-                return extract_company_name_from_domain(domain), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
+                return extract_company_name_from_domain(domain), default_logo_url, False, f"Playwright extraction error: {str(e)}"
             else:
                 # If no domain can be extracted, use the URL directly
-                return url.split('/')[0].capitalize(), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
+                return url.split('/')[0].capitalize(), default_logo_url, False, f"Playwright extraction error: {str(e)}"
         except:
             # Final fallback - extract something usable from the URL
-            return url.split('/')[0].capitalize(), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
+            return url.split('/')[0].capitalize(), default_logo_url, False, f"Playwright extraction error: {str(e)}"
     
     finally:
         # Clean up Playwright resources
@@ -804,17 +808,18 @@ async def extract_company_info(url: str) -> tuple:
     
     # Define default values early
     company_name = "Unknown"
-    logo_url = "/placeholder.svg?height=48&width=48"
+    domain = ""
+    # Changed default logo URL to Google favicon
+    logo_url = "https://www.google.com/s2/favicons?domain=unknown.com&sz=128"
     success = False
     message = "Extraction failed"
-    domain = ""
     
     # Try using standard HTTP request and BS4 first
     try:
         # Validate and normalize URL
         url = sanitize_url(url)
         if not url:
-            return "Unknown", "/placeholder.svg?height=48&width=48", False, "Invalid URL"
+            return "Unknown", "https://www.google.com/s2/favicons?domain=unknown.com&sz=128", False, "Invalid URL"
         
         # Extract domain after validation
         try:
@@ -823,6 +828,8 @@ async def extract_company_info(url: str) -> tuple:
             if domain:
                 # ALWAYS use the domain name directly - no title override
                 company_name = extract_company_name_from_domain(domain)
+                # Set default logo URL based on domain
+                logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
                 logger.info(f"Using company name from domain: {company_name}")
             else:
                 company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
@@ -990,10 +997,12 @@ async def extract_company_info(url: str) -> tuple:
                     logo_test = requests.head(logo_url, timeout=5)
                     if logo_test.status_code >= 400:
                         logger.warning(f"Logo URL returned error: {logo_test.status_code}")
-                        logo_url = "/placeholder.svg?height=48&width=48"
+                        # Use domain-based favicon as fallback
+                        logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
                 except Exception as e:
                     logger.warning(f"Error verifying logo URL: {e}")
-                    logo_url = "/placeholder.svg?height=48&width=48"
+                    # Use domain-based favicon as fallback
+                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
             
             return company_name, logo_url, success, message
         
@@ -1013,17 +1022,21 @@ async def extract_company_info(url: str) -> tuple:
             if domain:
                 company_name = extract_company_name_from_domain(domain)
                 logger.info(f"Fallback: Extracted company name '{company_name}' from domain '{domain}'")
+                # Use domain-based favicon
+                logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
             else:
                 # If domain can't be extracted, use first part of URL
                 company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
                 logger.info(f"Final fallback (no domain): Using URL part as company name: '{company_name}'")
+                # Use generic favicon
+                logo_url = "https://www.google.com/s2/favicons?domain=unknown.com&sz=128"
         except Exception as inner_e:
             logger.error(f"Error in fallback company name extraction: {str(inner_e)}")
             # Last resort fallback
             company_name = "Unknown Company"
+            logo_url = "https://www.google.com/s2/favicons?domain=unknown.com&sz=128"
 
-        # Use the default logo URL in case of error
-        logo_url = "/placeholder.svg?height=48&width=48" # Reset logo url on error
+        # Error message but with favicon logo
         success = False
         message = f"Error extracting company info: {str(e)}"
         return company_name, logo_url, success, message
