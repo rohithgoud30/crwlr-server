@@ -216,7 +216,7 @@ Here is the document content:
         try:
             # Send API request
             async with httpx.AsyncClient() as client:
-                api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b-001:generateContent?key={API_KEY}"
+                api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite-001:generateContent?key={API_KEY}"
                 logger.info(f"Using Gemini API URL: {api_url.split('?key=')[0]}") # Log URL without the API key
                 
                 api_response = await client.post(

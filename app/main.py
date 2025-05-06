@@ -108,7 +108,7 @@ async def startup_event():
     try:
         environment_valid = validate_environment()
         if not environment_valid:
-            error_msg = "Environment validation failed - missing required variables"
+            error_msg = "Environment validation failed - missing critical variables (Firebase/API)"
             logger.error(error_msg)
             startup_errors.append(error_msg)
             # We will continue with initialization but log warnings

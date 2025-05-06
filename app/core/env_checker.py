@@ -67,22 +67,23 @@ def check_firebase_env_vars():
 
 def check_database_env_vars():
     """Validate database environment variables at startup."""
-    logger.info("Validating database environment variables...")
+    logger.info("Validating database environment variables... (optional)")
     
-    # Required vars for Cloud SQL
-    required_vars = {
+    # These variables are only required if using PostgreSQL database
+    # Mark them as optional for now
+    optional_vars = {
         "DB_USER": "Database username",
         "DB_PASS": "Database password",
         "DB_NAME": "Database name",
         "INSTANCE_CONNECTION_NAME": "Cloud SQL instance connection name"
     }
     
-    missing_required = []
-    for var, description in required_vars.items():
+    missing_vars = []
+    for var, description in optional_vars.items():
         value = os.environ.get(var)
         if not value:
-            logger.error(f"❌ MISSING REQUIRED: {var} - {description}")
-            missing_required.append(var)
+            logger.warning(f"⚠️ Missing optional DB var: {var} - {description}")
+            missing_vars.append(var)
         else:
             # Don't log sensitive values
             if var == "DB_PASS":
@@ -90,7 +91,12 @@ def check_database_env_vars():
             else:
                 logger.info(f"✅ Found: {var} - {value}")
     
-    return len(missing_required) == 0
+    if missing_vars:
+        logger.warning(f"Database variables missing: {', '.join(missing_vars)}")
+        logger.warning("Database functionality will be limited, but Firebase can still work")
+        
+    # Always return True since database variables are optional
+    return True
 
 def check_api_env_vars():
     """Validate API environment variables at startup."""
@@ -126,14 +132,15 @@ def validate_environment():
     logger.info("Starting environment validation...")
     
     firebase_valid = check_firebase_env_vars()
-    db_valid = check_database_env_vars()
+    db_valid = check_database_env_vars()  # This will now always return True
     api_valid = check_api_env_vars()
     
     # Additional environment checks
     environment = os.environ.get("ENVIRONMENT")
     logger.info(f"Running in environment: {environment or 'not set'}")
     
-    if firebase_valid and db_valid and api_valid:
+    # Only Firebase and API checks are required
+    if firebase_valid and api_valid:
         logger.info("✅ Environment validation successful")
         return True
     else:
