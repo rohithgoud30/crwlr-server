@@ -9,6 +9,9 @@ from app.models.database import Document
 from app.crud.document import document_crud
 from pydantic import BaseModel, Field
 
+# Setup logger
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # Define the structure for items in the search/list response

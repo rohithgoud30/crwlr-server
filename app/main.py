@@ -99,7 +99,7 @@ startup_errors = []
 @app.on_event("startup")
 async def startup_event():
     """Application startup event handler that initializes all required services."""
-    global environment_valid, firebase_initialized, playwright_initialized, startup_errors
+    global environment_valid, firebase_initialized, playwright_initialized
     
     logger.info("Application startup: Beginning initialization sequence...")
     
