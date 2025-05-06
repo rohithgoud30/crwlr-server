@@ -671,7 +671,11 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         # Check if all analyses were successful before attempting to save
         all_analyses_successful = (
             analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
-            analysis.get('word_frequencies') and analysis.get('text_mining')
+            analysis.get('word_frequencies') and analysis.get('text_mining') and
+            not analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") and
+            not analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") and
+            not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
+            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:")
         )
         
         if all_analyses_successful:
@@ -714,7 +718,14 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             if has_useful_data:
                 # Even with useful data, if it wasn't saved, success should be false
                 response.success = False
-                response.message = "Partial success: some analyses completed, returning available data but not saved."
+                
+                # Check if summaries failed and provide a more specific message
+                if (analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") or 
+                    analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result")):
+                    logger.warning(f"Document NOT saved to database due to summary generation failure. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
+                    response.message = "Document analysis incomplete: Summary generation failed. Document not saved."
+                else:
+                    response.message = "Partial success: some analyses completed, returning available data but not saved."
             else:
                 response.success = False
                 response.message = "Failed to analyze content properly, no useful data available."
@@ -1149,7 +1160,11 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         # Check if all analyses were successful before attempting to save
         all_analyses_successful = (
             analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
-            analysis.get('word_frequencies') and analysis.get('text_mining')
+            analysis.get('word_frequencies') and analysis.get('text_mining') and
+            not analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") and
+            not analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") and
+            not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
+            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:")
         )
         
         if all_analyses_successful:
@@ -1191,7 +1206,14 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             if has_useful_data:
                 # Even with useful data, if it wasn't saved, success should be false
                 response.success = False
-                response.message = "Partial success: some analyses completed, returning available data but not saved."
+                
+                # Check if summaries failed and provide a more specific message
+                if (analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") or 
+                    analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result")):
+                    logger.warning(f"Document NOT saved to database due to summary generation failure. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
+                    response.message = "Document analysis incomplete: Summary generation failed. Document not saved."
+                else:
+                    response.message = "Partial success: some analyses completed, returning available data but not saved."
             else:
                 response.success = False
                 response.message = "Failed to analyze content properly, no useful data available."
@@ -1353,7 +1375,7 @@ async def generate_one_sentence_summary(text: str, url: str = None) -> str:
                 return summary_response.one_sentence_summary
             else:
                 logger.warning("Empty one-sentence summary returned")
-                return "Summary generation returned empty result"
+                return f"Summary generation returned empty result for one-sentence summary. Status: {summary_response.success}, Message: {summary_response.message}"
         else:
             error_msg = summary_response.message if summary_response else "Unknown error"
             logger.error(f"Failed to generate one-sentence summary: {error_msg}")
@@ -1396,7 +1418,7 @@ async def generate_hundred_word_summary(text: str, url: str = None) -> str:
                 return summary_response.hundred_word_summary
             else:
                 logger.warning("Empty hundred-word summary returned")
-                return "Summary generation returned empty result"
+                return f"Summary generation returned empty result for hundred-word summary. Status: {summary_response.success}, Message: {summary_response.message}"
         else:
             error_msg = summary_response.message if summary_response else "Unknown error"
             logger.error(f"Failed to generate hundred-word summary: {error_msg}")
