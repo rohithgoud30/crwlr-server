@@ -133,6 +133,18 @@ async def extract_app_store_info(page) -> Tuple[Optional[str], Optional[str]]:
                     return title.trim();
                 }
                 
+                // Try dedicated h1 with app name
+                const h1 = document.querySelector('h1.product-header__title');
+                if (h1) {
+                    let title = '';
+                    for (const node of h1.childNodes) {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            title += node.textContent;
+                        }
+                    }
+                    return title.trim();
+                }
+                
                 // Fallbacks
                 // 1. Try meta title
                 const metaTitle = document.querySelector('meta[name="apple:title"]');
@@ -143,7 +155,8 @@ async def extract_app_store_info(page) -> Tuple[Optional[str], Optional[str]]:
                 // 2. Try open graph title
                 const ogTitle = document.querySelector('meta[property="og:title"]');
                 if (ogTitle && ogTitle.content) {
-                    return ogTitle.content.trim();
+                    const title = ogTitle.content.replace(' on the App Store', '');
+                    return title.trim();
                 }
                 
                 // 3. Use page title
@@ -156,35 +169,91 @@ async def extract_app_store_info(page) -> Tuple[Optional[str], Optional[str]]:
             }
         """)
         
+        # Make sure we're not returning just "Apps" as the name
+        if app_name == "Apps":
+            app_name = await page.evaluate("""
+                () => {
+                    // Try to find a better app name if we got "Apps"
+                    
+                    // Check if there's an app name in the URL path
+                    const pathParts = window.location.pathname.split('/');
+                    // App name is usually after /app/ in the URL
+                    const appNameIndex = pathParts.indexOf('app');
+                    if (appNameIndex >= 0 && appNameIndex < pathParts.length - 1) {
+                        // Convert app-name-with-dashes to App Name With Dashes
+                        const nameFromUrl = pathParts[appNameIndex + 1]
+                            .split('-')
+                            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                            .join(' ');
+                        if (nameFromUrl && nameFromUrl.length > 1) {
+                            return nameFromUrl;
+                        }
+                    }
+                    
+                    // Try other metadata elements
+                    const developerInfo = document.querySelector('.product-header__identity');
+                    if (developerInfo) {
+                        return developerInfo.textContent.trim();
+                    }
+                    
+                    // Try app subtitle
+                    const subtitle = document.querySelector('.product-header__subtitle');
+                    if (subtitle) {
+                        return subtitle.textContent.trim();
+                    }
+                    
+                    return document.title.replace(' on the App Store', '').trim();
+                }
+            """)
+        
         # Extract logo URL
         logo_url = await page.evaluate("""
             () => {
                 // Try multiple selectors for app icon
                 const selectors = [
-                    '.we-artwork--ios-app-icon source[type="image/webp"]',
-                    '.we-artwork--ios-app-icon img',
-                    '.product-hero__artwork source[type="image/webp"]',
-                    '.product-hero__artwork img',
+                    // Primary selectors for app icon
+                    '.we-artwork--ios-app-icon source[srcset]',
+                    '.product-hero__artwork source[srcset]',
+                    '.we-artwork--ios-app-icon img[src]',
+                    '.product-hero__artwork img[src]',
+                    
+                    // Fallbacks
+                    'picture.we-artwork--ios-app-icon source',
                     'meta[property="og:image"]',
-                    'link[rel="apple-touch-icon"]'
+                    'link[rel="apple-touch-icon"]',
+                    '.ember-view .we-artwork--downloaded img'
                 ];
                 
                 for (const selector of selectors) {
-                    const el = document.querySelector(selector);
-                    if (el) {
-                        // Handle different element types
-                        if (selector.includes('source') && el.srcset) {
+                    const elements = document.querySelectorAll(selector);
+                    for (const el of elements) {
+                        // Handle srcset (preferred for high quality)
+                        if (el.srcset) {
                             // Parse srcset to get the largest image
                             const srcsetParts = el.srcset.split(',').map(s => s.trim());
-                            // Get the largest (last) image
                             if (srcsetParts.length > 0) {
-                                const lastSrc = srcsetParts[srcsetParts.length - 1];
-                                // Extract URL part (before the width descriptor)
-                                const urlMatch = lastSrc.match(/^(.*?)\\s+\\d+w$/);
-                                if (urlMatch && urlMatch[1]) {
-                                    return urlMatch[1];
+                                // Find the image with the largest width
+                                let largestWidth = 0;
+                                let largestUrl = '';
+                                
+                                for (const part of srcsetParts) {
+                                    const [url, widthStr] = part.split(' ');
+                                    if (url && widthStr) {
+                                        const width = parseInt(widthStr.replace('w', ''));
+                                        if (width > largestWidth) {
+                                            largestWidth = width;
+                                            largestUrl = url;
+                                        }
+                                    }
                                 }
-                                return lastSrc.split(' ')[0]; // Fallback
+                                
+                                if (largestUrl) {
+                                    return largestUrl;
+                                }
+                                
+                                // If we couldn't parse widths, just use the last image
+                                const lastSrc = srcsetParts[srcsetParts.length - 1];
+                                return lastSrc.split(' ')[0]; // Get URL part only
                             }
                         }
                         
