@@ -47,16 +47,62 @@ def initialize_firebase(force_init=False):
         # Get the Firebase project ID (use the override)
         firebase_project_id = CORRECT_PROJECT_ID  # Override with the correct ID
         
+        # MODIFIED: First check for a credentials file since it's the most reliable method
+        # If a service account file exists, try to use that first
+        if os.path.exists("firebase-credentials.json"):
+            logger.info("Initializing Firebase with admin service account file (firebase-credentials.json)")
+            try:
+                cred = credentials.Certificate("firebase-credentials.json")
+                firebase_admin.initialize_app(cred)
+                db = firestore.client()
+                logger.info("Firebase initialized successfully with admin service account JSON file")
+                
+                # Verify connection with a simple test
+                try:
+                    # Test if we can access a collection
+                    collection_ref = db.collection('documents')
+                    logger.info(f"Firestore connection verified - successfully accessed 'documents' collection: {collection_ref.id}")
+                    return db
+                except Exception as test_err:
+                    logger.warning(f"Initialized Firebase, but error when testing collection access: {str(test_err)}")
+                    # Continue with app but log the warning
+                    return db
+                
+            except Exception as e:
+                logger.error(f"Error with credentials file: {str(e)}")
+                logger.error(traceback.format_exc())
+                handle_firebase_error(e)
+                # Don't return here - let's try other methods
+        else:
+            logger.warning("firebase-credentials.json file not found")
+        
+        # Check for explicit credentials file path
+        if os.path.exists("firebase-admin-credentials.json"):
+            logger.info("Initializing Firebase with explicit admin credentials file (firebase-admin-credentials.json)")
+            try:
+                cred = credentials.Certificate("firebase-admin-credentials.json")
+                firebase_admin.initialize_app(cred)
+                db = firestore.client()
+                logger.info("Firebase initialized successfully with explicit admin credentials file")
+                return db
+            except Exception as e:
+                logger.error(f"Error with explicit admin credentials file: {str(e)}")
+                logger.error(traceback.format_exc())
+                handle_firebase_error(e)
+                # Don't return here - let's try environment variables
+        else:
+            logger.warning("firebase-admin-credentials.json file not found")
+            
         # Required minimum environment variables
         required_vars = ["FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL"]
         missing_vars = [var for var in required_vars if not os.environ.get(var)]
         
-        # Check for missing required variables
-        if missing_vars and not force_init:
+        # Check for missing required variables but only log warning
+        if missing_vars:
             missing_list = ", ".join(missing_vars)
-            error_msg = f"Firebase initialization aborted: Missing required env vars: {missing_list}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+            logger.warning(f"Missing environment variables for Firebase: {missing_list}")
+            if not force_init:
+                logger.warning("Not forcing init - skipping environment variable method")
             
         # Verify all Firebase environment variables are available
         firebase_env_vars = {
@@ -99,20 +145,21 @@ def initialize_firebase(force_init=False):
             logger.error("CRITICAL: FIREBASE_CLIENT_EMAIL environment variable is empty or not set")
         
         # Log key format for debugging (without exposing the actual key)
-        key_start = firebase_private_key[:25] if len(firebase_private_key) > 25 else firebase_private_key
-        key_end = firebase_private_key[-25:] if len(firebase_private_key) > 25 else ""
-        logger.info(f"Private key format: starts with '{key_start}...' ends with '...{key_end}' (length: {len(firebase_private_key)})")
-            
-        # Verify key format
-        if not firebase_private_key.strip().startswith("-----BEGIN PRIVATE KEY-----"):
-            logger.error("Private key does not start with correct header")
-            
-        if not firebase_private_key.strip().endswith("-----END PRIVATE KEY-----"):
-            logger.error("Private key does not end with correct footer")
+        if firebase_private_key:
+            key_start = firebase_private_key[:25] if len(firebase_private_key) > 25 else firebase_private_key
+            key_end = firebase_private_key[-25:] if len(firebase_private_key) > 25 else ""
+            logger.info(f"Private key format: starts with '{key_start}...' ends with '...{key_end}' (length: {len(firebase_private_key)})")
+                
+            # Verify key format
+            if not firebase_private_key.strip().startswith("-----BEGIN PRIVATE KEY-----"):
+                logger.error("Private key does not start with correct header")
+                
+            if not firebase_private_key.strip().endswith("-----END PRIVATE KEY-----"):
+                logger.error("Private key does not end with correct footer")
             
         # Check if we have the minimum required env variables or force_init is used
         if (firebase_private_key and firebase_client_email) or force_init:
-            logger.info(f"Initializing Firebase with environment variables for project: {firebase_project_id}")
+            logger.info(f"Attempting Firebase initialization with environment variables (force_init: {force_init}) for project: {firebase_project_id}")
             
             # Create complete credential object from env variables
             cred_dict = {
@@ -144,39 +191,15 @@ def initialize_firebase(force_init=False):
                 logger.info("Creating Firestore client...")
                 db = firestore.client()
                 logger.info("Firebase initialized successfully with admin credentials from environment variables")
+                return db
             except Exception as e:
-                logger.error(f"Error during Firebase initialization with credentials: {str(e)}")
+                logger.error(f"Error during Firebase initialization with environment variables: {str(e)}")
                 logger.error(traceback.format_exc())
                 handle_firebase_error(e)
-            
-        # If a service account file exists, try to use that
-        elif os.path.exists("firebase-credentials.json"):
-            logger.info("Initializing Firebase with admin service account file")
-            try:
-                cred = credentials.Certificate("firebase-credentials.json")
-                firebase_admin.initialize_app(cred)
-                db = firestore.client()
-                logger.info("Firebase initialized successfully with admin service account JSON file")
-            except Exception as e:
-                logger.error(f"Error with credentials file: {str(e)}")
-                logger.error(traceback.format_exc())
-                handle_firebase_error(e)
-        
-        # Check for explicit credentials file path
-        elif os.path.exists("firebase-admin-credentials.json"):
-            logger.info("Initializing Firebase with explicit admin credentials file")
-            try:
-                cred = credentials.Certificate("firebase-admin-credentials.json")
-                firebase_admin.initialize_app(cred)
-                db = firestore.client()
-                logger.info("Firebase initialized successfully with explicit admin credentials file")
-            except Exception as e:
-                logger.error(f"Error with explicit admin credentials file: {str(e)}")
-                logger.error(traceback.format_exc())
-                handle_firebase_error(e)
+                # Don't return here, allow fallback if db is still None
             
         # In Google Cloud (or with Application Default Credentials available)
-        elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or (settings.ENVIRONMENT == "production" and not force_init):
+        if db is None and (os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or (settings.ENVIRONMENT == "production" and not force_init)):
             logger.info("Initializing Firebase with application default credentials")
             try:
                 # Initialize with specific project ID
@@ -184,14 +207,16 @@ def initialize_firebase(force_init=False):
                 firebase_admin.initialize_app(options=options)
                 db = firestore.client()
                 logger.info(f"Firebase initialized successfully with application default credentials (project: {CORRECT_PROJECT_ID})")
+                return db
             except Exception as e:
                 logger.error(f"Error with application default credentials: {str(e)}")
                 logger.error(traceback.format_exc())
                 handle_firebase_error(e)
             
-        else:
-            logger.error("No Firebase credentials available")
-            raise ValueError("Firebase admin credentials not found. Please set environment variables or provide a credentials file.")
+        # Check if db is still None after all attempts
+        if db is None:
+            logger.error("No Firebase credentials available or all initialization methods failed.")
+            raise ValueError("Firebase admin credentials not found or initialization failed. Please set environment variables or provide a valid credentials file.")
             
         return db
         

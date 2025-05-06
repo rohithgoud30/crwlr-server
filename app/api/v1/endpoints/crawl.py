@@ -19,10 +19,13 @@ from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analy
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
-from app.core.database import (
-    get_document_by_url, get_document_by_retrieved_url, create_document, increment_views
-)
 from app.core.firebase import db
+from app.core.database import (
+    get_document_by_url,
+    get_document_by_retrieved_url,
+    create_document,
+    increment_views
+)
 
 from app.models.summary import SummaryRequest, SummaryResponse
 from app.models.extract import ExtractRequest, ExtractResponse
@@ -176,11 +179,6 @@ async def save_document_to_db(
                 serializable_text_mining = {"error": "Could not convert text mining metrics"}
                 logger.warning(f"Could not convert text mining metrics to dict: {type(analysis['text_mining'])}")
         
-        # Check if the Firebase database is available
-        if db is None:
-            logger.error("Firebase database not initialized")
-            raise Exception("Firebase database not initialized")
-        
         # Create document data for Firestore
         document_data = {
             "url": original_url,
@@ -198,22 +196,33 @@ async def save_document_to_db(
             "updated_at": datetime.now()
         }
         
-        # Add to Firestore documents collection
-        document_ref = db.collection("documents").document()
-        document_id = document_ref.id
-        document_ref.set(document_data)
+        # Add document to Firestore using the create_document helper
+        document_id = create_document(document_data)
         
+        if not document_id:
+            logger.error("Failed to create document in Firestore")
+            raise Exception("Failed to create document in Firestore")
+            
         logger.info(f"Document saved to Firestore with ID: {document_id}")
         
         # If user_id is provided, create a submission record
         if user_id:
+            from app.core.database import submissions
+            
             submission_data = {
                 "user_id": user_id,
                 "document_id": document_id,
                 "created_at": datetime.now()
             }
-            db.collection("submissions").document().set(submission_data)
-            logger.info(f"Submission record created for user {user_id} and document {document_id}")
+            
+            # Get submissions collection
+            submissions_collection = submissions()
+            if submissions_collection:
+                submission_ref = submissions_collection.document()
+                submission_ref.set(submission_data)
+                logger.info(f"Submission record created for user {user_id} and document {document_id}")
+            else:
+                logger.error("Could not access submissions collection")
         
         return document_id
     except Exception as e:

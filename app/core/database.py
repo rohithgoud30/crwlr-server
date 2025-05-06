@@ -5,7 +5,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from app.core.config import settings
-from app.core.firebase import db
+from app.core.firebase import db, initialize_firebase
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -13,30 +13,69 @@ logger = logging.getLogger(__name__)
 
 # Check if Firebase is properly initialized
 if db is None:
-    logger.error("Firebase database not initialized - check your Firebase configuration")
+    logger.warning("Firebase database not initialized on module import - will attempt lazy initialization when needed")
 else:
     logger.info("Firebase database initialized successfully")
 
 # Define the document types
 DOCUMENT_TYPES = ["tos", "pp"]
 
-# Define database collections
+# Collection references (initialized lazily)
+_users_collection = None
+_documents_collection = None
+_submissions_collection = None
+
+# Define database collections with lazy loading
 def get_collection(collection_name):
-    """Get a Firestore collection reference"""
+    """Get a Firestore collection reference, attempting initialization if needed"""
+    global db
+    
+    # If db is None, try to initialize Firebase again
+    if db is None:
+        logger.info(f"Attempting lazy Firebase initialization to get collection: {collection_name}")
+        try:
+            # Force initialization in development
+            force_init = settings.ENVIRONMENT == "development"
+            db = initialize_firebase(force_init=force_init)
+        except Exception as e:
+            logger.error(f"Lazy Firebase initialization failed: {str(e)}")
+    
+    # Now check if db is available
     if db is None:
         logger.error(f"Cannot get collection {collection_name} - Firebase not initialized")
         return None
+    
+    logger.info(f"Successfully got collection reference: {collection_name}")
     return db.collection(collection_name)
 
-# Collections used in the application
-users_collection = get_collection("users")
-documents_collection = get_collection("documents")
-submissions_collection = get_collection("submissions")
+# Lazy loading getters for collections
+def users():
+    """Lazy getter for users collection"""
+    global _users_collection
+    if _users_collection is None:
+        _users_collection = get_collection("users")
+    return _users_collection
+
+def documents():
+    """Lazy getter for documents collection"""
+    global _documents_collection
+    if _documents_collection is None:
+        _documents_collection = get_collection("documents")
+    return _documents_collection
+
+def submissions():
+    """Lazy getter for submissions collection"""
+    global _submissions_collection
+    if _submissions_collection is None:
+        _submissions_collection = get_collection("submissions")
+    return _submissions_collection
 
 # Document reference helpers
-def get_document_ref(collection, doc_id):
+def get_document_ref(collection_getter, doc_id):
     """Get a reference to a document in a collection by ID"""
+    collection = collection_getter()
     if collection is None:
+        logger.error(f"Cannot get document reference - collection is None")
         return None
     return collection.document(str(doc_id))
 
@@ -48,7 +87,12 @@ def check_database_connection():
             return False
             
         # Try a simple query to verify connection
-        test_query = documents_collection.limit(1)
+        docs_collection = documents()
+        if docs_collection is None:
+            logger.error("Could not get documents collection reference")
+            return False
+            
+        test_query = docs_collection.limit(1)
         test_query.get()  # This will raise an exception if the connection fails
         logger.info("Firebase database connection test successful")
         return True
@@ -59,12 +103,13 @@ def check_database_connection():
 def get_document_by_url(url, document_type):
     """Get a document by URL and type"""
     try:
-        if documents_collection is None:
+        docs_collection = documents()
+        if docs_collection is None:
             logger.error("Documents collection not available")
             return None
             
         # Query for document with matching URL and type
-        query = documents_collection.where("url", "==", url).where("document_type", "==", document_type).limit(1)
+        query = docs_collection.where("url", "==", url).where("document_type", "==", document_type).limit(1)
         docs = list(query.stream())
         
         if docs:
@@ -79,12 +124,13 @@ def get_document_by_url(url, document_type):
 def get_document_by_retrieved_url(url, document_type):
     """Get a document by retrieved URL and type"""
     try:
-        if documents_collection is None:
+        docs_collection = documents()
+        if docs_collection is None:
             logger.error("Documents collection not available")
             return None
             
         # Query for document with matching retrieved URL and type
-        query = documents_collection.where("retrieved_url", "==", url).where("document_type", "==", document_type).limit(1)
+        query = docs_collection.where("retrieved_url", "==", url).where("document_type", "==", document_type).limit(1)
         docs = list(query.stream())
         
         if docs:
@@ -99,13 +145,15 @@ def get_document_by_retrieved_url(url, document_type):
 def create_document(document_data):
     """Create a new document in Firestore"""
     try:
-        if documents_collection is None:
+        docs_collection = documents()
+        if docs_collection is None:
             logger.error("Documents collection not available")
             return None
             
         # Create a new document with auto-generated ID
-        new_doc_ref = documents_collection.document()
+        new_doc_ref = docs_collection.document()
         new_doc_ref.set(document_data)
+        logger.info(f"Document created successfully with ID: {new_doc_ref.id}")
         
         return new_doc_ref.id
     except Exception as e:
@@ -114,8 +162,22 @@ def create_document(document_data):
 
 def ensure_collections_exist():
     """Ensures that all required collections exist in Firestore."""
+    global db
+    
     if db is None:
-        logger.error("Firebase database not initialized - cannot create collections")
+        logger.warning("Firebase database not initialized - cannot ensure collections exist")
+        # Try to initialize Firebase
+        try:
+            # Force initialization in development
+            force_init = settings.ENVIRONMENT == "development"
+            db = initialize_firebase(force_init=force_init)
+        except Exception as e:
+            logger.error(f"Firebase initialization failed during ensure_collections_exist: {str(e)}")
+            return False
+    
+    # Check again if initialization succeeded
+    if db is None:
+        logger.error("Firebase still not initialized after attempt - cannot create collections")
         return False
     
     try:
@@ -139,16 +201,10 @@ def ensure_collections_exist():
         logger.error(f"Error in ensure_collections_exist: {str(e)}")
         return False
 
-# Run connection check at module import
-check_database_connection()
-
-# Ensure collections exist
-ensure_collections_exist()
-
 async def increment_views(document_id):
     """Increment the views count for a document"""
     try:
-        doc_ref = get_document_ref(documents_collection, document_id)
+        doc_ref = get_document_ref(documents, document_id)
         if doc_ref is None:
             logger.error(f"Cannot increment views - Invalid document reference for ID: {document_id}")
             return False
@@ -173,3 +229,18 @@ async def increment_views(document_id):
     except Exception as e:
         logger.error(f"Error incrementing views for document {document_id}: {str(e)}")
         return False
+
+# Run connection check when the module is imported
+# but only log warnings if it fails - don't prevent app startup
+try:
+    check_database_connection()
+except Exception as e:
+    logger.warning(f"Initial database connection check failed: {str(e)}")
+
+# Ensure collections exist - but continue even if this fails
+# as we have lazy initialization now
+try:
+    ensure_collections_exist()
+except Exception as e:
+    logger.warning(f"Error ensuring collections exist: {str(e)}")
+    logger.warning("Collections will be created on first access")
