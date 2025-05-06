@@ -1,256 +1,175 @@
 import os
 import logging
-import warnings
-from typing import Optional, Tuple, Callable
-from sqlalchemy import create_engine, MetaData, Column, Table, String, DateTime, Text, ForeignKey, Enum, JSON, BigInteger
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.sql import text, func
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
-
-# Filter out CryptographyDeprecationWarning related to not_valid_after
-warnings.filterwarnings('ignore', category=Warning, module='google.cloud.sql.connector.instance')
+from typing import Optional
+from datetime import datetime
+from uuid import uuid4
 
 from app.core.config import settings
+from app.core.firebase import db
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configure database connection based on environment
-def get_connection_string() -> Tuple[str, str, Optional[Callable]]:
-    """
-    Returns database connection string and optional creator function based on environment variables
-    """
-    # Check environment variables and log them
-    logger.info(f"Database Configuration:")
-    logger.info(f"DB_USER: {'Set' if settings.DB_USER else 'Not Set'}")
-    logger.info(f"DB_PASS: {'Set' if settings.DB_PASS else 'Not Set'}")
-    logger.info(f"DB_NAME: {'Set' if settings.DB_NAME else 'Not Set'}")
-    logger.info(f"DB_HOST: {'Set' if settings.DB_HOST else 'Not Set'}")
-    logger.info(f"DB_PORT: {'Set' if settings.DB_PORT else 'Not Set'}")
-    logger.info(f"INSTANCE_CONNECTION_NAME: {'Set' if settings.INSTANCE_CONNECTION_NAME else 'Not Set'}")
-    logger.info(f"NO_PROXY: {'True' if os.environ.get('NO_PROXY', '').lower() == 'true' else 'False'}")
-    logger.info(f"ENVIRONMENT: {settings.ENVIRONMENT}")
-    
-    # Check if NO_PROXY environment variable is set (for Cloud Run without proxy)
-    if os.environ.get("NO_PROXY", "").lower() == "true":
-        logger.info("NO_PROXY mode: Using direct connection to Cloud SQL without proxy")
-        # Direct connection to Cloud SQL using public IP
-        host = settings.DB_HOST or "127.0.0.1"  # Default to localhost if not set
-        port = settings.DB_PORT or "5432"
-        user = settings.DB_USER or "postgres"
-        password = settings.DB_PASS or ""
-        dbname = settings.DB_NAME or "postgres"
-        
-        connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-        async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
-        logger.info(f"Using direct PostgreSQL connection to {host}:{port}")
-        return connection_string, async_connection_string, None
-    
-    # Check if running on Google Cloud with Cloud SQL Proxy
-    elif settings.INSTANCE_CONNECTION_NAME:
-        try:
-            # Import cloud SQL connector - only needed in cloud environments
-            from google.cloud.sql.connector import Connector, IPTypes
-            
-            # Initialize Cloud SQL Python Connector
-            connector = Connector()
-            
-            def getconn():
-                conn = connector.connect(
-                    settings.INSTANCE_CONNECTION_NAME,
-                    "pg8000",
-                    user=settings.DB_USER,
-                    password=settings.DB_PASS,
-                    db=settings.DB_NAME,
-                    ip_type=IPTypes.PUBLIC
-                )
-                return conn
-            
-            # Create connection string for PostgreSQL with Cloud SQL Proxy
-            connection_string = f"postgresql+pg8000://"
-            
-            # For local development, use direct connection with asyncpg
-            if settings.ENVIRONMENT == "development":
-                host = "127.0.0.1"  # Local proxy address
-                port = "5432"       # Default PostgreSQL port
-                user = settings.DB_USER or "postgres"
-                password = settings.DB_PASS or ""
-                dbname = settings.DB_NAME or "postgres"
-                async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
-                logger.info(f"Using asyncpg for local development with Cloud SQL proxy at {host}:{port}")
-            else:
-                # For cloud environments, use Unix socket with asyncpg
-                user = settings.DB_USER or "postgres" 
-                password = settings.DB_PASS or ""
-                dbname = settings.DB_NAME or "postgres"
-                
-                # Construct the Cloud SQL Unix socket path
-                socket_path = f"/cloudsql/{settings.INSTANCE_CONNECTION_NAME}"
-                
-                # Use the Unix socket connection string format for asyncpg
-                async_connection_string = f"postgresql+asyncpg://{user}:{password}@/{dbname}?host={socket_path}"
-                
-                logger.info(f"Using Unix socket connection to Cloud SQL: {socket_path}")
-            
-            logger.info(f"Connected to Cloud SQL instance: {settings.INSTANCE_CONNECTION_NAME}")
-            return connection_string, async_connection_string, getconn
-        except ImportError:
-            logger.warning("Cloud SQL libraries not available, falling back to direct PostgreSQL connection")
-    
-    # Fall back to direct PostgreSQL connection
-    # For local development with Cloud SQL proxy, use 127.0.0.1 as host
-    if settings.ENVIRONMENT == "development" and os.environ.get("USE_CLOUD_SQL_PROXY", "").lower() == "true":
-        # When using Cloud SQL proxy locally, it forwards to localhost:5432
-        host = "127.0.0.1"
-        port = "5432"
-        logger.info(f"Using Cloud SQL Proxy for local development (localhost:{port})")
-    else:
-        host = settings.DB_HOST or "127.0.0.1"
-        port = settings.DB_PORT or "5432"
-    
-    user = settings.DB_USER or "postgres"
-    password = settings.DB_PASS or ""
-    dbname = settings.DB_NAME or "postgres"
-    
-    connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-    async_connection_string = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
-    logger.info(f"Using direct PostgreSQL connection to {host}:{port}")
-    return connection_string, async_connection_string, None
+# Check if Firebase is properly initialized
+if db is None:
+    logger.error("Firebase database not initialized - check your Firebase configuration")
+else:
+    logger.info("Firebase database initialized successfully")
 
-# Create SQLAlchemy engines
-try:
-    connection_string, async_connection_string, creator_func = get_connection_string()
-    
-    # Create sync engine for schema operations
-    if creator_func:
-        # If we got a creator function for Cloud SQL connector
-        engine = create_engine(
-            connection_string,
-            creator=creator_func,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,  # Check connection before use
-            pool_recycle=3600,   # Recycle connections hourly
-        )
-    else:
-        # Standard direct connection
-        engine = create_engine(
-            connection_string,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,  # Check connection before use
-            pool_recycle=3600,   # Recycle connections hourly
-        )
-    
-    # Create async engine (always using asyncpg)
-    async_engine = create_async_engine(
-        async_connection_string,
-        echo=False,
-        pool_size=5,
-        max_overflow=10,
-        pool_timeout=60,  # Increase timeout to 60 seconds
-        pool_recycle=1800,
-    )
-    
-    logger.info("Database engines created successfully")
-    
-except Exception as e:
-    logger.error(f"Error creating database engine: {str(e)}")
-    # Instead of raising, we'll continue without a database and handle it in the application
-    engine = None
-    async_engine = None
-    logger.warning("Continuing without database connection")
+# Define the document types
+DOCUMENT_TYPES = ["tos", "pp"]
 
-# Define metadata object
-metadata = MetaData()
+# Define database collections
+def get_collection(collection_name):
+    """Get a Firestore collection reference"""
+    if db is None:
+        logger.error(f"Cannot get collection {collection_name} - Firebase not initialized")
+        return None
+    return db.collection(collection_name)
 
-# Define tables
-users = Table(
-    "users",
-    metadata,
-    Column("id", UUID, primary_key=True, server_default=text("gen_random_uuid()")),
-    Column("clerk_user_id", String(255), unique=True, nullable=False),
-    Column("email", String(255), nullable=False),
-    Column("name", String(255), nullable=True),
-    Column("role", String(20), nullable=False, server_default="user"),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now(), onupdate=func.now()),
-)
+# Collections used in the application
+users_collection = get_collection("users")
+documents_collection = get_collection("documents")
+submissions_collection = get_collection("submissions")
 
-# Define document_type enum safely with a check if it already exists
-document_type_enum_check = """
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'document_type') THEN
-        CREATE TYPE document_type AS ENUM ('tos', 'pp');
-    END IF;
-END
-$$;
-"""
+# Document reference helpers
+def get_document_ref(collection, doc_id):
+    """Get a reference to a document in a collection by ID"""
+    if collection is None:
+        return None
+    return collection.document(str(doc_id))
 
-documents = Table(
-    "documents",
-    metadata,
-    Column("id", UUID, primary_key=True, server_default=text("gen_random_uuid()")),
-    Column("url", Text, nullable=False),
-    Column("document_type", Enum("tos", "pp", name="document_type", create_type=False), nullable=False),
-    Column("retrieved_url", Text, nullable=False),
-    Column("company_name", Text, nullable=True),
-    Column("logo_url", Text, nullable=True),
-    Column("views", BigInteger, nullable=False, server_default="0"),
-    Column("raw_text", Text, nullable=True, server_default=""),
-    Column("one_sentence_summary", Text, nullable=True),
-    Column("hundred_word_summary", Text, nullable=True),
-    Column("word_frequencies", JSONB, nullable=True),
-    Column("text_mining_metrics", JSONB, nullable=True),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now(), onupdate=func.now()),
-)
-
-submissions = Table(
-    "submissions",
-    metadata,
-    Column("id", UUID, primary_key=True, server_default=text("gen_random_uuid()")),
-    Column("user_id", UUID, ForeignKey("users.id"), nullable=True),
-    Column("document_id", UUID, ForeignKey("documents.id"), nullable=True),
-    Column("requested_url", Text, nullable=False),
-    Column("document_type", Enum("tos", "pp", name="document_type", create_type=False), nullable=False),
-    Column("status", String(20), nullable=False, server_default="pending"),
-    Column("error_message", Text, nullable=True),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now(), onupdate=func.now()),
-)
-
-def create_tables():
-    """
-    Creates all database tables if they don't exist.
-    """
-    if engine is None:
-        logger.error("Cannot create tables - database engine is not initialized")
-        return
-        
+def check_database_connection():
+    """Check if the Firebase connection is working by testing a simple query"""
     try:
-        # Create pgcrypto extension for UUID generation
-        with engine.connect() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
-            logger.info("Enabled pgcrypto extension for UUID generation")
+        if db is None:
+            logger.error("Firebase database not initialized")
+            return False
             
-            # Create DocumentType enum if it doesn't exist
-            conn.execute(text(document_type_enum_check))
-            logger.info("Created DocumentType enum if it didn't exist")
-            
-            # Commit these changes
-            conn.commit()
-        
-        # Create all tables
-        metadata.create_all(engine)
-        logger.info("Created all database tables successfully")
-        
-    except SQLAlchemyError as e:
-        logger.error(f"Database error creating tables: {str(e)}")
-        raise
+        # Try a simple query to verify connection
+        test_query = documents_collection.limit(1)
+        test_query.get()  # This will raise an exception if the connection fails
+        logger.info("Firebase database connection test successful")
+        return True
     except Exception as e:
-        logger.error(f"Unexpected error creating tables: {str(e)}")
-        raise
+        logger.error(f"Firebase database connection test failed: {str(e)}")
+        return False
+        
+def get_document_by_url(url, document_type):
+    """Get a document by URL and type"""
+    try:
+        if documents_collection is None:
+            logger.error("Documents collection not available")
+            return None
+            
+        # Query for document with matching URL and type
+        query = documents_collection.where("url", "==", url).where("document_type", "==", document_type).limit(1)
+        docs = list(query.stream())
+        
+        if docs:
+            doc_data = docs[0].to_dict()
+            doc_data['id'] = docs[0].id
+            return doc_data
+        return None
+    except Exception as e:
+        logger.error(f"Error getting document by URL and type: {str(e)}")
+        return None
+
+def get_document_by_retrieved_url(url, document_type):
+    """Get a document by retrieved URL and type"""
+    try:
+        if documents_collection is None:
+            logger.error("Documents collection not available")
+            return None
+            
+        # Query for document with matching retrieved URL and type
+        query = documents_collection.where("retrieved_url", "==", url).where("document_type", "==", document_type).limit(1)
+        docs = list(query.stream())
+        
+        if docs:
+            doc_data = docs[0].to_dict()
+            doc_data['id'] = docs[0].id
+            return doc_data
+        return None
+    except Exception as e:
+        logger.error(f"Error getting document by retrieved URL and type: {str(e)}")
+        return None
+
+def create_document(document_data):
+    """Create a new document in Firestore"""
+    try:
+        if documents_collection is None:
+            logger.error("Documents collection not available")
+            return None
+            
+        # Create a new document with auto-generated ID
+        new_doc_ref = documents_collection.document()
+        new_doc_ref.set(document_data)
+        
+        return new_doc_ref.id
+    except Exception as e:
+        logger.error(f"Error creating document: {str(e)}")
+        return None
+
+def ensure_collections_exist():
+    """Ensures that all required collections exist in Firestore."""
+    if db is None:
+        logger.error("Firebase database not initialized - cannot create collections")
+        return False
+    
+    try:
+        # Define required collections
+        required_collections = ["users", "documents", "submissions"]
+        
+        for collection_name in required_collections:
+            try:
+                # Just check if the collection exists in the database
+                collection_ref = db.collection(collection_name)
+                # We don't need to create any documents, just ensure the collection reference is valid
+                logger.info(f"Collection '{collection_name}' reference created/verified")
+            except Exception as e:
+                logger.error(f"Error ensuring collection '{collection_name}' exists: {str(e)}")
+                return False
+        
+        logger.info("All required Firestore collections have been verified/created")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in ensure_collections_exist: {str(e)}")
+        return False
+
+# Run connection check at module import
+check_database_connection()
+
+# Ensure collections exist
+ensure_collections_exist()
+
+async def increment_views(document_id):
+    """Increment the views count for a document"""
+    try:
+        doc_ref = get_document_ref(documents_collection, document_id)
+        if doc_ref is None:
+            logger.error(f"Cannot increment views - Invalid document reference for ID: {document_id}")
+            return False
+            
+        # Update the views field
+        doc = doc_ref.get()
+        if not doc.exists:
+            logger.error(f"Document {document_id} not found for view increment")
+            return False
+            
+        doc_data = doc.to_dict()
+        current_views = doc_data.get('views', 0)
+        
+        # Increment views
+        doc_ref.update({
+            'views': current_views + 1,
+            'updated_at': datetime.now()
+        })
+        
+        logger.info(f"Incremented views for document {document_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error incrementing views for document {document_id}: {str(e)}")
+        return False

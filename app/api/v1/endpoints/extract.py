@@ -1250,8 +1250,11 @@ async def extract_content(url: str, document_type: str = None) -> tuple:
     # Create an ExtractRequest
     request = ExtractRequest(url=url, document_type=valid_doc_type)
     
-    # Call extract_text without the Response parameter
-    response = await extract_text(request)
+    # Create a Response object to pass to extract_text
+    fastapi_response = Response()
+    
+    # Call extract_text with both request and response parameters
+    response = await extract_text(request, fastapi_response)
     
     # Extract the text and URL from the response
     if response and response.success:

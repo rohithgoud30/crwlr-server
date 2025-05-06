@@ -15,6 +15,9 @@ from app.api.v1.endpoints.extract import auth_manager
 # Import settings
 from app.core.config import settings
 
+# Import Firebase (new)
+from app.core.firebase import initialize_firebase, db
+
 # Setup logging
 # logging.basicConfig(
 #     level=logging.INFO,
@@ -83,12 +86,21 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# ---> ADDED: Startup and Shutdown Events for Playwright
+# ---> ADDED: Startup and Shutdown Events for Playwright and Firebase
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Application startup: Initializing Playwright...")
+    logger.info("Application startup: Initializing services...")
     try:
+        # Initialize Firebase
+        logger.info("Initializing Firebase...")
+        initialize_firebase()
+        if db:
+            logger.info("Firebase initialization successful.")
+        else:
+            logger.error("Firebase initialization failed.")
+        
         # Start Playwright with a timeout
+        logger.info("Initializing Playwright...")
         await asyncio.wait_for(auth_manager.startup(), timeout=90.0) # 90 second timeout
         logger.info("Playwright startup successful.")
     except asyncio.TimeoutError:
@@ -96,14 +108,14 @@ async def startup_event():
         # Optionally prevent app startup or set a flag
         auth_manager.startup_failure = "Startup timed out"
     except Exception as e:
-        logger.error(f"Playwright startup failed during app startup: {str(e)}", exc_info=True)
+        logger.error(f"Service startup failed: {str(e)}", exc_info=True)
         # Ensure startup_failure reflects the error
         if not auth_manager.startup_failure:
             auth_manager.startup_failure = str(e)
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    logger.info("Application shutdown: Shutting down Playwright...")
+    logger.info("Application shutdown: Shutting down services...")
     await auth_manager.shutdown()
     logger.info("Playwright shut down complete.")
 
@@ -126,7 +138,12 @@ async def health_check():
     """
     Simple health check endpoint.
     """
-    return JSONResponse(content={"status": "running", "branch": branch_name})
+    firestore_status = "connected" if db else "disconnected"
+    return JSONResponse(content={
+        "status": "running", 
+        "branch": branch_name,
+        "firestore": firestore_status
+    })
 
 # Root endpoint
 @app.get("/", include_in_schema=False)

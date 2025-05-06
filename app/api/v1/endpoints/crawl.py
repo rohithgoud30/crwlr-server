@@ -12,6 +12,7 @@ import string
 import json
 import re
 import time
+from datetime import datetime
 
 from app.api.v1.endpoints.tos import find_tos
 from app.api.v1.endpoints.privacy import find_privacy_policy
@@ -22,8 +23,9 @@ from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining,
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
 from app.core.database import (
-    get_document_by_url, get_document_by_retrieved_url, create_document
+    get_document_by_url, get_document_by_retrieved_url, create_document, increment_views
 )
+from app.core.firebase import db
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
@@ -34,9 +36,6 @@ from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMin
 from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse
 from app.models.database import DocumentCreate, SubmissionCreate
 from app.models.company_info import CompanyInfoRequest
-
-from app.crud.document import document_crud
-from app.crud.submission import submission_crud
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -134,37 +133,44 @@ async def save_document_to_db(
                 
             if not logo_url:
                 logo_url = DEFAULT_LOGO_URL
-                
-        # Safely transform analysis data for storage in PostgreSQL JSONB
-        # Fix for word_frequencies - ensure it's a JSON-serializable list of objects
-        serializable_word_freqs = []
         
+        # Serialize WordFrequency objects for Firebase storage
+        serializable_word_freqs = []
         if 'word_frequencies' in analysis and isinstance(analysis['word_frequencies'], list):
             for item in analysis['word_frequencies']:
-                # If it's already a WordFrequency instance, convert to dict
                 if isinstance(item, WordFrequency):
-                    serializable_word_freqs.append(safe_model_dump(item))
-                # Explicitly check and convert known types to dictionary
+                    serializable_word_freqs.append({
+                        "word": item.word,
+                        "count": item.count,
+                        "percentage": item.percentage
+                    })
                 elif isinstance(item, dict):
                     serializable_word_freqs.append(item)
                 elif hasattr(item, 'dict') and callable(getattr(item, 'dict')):
-                    # Pydantic model or similar with dict() method
                     serializable_word_freqs.append(item.dict())
                 elif hasattr(item, '__dict__'):
-                    # Convert object to dict
                     serializable_word_freqs.append(item.__dict__)
                 else:
-                    # If it's none of the above, log a warning and skip or handle explicitly if structure is known
                     logger.warning(f"Skipping word frequency item of unexpected type: {type(item)}")
-        elif 'word_frequencies' in analysis:
-            logger.warning(f"word_frequencies is not a list: {type(analysis['word_frequencies'])}")
         
-        # Similarly handle text_mining metrics
+        # Serialize TextMiningResults for Firebase storage
         serializable_text_mining = {}
         if 'text_mining' in analysis:
-            # If it's already a TextMiningResults instance, convert to dict
             if isinstance(analysis['text_mining'], TextMiningResults):
-                serializable_text_mining = safe_model_dump(analysis['text_mining'])
+                serializable_text_mining = {
+                    "word_count": analysis['text_mining'].word_count,
+                    "avg_word_length": analysis['text_mining'].avg_word_length,
+                    "sentence_count": analysis['text_mining'].sentence_count,
+                    "avg_sentence_length": analysis['text_mining'].avg_sentence_length,
+                    "readability_score": analysis['text_mining'].readability_score,
+                    "readability_interpretation": analysis['text_mining'].readability_interpretation,
+                    "unique_word_ratio": analysis['text_mining'].unique_word_ratio,
+                    "capital_letter_freq": analysis['text_mining'].capital_letter_freq,
+                    "punctuation_density": analysis['text_mining'].punctuation_density,
+                    "question_frequency": analysis['text_mining'].question_frequency,
+                    "paragraph_count": analysis['text_mining'].paragraph_count,
+                    "common_word_percentage": analysis['text_mining'].common_word_percentage
+                }
             elif isinstance(analysis['text_mining'], dict):
                 serializable_text_mining = analysis['text_mining']
             elif hasattr(analysis['text_mining'], "dict") and callable(getattr(analysis['text_mining'], "dict")):
@@ -175,74 +181,50 @@ async def save_document_to_db(
                 serializable_text_mining = {"error": "Could not convert text mining metrics"}
                 logger.warning(f"Could not convert text mining metrics to dict: {type(analysis['text_mining'])}")
         
-        # Get database engine within the function context
-        logger.info("Attempting to get/create async database engine within save_document_to_db...")
-        connection_str, async_connection_str, _ = get_connection_string()
-        logger.info(f"Using async connection string pattern: {async_connection_str.split('@')[0]}@.../{async_connection_str.split('/')[-1]}")
-
-        # Create async engine with increased timeout
-        db_engine = create_async_engine(
-            async_connection_str,
-            echo=False,
-            pool_size=5,
-            max_overflow=10,
-            pool_timeout=120,  # Increase timeout to 120 seconds for database operations
-            pool_pre_ping=True,  # Check connection before use
-            pool_recycle=1800,
-        )
+        # Check if the Firebase database is available
+        if db is None:
+            logger.error("Firebase database not initialized")
+            raise Exception("Firebase database not initialized")
         
-        if not db_engine:
-            logger.error("Failed to create database engine within save_document_to_db.")
-            raise Exception("Database engine could not be initialized for saving.")
-        logger.info("Async database engine obtained/created within save_document_to_db.")
-
-        # We already checked for documents with the original_url at the beginning of the handlers
-        # So we can proceed directly to inserting the new document
-        logger.info(f"Creating new document for originally requested URL: {original_url} (Retrieved from: {retrieved_url})")
-        
-        # Check and set default values for optional fields
-        one_sentence_summary = analysis.get('one_sentence_summary', '')
-        hundred_word_summary = analysis.get('hundred_word_summary', '')
-        
-        # Encode JSON fields explicitly
-        word_freq_json = json.dumps(serializable_word_freqs if serializable_word_freqs else [])
-        text_mining_json = json.dumps(serializable_text_mining if serializable_text_mining else {})
-        
-        # Create document data dictionary
-        document_values = {
-            "url": original_url, # Store the original request URL
+        # Create document data for Firestore
+        document_data = {
+            "url": original_url,
             "document_type": document_type,
-            "retrieved_url": retrieved_url, # Store the actual URL content came from
+            "retrieved_url": retrieved_url,
             "company_name": company_name,
             "logo_url": logo_url,
             "raw_text": "", # Store empty string instead of full raw text
-            "one_sentence_summary": one_sentence_summary,
-            "hundred_word_summary": hundred_word_summary,
-            "word_frequencies": word_freq_json, 
-            "text_mining_metrics": text_mining_json,
-            "views": 0
+            "one_sentence_summary": analysis.get('one_sentence_summary', ''),
+            "hundred_word_summary": analysis.get('hundred_word_summary', ''),
+            "word_frequencies": serializable_word_freqs,
+            "text_mining_metrics": serializable_text_mining,
+            "views": 0,
+            "created_at": datetime.now(),
+            "updated_at": datetime.now()
         }
         
-        # Explicit insert using SQLAlchemy Core with timeout handling
-        try:
-            async with db_engine.begin() as conn:
-                query = insert(documents).values(**document_values).returning(documents.c.id)
-                result = await conn.execute(query)
-                row = result.fetchone()
-                if row:
-                    document_id = row[0]
-                else:
-                    logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url} (retrieved: {retrieved_url})")
-                    raise Exception("Failed to create document in database")
-        except asyncio.TimeoutError:
-            logger.error("Database insert operation timed out.")
-            raise Exception("Database connection timed out during insert. Please check your database instance and configuration.")
+        # Add to Firestore documents collection
+        document_ref = db.collection("documents").document()
+        document_id = document_ref.id
+        document_ref.set(document_data)
+        
+        logger.info(f"Document saved to Firestore with ID: {document_id}")
+        
+        # If user_id is provided, create a submission record
+        if user_id:
+            submission_data = {
+                "user_id": str(user_id),
+                "document_id": document_id,
+                "created_at": datetime.now()
+            }
+            db.collection("submissions").document().set(submission_data)
+            logger.info(f"Submission record created for user {user_id} and document {document_id}")
         
         return document_id
     except Exception as e:
-        # Log traceback for crawl_tos errors
+        # Log traceback for save_document_to_db errors
         logger.error(f"Error saving document to database: {e}", exc_info=True)
-        raise # Re-raise the exception to be handled by the caller
+        raise  # Re-raise the exception to be handled by the caller
 
 async def find_tos_url(url: str) -> str:
     """
@@ -307,13 +289,13 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         # FIRST: Check if document with THIS EXACT URL already exists in database
         # We only check by original URL and do it ONCE at the beginning
         try:
-            existing_doc = await document_crud.get_by_url(request.url, "tos")
+            existing_doc = get_document_by_url(request.url, "tos")
             if existing_doc:
                 logger.info(f"Document for URL {request.url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 is_existing_document = True  # Set flag for existing document
                 
-                # Update views count for the existing document
-                await document_crud.increment_views(existing_doc['id'])
+                # Update views count for the existing document - increment_views is async
+                await increment_views(existing_doc['id'])
                 
                 # Create a new response object with success=False
                 response = CrawlTosResponse(
@@ -434,12 +416,12 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         
         # Check if this exact tos_url has already been crawled
         try:
-            existing_doc = await document_crud.get_by_retrieved_url(tos_url, "tos")
+            existing_doc = get_document_by_retrieved_url(tos_url, "tos")
             if existing_doc:
                 logger.info(f"Document for retrieved URL {tos_url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 
-                # Update views count for the existing document
-                await document_crud.increment_views(existing_doc['id'])
+                # Update views count for the existing document - increment_views is async
+                await increment_views(existing_doc['id'])
                 
                 # Create a new response object with success=False
                 response = CrawlTosResponse(
@@ -785,13 +767,13 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         # FIRST: Check if document with THIS EXACT URL already exists in database
         # We only check by original URL and do it ONCE at the beginning
         try:
-            existing_doc = await document_crud.get_by_url(request.url, "pp")
+            existing_doc = get_document_by_url(request.url, "pp")
             if existing_doc:
                 logger.info(f"Document for URL {request.url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 is_existing_document = True  # Set flag for existing document
                 
-                # Update views count for the existing document
-                await document_crud.increment_views(existing_doc['id'])
+                # Update views count for the existing document - increment_views is async
+                await increment_views(existing_doc['id'])
                 
                 # Create a new response object with success=False
                 response = CrawlPrivacyResponse(
@@ -912,12 +894,12 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         
         # Check if this exact pp_url has already been crawled
         try:
-            existing_doc = await document_crud.get_by_retrieved_url(pp_url, "pp")
+            existing_doc = get_document_by_retrieved_url(pp_url, "pp")
             if existing_doc:
                 logger.info(f"Document for retrieved URL {pp_url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 
-                # Update views count for the existing document
-                await document_crud.increment_views(existing_doc['id'])
+                # Update views count for the existing document - increment_views is async
+                await increment_views(existing_doc['id'])
                 
                 # Create a new response object with success=False
                 response = CrawlPrivacyResponse(
@@ -1548,17 +1530,32 @@ def extract_text_mining_metrics(text: str):
             common_word_percentage=0  # Added required field with default value
         )
 
-# For backwards compatibility with different Pydantic versions
 def safe_model_dump(model):
-    """Convert Pydantic model to dict, supporting both v1 and v2 APIs."""
-    if hasattr(model, 'model_dump'):
-        return model.model_dump()
-    elif hasattr(model, 'dict'):
-        return model.dict()
-    elif hasattr(model, '__dict__'):
-        return model.__dict__
-    else:
-        raise ValueError(f"Cannot convert model of type {type(model)} to dict")
+    """
+    Safely convert model instances to dictionaries for Firestore.
+    
+    Args:
+        model: The model instance to convert.
+        
+    Returns:
+        Dictionary representation of the model.
+    """
+    try:
+        if hasattr(model, 'dict') and callable(getattr(model, 'dict')):
+            # Pydantic model or similar with dict() method
+            return model.dict()
+        elif hasattr(model, '__dict__'):
+            # Regular Python class with __dict__ attribute
+            return model.__dict__
+        elif isinstance(model, dict):
+            # Already a dictionary
+            return model
+        else:
+            # Try to serialize as is
+            return model
+    except Exception as e:
+        logger.error(f"Error serializing model: {e}")
+        return {"error": "Serialization failed"}
 
 def is_likely_binary_content(text: str) -> bool:
     """

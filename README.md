@@ -2,6 +2,50 @@
 
 API server for CRWLR application.
 
+## Firebase Configuration
+
+The application now uses Firebase Firestore instead of PostgreSQL/Cloud SQL.
+
+### Setting Up Firebase
+
+1. Create a Firebase project at [https://console.firebase.google.com/](https://console.firebase.google.com/)
+2. Enable the Firestore database service
+3. Generate a service account key:
+   - Go to Project Settings > Service accounts
+   - Click "Generate new private key"
+   - Save the JSON file securely
+
+### Local Development
+
+Configure Firebase by setting these environment variables:
+
+```
+ENVIRONMENT=production
+FIREBASE_PROJECT_ID=your-firebase-project-id
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYour private key goes here\n-----END PRIVATE KEY-----\n"
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com
+```
+
+### Cloud Run Deployment
+
+When deploying to Cloud Run:
+
+1. Add Firebase credentials as environment variables:
+
+```bash
+gcloud run deploy crwlr-server \
+  --update-env-vars="FIREBASE_PROJECT_ID=your-project-id,FIREBASE_CLIENT_EMAIL=your-client-email" \
+  --update-secrets="FIREBASE_PRIVATE_KEY=firebase-private-key:latest" \
+  # other configuration options
+```
+
+2. Store sensitive information in Secret Manager:
+
+```bash
+echo -n "-----BEGIN PRIVATE KEY-----\nYour private key goes here\n-----END PRIVATE KEY-----\n" | \
+gcloud secrets create firebase-private-key --data-file=-
+```
+
 ## Emergency Deployment
 
 The project contains an emergency deployment setup that's been tested and verified to work with Cloud Run.

@@ -13,7 +13,7 @@ router = APIRouter()
 
 # Define the structure for items in the search/list response
 class DocumentListItem(BaseModel):
-    id: UUID
+    id: str  # Changed from UUID to str to support Firestore document IDs
     url: str
     document_type: Literal["tos", "pp"]
     company_name: Optional[str] = None
@@ -63,12 +63,10 @@ async def search_documents(
     """
     # Always use the general search function which covers text, url, and company name fields
     results = await document_crud.search_documents(
-        search_text=search_request.search_text, 
+        query=search_request.search_text, 
         document_type=search_request.document_type,
         page=search_request.page,
-        per_page=search_request.per_page,
-        sort_by=search_request.sort_by,
-        sort_order=search_request.sort_order
+        per_page=search_request.per_page
     )
     return results
 
@@ -98,14 +96,14 @@ async def get_document_counts(
 # Use the full Document model for fetching a single document
 @router.get("/documents/{document_id}", response_model=Document)
 async def get_document(
-    document_id: UUID = Path(...),
+    document_id: str = Path(...),  # Changed from UUID to str
     api_key: str = Depends(get_api_key)
 ):
     """
     Get a specific document by ID and increment its view counter.
     Returns the full document details.
     
-    - **document_id**: UUID of the document to retrieve
+    - **document_id**: ID of the document to retrieve
     """
     try:
         # Get the document
@@ -165,13 +163,13 @@ async def get_document(
 
 @router.delete("/documents/{document_id}", response_model=dict)
 async def delete_document(
-    document_id: UUID = Path(..., description="The ID of the document to delete"),
+    document_id: str = Path(..., description="The ID of the document to delete"),  # Changed from UUID to str
     api_key: str = Depends(get_api_key)
 ):
     """
     Delete a document by ID.
     
-    - **document_id**: UUID of the document to delete
+    - **document_id**: ID of the document to delete
     
     Returns:
     - **success**: Boolean indicating whether deletion was successful

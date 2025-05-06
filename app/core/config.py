@@ -17,14 +17,18 @@ class Settings(BaseSettings):
 
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "CRWLR API"
-    ENVIRONMENT: str = "development"
+    ENVIRONMENT: str = "production"
     
-    # Database settings
-    DB_USER: Optional[str] = None
-    DB_PASS: Optional[str] = None
-    DB_NAME: Optional[str] = None
-    DB_HOST: Optional[str] = None
+    # Firebase settings
+    FIREBASE_PROJECT_ID: Optional[str] = None
+    FIREBASE_SERVICE_ACCOUNT_PATH: Optional[str] = None
+    
+    # Database settings (for PostgreSQL via Firebase)
+    DB_NAME: Optional[str] = "crwlr"
+    DB_HOST: Optional[str] = "127.0.0.1"
     DB_PORT: Optional[str] = "5432"
+    DB_USER: Optional[str] = "postgres"
+    DB_PASS: Optional[str] = ""
     INSTANCE_CONNECTION_NAME: Optional[str] = None
     
     # API Keys - try to get them directly from os.environ first, then from .env
@@ -66,30 +70,14 @@ class Settings(BaseSettings):
 # Create settings instance
 settings = Settings()
 
-# Try to load database settings directly from environment
-if not settings.DB_USER and os.environ.get("DB_USER"):
-    settings.DB_USER = os.environ.get("DB_USER")
-    logger.info("Loaded DB_USER from environment variables")
+# Try to load Firebase settings directly from environment
+if not settings.FIREBASE_PROJECT_ID and os.environ.get("FIREBASE_PROJECT_ID"):
+    settings.FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID")
+    logger.info("Loaded FIREBASE_PROJECT_ID from environment variables")
 
-if not settings.DB_PASS and os.environ.get("DB_PASS"):
-    settings.DB_PASS = os.environ.get("DB_PASS")
-    logger.info("Loaded DB_PASS from environment variables")
-
-if not settings.DB_NAME and os.environ.get("DB_NAME"):
-    settings.DB_NAME = os.environ.get("DB_NAME")
-    logger.info("Loaded DB_NAME from environment variables")
-
-if not settings.INSTANCE_CONNECTION_NAME and os.environ.get("INSTANCE_CONNECTION_NAME"):
-    settings.INSTANCE_CONNECTION_NAME = os.environ.get("INSTANCE_CONNECTION_NAME")
-    logger.info("Loaded INSTANCE_CONNECTION_NAME from environment variables")
-
-if not settings.DB_HOST and os.environ.get("DB_HOST"):
-    settings.DB_HOST = os.environ.get("DB_HOST")
-    logger.info("Loaded DB_HOST from environment variables")
-
-if not settings.DB_PORT and os.environ.get("DB_PORT"):
-    settings.DB_PORT = os.environ.get("DB_PORT")
-    logger.info("Loaded DB_PORT from environment variables")
+if not settings.FIREBASE_SERVICE_ACCOUNT_PATH and os.environ.get("FIREBASE_SERVICE_ACCOUNT_PATH"):
+    settings.FIREBASE_SERVICE_ACCOUNT_PATH = os.environ.get("FIREBASE_SERVICE_ACCOUNT_PATH")
+    logger.info("Loaded FIREBASE_SERVICE_ACCOUNT_PATH from environment variables")
 
 # Try to load API keys directly from environment if they're not in settings
 if not settings.GEMINI_API_KEY and os.environ.get("GEMINI_API_KEY"):
