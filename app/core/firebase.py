@@ -33,8 +33,14 @@ def initialize_firebase():
         
         # Check if environment variables for service account are available
         firebase_project_id = CORRECT_PROJECT_ID  # Override with the correct ID
-        firebase_private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "").replace("\\n", "\n")
+        # Fix: Make sure to properly handle double escaped newlines
+        firebase_private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "")
+        if "\\n" in firebase_private_key:
+            firebase_private_key = firebase_private_key.replace("\\n", "\n")
         firebase_client_email = os.environ.get("FIREBASE_CLIENT_EMAIL")
+        
+        # Log key format for debugging (without exposing the actual key)
+        logger.info(f"Private key format check: starts with {firebase_private_key[:15]}... ends with ...{firebase_private_key[-15:]} (length: {len(firebase_private_key)})")
             
         # Check if we have the minimum required env variables
         if firebase_private_key and firebase_client_email:
@@ -50,6 +56,8 @@ def initialize_firebase():
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs"
             }
+            
+            logger.info("Attempting to create Firebase credentials certificate")
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred, {
                 'projectId': firebase_project_id,
