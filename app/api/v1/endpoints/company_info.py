@@ -599,7 +599,10 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         domain = urlparse(url).netloc
         if domain.startswith('www.'):
             domain = domain[4:]
-        default_company_name = domain.split('.')[0].capitalize()
+        
+        # ALWAYS use extract_company_name_from_domain to get company name
+        company_name = extract_company_name_from_domain(domain)
+        logger.info(f"Using domain-based company name in Playwright: {company_name}")
         
         # Set up browser with anti-detection
         playwright, browser, context, page = await setup_stealth_browser()
@@ -613,7 +616,7 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         
         if not response.ok:
             logger.warning(f"Failed to load page with status: {response.status}")
-            return default_company_name, "/placeholder.svg?height=48&width=48", False, f"Failed to load page: HTTP {response.status}"
+            return company_name, "/placeholder.svg?height=48&width=48", False, f"Failed to load page: HTTP {response.status}"
         
         # Check if this is an App/Play Store page
         if is_app_store_url(url):
@@ -658,27 +661,8 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
             }
         """)
         
-        # Extract company name from title
-        title = await page.title()
-        company_name = default_company_name
-        
-        if title:
-            # Clean up title (remove common suffixes)
-            common_suffixes = [
-                " - Home", " | Home", " - Official Website", " | Official Website",
-                " - Official Site", " | Official Site"
-            ]
-            for suffix in common_suffixes:
-                if title.endswith(suffix):
-                    title = title[:-len(suffix)]
-            
-            # If domain name is in title, use it
-            domain_name = domain.split('.')[0].lower()
-            if domain_name in title.lower():
-                company_name = title.strip()
-            else:
-                # Otherwise, use cleaned title
-                company_name = title.strip()[:50]
+        # REMOVED: Title-based company name extraction
+        # We ONLY use the domain-based name that was set earlier
         
         # Extract logo using sophisticated JavaScript
         logo_url = await page.evaluate("""
@@ -795,13 +779,14 @@ async def extract_with_playwright(url: str) -> Tuple[str, str, bool, str]:
         try:
             domain = urlparse(url).netloc if url else ""
             if domain:
+                # Consistent use of extract_company_name_from_domain
                 return extract_company_name_from_domain(domain), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
             else:
                 # If no domain can be extracted, use the URL directly
-                return url.capitalize(), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
+                return url.split('/')[0].capitalize(), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
         except:
             # Final fallback - extract something usable from the URL
-            return url.split('/')[-1].capitalize(), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
+            return url.split('/')[0].capitalize(), "/placeholder.svg?height=48&width=48", False, f"Playwright extraction error: {str(e)}"
     
     finally:
         # Clean up Playwright resources
@@ -836,7 +821,9 @@ async def extract_company_info(url: str) -> tuple:
             parsed_url = urlparse(url)
             domain = parsed_url.netloc
             if domain:
-                company_name = extract_company_name_from_domain(domain) # Initial name from domain
+                # ALWAYS use the domain name directly - no title override
+                company_name = extract_company_name_from_domain(domain)
+                logger.info(f"Using company name from domain: {company_name}")
             else:
                 company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
         except Exception as parse_err:
@@ -846,10 +833,11 @@ async def extract_company_info(url: str) -> tuple:
         # Check if App Store or Play Store URL
         if is_app_store_url(url) or is_play_store_url(url):
             logger.info(f"Detected app store URL: {url}")
-            company_name, logo_url, success, message = await extract_with_playwright(url)
+            app_name, logo_url, success, message = await extract_with_playwright(url)
             
-            if success and company_name and logo_url:
-                return company_name, logo_url, success, message
+            if success and app_name and logo_url:
+                # For app stores, we'll still use the app name
+                return app_name, logo_url, success, message
         
         # Attempt extraction
         try:
@@ -858,33 +846,16 @@ async def extract_company_info(url: str) -> tuple:
             if not response.ok:
                 logger.warning(f"HTTP request failed with status: {response.status_code}")
                 logger.info("Falling back to Playwright extraction")
-                return await extract_with_playwright(url)
+                playwright_name, logo_url, success, message = await extract_with_playwright(url)
+                # Keep consistent company name but use Playwright logo
+                return company_name, logo_url, success, message
             
             # Parse HTML
             soup = BeautifulSoup(response.text, 'html.parser')
             base_url = get_base_url(url)
             
-            # 1. Try to extract company name from title tag
-            if soup.title and soup.title.string:
-                title_text = soup.title.string.strip()
-                # Clean up title (remove common suffixes like "- Home", "| Official Website", etc.)
-                common_suffixes = [
-                    " - Home", " | Home", " - Official Website", " | Official Website",
-                    " - Official Site", " | Official Site"
-                ]
-                for suffix in common_suffixes:
-                    if title_text.endswith(suffix):
-                        title_text = title_text[:-len(suffix)]
-                
-                # Remove domain name if it appears in title
-                domain_parts = domain.split('.')
-                if len(domain_parts) > 1:
-                    domain_name = domain_parts[0].lower()
-                    if domain_name in title_text.lower():
-                        company_name = title_text.strip()
-                    else:
-                        # If no domain match, use the title but limit length
-                        company_name = title_text[:50].strip()
+            # REMOVED: Title-based company name extraction
+            # We're only getting the company name from the domain now
             
             # Expand logo detection: also check header and organization schema
             # Look for schema.org Organization logo first (most accurate)
@@ -1029,24 +1000,27 @@ async def extract_company_info(url: str) -> tuple:
         except Exception as e:
             logger.warning(f"BeautifulSoup extraction failed: {e}. Falling back to Playwright.")
             # Fall back to Playwright for JavaScript-rendered sites
-            return await extract_with_playwright(url)
+            playwright_name, logo_url, success, message = await extract_with_playwright(url)
+            # Keep consistent company name but use Playwright logo
+            return company_name, logo_url, success, message
     
     except Exception as e:
         logger.error(f"Error extracting company info: {e}")
         
         # Even in error case, extract company name from domain if possible
-        if domain:
-            try:
+        try:
+            domain = urlparse(url).netloc if url else ""
+            if domain:
                 company_name = extract_company_name_from_domain(domain)
                 logger.info(f"Fallback: Extracted company name '{company_name}' from domain '{domain}'")
-            except Exception as inner_e:
-                logger.error(f"Error in fallback company name extraction from domain '{domain}': {str(inner_e)}")
-                # If domain extraction fails, use URL based fallback
+            else:
+                # If domain can't be extracted, use first part of URL
                 company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
-        else:
-            # If domain was never set, use URL based fallback
-            company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
-            logger.info(f"Final fallback (no domain): Using URL part as company name: '{company_name}'")
+                logger.info(f"Final fallback (no domain): Using URL part as company name: '{company_name}'")
+        except Exception as inner_e:
+            logger.error(f"Error in fallback company name extraction: {str(inner_e)}")
+            # Last resort fallback
+            company_name = "Unknown Company"
 
         # Use the default logo URL in case of error
         logo_url = "/placeholder.svg?height=48&width=48" # Reset logo url on error
