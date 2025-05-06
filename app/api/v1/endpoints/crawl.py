@@ -1438,14 +1438,23 @@ def get_word_frequencies(text: str, max_words: int = 20):
     Returns:
         List of word frequency objects.
     """
-    # Simple implementation - more sophisticated implementation would use proper NLP
+    # Keywords to ignore (common in PDF/binary content)
+    ignored_keywords = set([
+        "obj", "endobj", "stream", "endstream", "xref", "trailer", "startxref", 
+        "eof", "font", "encrypt", "filter", "decode", "width", "height", "type",
+        "subtype", "name", "length", "ca", "op", "opm", "sa", "ais", "smask", 
+        "gs", "extgstate", "shading", "pattern", "cs", "colorspace", "procset",
+        "xobject", "imagemask", "dctdecode", "flatedecode", "runlengthdecode",
+        "lzwdecode", "asciihexdecode", "asci85decode", "jbig2decode", "jpxdecode"
+    ])
+    
     words = text.lower().split()
     word_counts = {}
     
     for word in words:
         # Remove punctuation
         word = word.strip('.,;:!?()[]{}"\'-')
-        if word and len(word) > 3:  # Skip short words
+        if word and len(word) > 3 and word not in ignored_keywords:  # Skip short words and ignored keywords
             word_counts[word] = word_counts.get(word, 0) + 1
     
     # Sort by frequency
