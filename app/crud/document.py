@@ -14,6 +14,10 @@ class DocumentCRUD(FirebaseCRUDBase):
     def __init__(self):
         """Initialize with documents collection."""
         super().__init__("documents")
+        # Set a flag to track if Firebase is working
+        self.firebase_operational = self.collection is not None
+        if not self.firebase_operational:
+            logger.error("DocumentCRUD initialized with non-functional Firebase connection")
     
     async def get_by_url_and_type(self, url: str, document_type: str) -> Optional[Dict[str, Any]]:
         """Get a document by URL and document type."""
@@ -245,6 +249,15 @@ class DocumentCRUD(FirebaseCRUDBase):
     async def get_document_counts(self) -> Dict[str, int]:
         """Get counts of documents by type."""
         try:
+            # First check if Firebase is available
+            if not self.collection:
+                logger.error("Firebase not initialized - returning default document counts")
+                return {
+                    "tos_count": 0,
+                    "pp_count": 0,
+                    "total_count": 0
+                }
+                
             # Query for ToS documents
             tos_query = self.collection.where("document_type", "==", "tos")
             tos_docs = list(tos_query.stream())
@@ -265,6 +278,7 @@ class DocumentCRUD(FirebaseCRUDBase):
             }
         except Exception as e:
             logger.error(f"Error getting document counts: {str(e)}")
+            # Return default counts when an error occurs
             return {
                 "tos_count": 0,
                 "pp_count": 0,

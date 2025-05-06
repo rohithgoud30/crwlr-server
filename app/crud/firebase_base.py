@@ -16,12 +16,22 @@ class FirebaseCRUDBase:
     def __init__(self, collection_name: str):
         """Initialize with a collection name."""
         self.collection_name = collection_name
-        self.collection = db.collection(collection_name) if db else None
+        self.collection = None
+        
+        # Try to get collection, handle gracefully if Firebase is not initialized
+        if db:
+            try:
+                self.collection = db.collection(collection_name)
+                logger.info(f"Successfully initialized collection '{collection_name}'")
+            except Exception as e:
+                logger.error(f"Error initializing collection '{collection_name}': {str(e)}")
+        else:
+            logger.error(f"Failed to initialize collection '{collection_name}': Firebase not initialized")
     
     async def get(self, id: str) -> Optional[Dict[str, Any]]:
         """Get a document by ID."""
         if not self.collection:
-            logger.error("Firebase not initialized")
+            logger.error(f"Firebase not initialized - cannot get document with ID: {id}")
             return None
             
         try:

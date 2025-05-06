@@ -44,6 +44,9 @@ def initialize_firebase(force_init=False):
         CORRECT_PROJECT_ID = "crwlr-server-ccfd2"
         logger.info(f"Using project ID: {CORRECT_PROJECT_ID} (hardcoded for testing)")
         
+        # Get the Firebase project ID (use the override)
+        firebase_project_id = CORRECT_PROJECT_ID  # Override with the correct ID
+        
         # Required minimum environment variables
         required_vars = ["FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL"]
         missing_vars = [var for var in required_vars if not os.environ.get(var)]

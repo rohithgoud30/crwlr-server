@@ -197,7 +197,6 @@ async def health_check():
     Simple health check endpoint.
     Returns status of all initialized services.
     """
-    global environment_valid, firebase_initialized, playwright_initialized, startup_errors
     firestore_status = "connected" if db else "disconnected"
     
     status = {
@@ -220,8 +219,6 @@ async def debug_status():
     Detailed status endpoint for debugging.
     Shows full initialization status and errors.
     """
-    global environment_valid, firebase_initialized, playwright_initialized, startup_errors
-    
     # Only accessible in development mode for security
     if settings.ENVIRONMENT != "development" and settings.ENVIRONMENT != "local":
         raise HTTPException(status_code=403, detail="Forbidden in production mode")

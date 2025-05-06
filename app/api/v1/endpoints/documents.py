@@ -89,8 +89,17 @@ async def get_document_counts(
     - **pp_count**: Total number of Privacy Policy documents
     - **total_count**: Total number of all documents
     """
-    counts = await document_crud.get_document_counts()
-    return counts
+    try:
+        counts = await document_crud.get_document_counts()
+        return counts
+    except Exception as e:
+        logger.error(f"Error getting document counts: {str(e)}")
+        # Return default counts in case of an error
+        return {
+            "tos_count": 0,
+            "pp_count": 0,
+            "total_count": 0
+        }
 
 
 # Use the full Document model for fetching a single document
