@@ -353,7 +353,7 @@ async def extract_app_store_privacy_link(page):
         is_app_store = await page.evaluate("""
             () => {
                 return window.location.href.includes('apps.apple.com') || 
-                       document.querySelector('meta[property="og:site_name"]')?.content?.includes('App Store');
+                       document.querySelector('meta[property=\"og:site_name\"]')?.content?.includes('App Store')
             }
         """)
         
@@ -361,63 +361,21 @@ async def extract_app_store_privacy_link(page):
             print("Not an App Store page, skipping App Store specific extraction")
             return None
             
-        print("✅ Detected Apple App Store page, looking for privacy policy link")
-        
-        # Look for the privacy policy link in the app-privacy section
+        print("✅ Detected Apple App Store page, extracting privacy policy link from HTML section")
+        # Use only the <section class="app-privacy"> HTML to find the developer's policy link
         privacy_link = await page.evaluate("""
             () => {
-                // Target the app-privacy section
-                const privacySection = document.querySelector('.app-privacy');
-                if (!privacySection) return null;
-                
-                // Look for direct privacy policy link
-                const directLink = privacySection.querySelector('a[href*="privacy"]');
-                if (directLink && directLink.href) {
-                    return { 
-                        href: directLink.href,
-                        text: directLink.textContent.trim(),
-                        confidence: 'high'
-                    };
-                }
-                
-                // Fallback: look for any link in the privacy section
-                const anyLink = privacySection.querySelector('a[href]');
-                if (anyLink && anyLink.href) {
-                    return { 
-                        href: anyLink.href,
-                        text: anyLink.textContent.trim(),
-                        confidence: 'medium'
-                    };
-                }
-                
-                // Second fallback: look for links in developer info section
-                const devInfoSection = document.querySelector('.information-list--app');
-                if (devInfoSection) {
-                    const devLinks = Array.from(devInfoSection.querySelectorAll('a[href]'));
-                    const privacyLink = devLinks.find(link => 
-                        link.textContent.toLowerCase().includes('privacy') || 
-                        link.href.toLowerCase().includes('privacy')
-                    );
-                    
-                    if (privacyLink) {
-                        return {
-                            href: privacyLink.href,
-                            text: privacyLink.textContent.trim(),
-                            confidence: 'medium'
-                        };
-                    }
-                }
-                
-                return null;
+                const section = document.querySelector('section.app-privacy');
+                if (!section) return null;
+                const link = section.querySelector('a[href*="privacy"]');
+                return (link && link.href) ? link.href : null;
             }
         """)
-        
         if privacy_link:
-            print(f"🍏 Found privacy policy link in App Store: {privacy_link['text']} - {privacy_link['href']}")
-            print(f"Confidence: {privacy_link['confidence']}")
-            return privacy_link['href']
-        
-        print("No privacy policy link found in App Store page")
+            print(f"🍏 Found privacy policy link in App Store HTML section: {privacy_link}")
+            return privacy_link
+        # Fail immediately if not found in the designated HTML snippet
+        print("❌ No privacy policy link found in App Store HTML section")
         return None
     except Exception as e:
         print(f"Error extracting App Store privacy link: {e}")
@@ -777,6 +735,46 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
         playwright = await async_playwright().start()
         browser, browser_context, page, _ = await setup_browser(playwright)
         
+        # Early handling for App Store URLs: directly extract from the App Store HTML section
+        if 'apps.apple.com' in sanitized_url or 'itunes.apple.com' in sanitized_url:
+            await page.goto(sanitized_url, timeout=10000, wait_until="domcontentloaded")
+            app_store_link = await extract_app_store_privacy_link(page)
+            if app_store_link:
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=app_store_link,
+                    success=True,
+                    message="Found Privacy Policy link in Apple App Store",
+                    method_used="app_store_detection"
+                )
+            return PrivacyResponse(
+                url=url,
+                pp_url=None,
+                success=False,
+                message="Could not find Privacy Policy in App Store HTML section",
+                method_used="app_store_html_failed"
+            )
+
+        # Early handling for Play Store URLs: directly extract from the Play Store page
+        if 'play.google.com' in sanitized_url:
+            await page.goto(sanitized_url, timeout=10000, wait_until="domcontentloaded")
+            play_store_link = await extract_play_store_privacy_link(page)
+            if play_store_link:
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=play_store_link,
+                    success=True,
+                    message="Found Privacy Policy link in Google Play Store",
+                    method_used="play_store_detection"
+                )
+            return PrivacyResponse(
+                url=url,
+                pp_url=None,
+                success=False,
+                message="Could not find Privacy Policy in Play Store HTML section",
+                method_used="play_store_html_failed"
+            )
+
         # Navigate to the URL - notice we don't exit but continue with recovery methods
         success, _, _ = await navigate_with_retry(page, sanitized_url)
         if not success:
@@ -892,6 +890,16 @@ async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
                 success=True,
                 message="Found privacy policy link in Apple App Store",
                 method_used="app_store_detection"
+            )
+        # If this is an App Store URL and no link was found in the section, fail immediately
+        if is_app_store_url(sanitized_url):
+            logger.warning("Could not find privacy policy in App Store HTML section, failing immediately")
+            return PrivacyResponse(
+                url=url,
+                pp_url=None,
+                success=False,
+                message="Could not find Privacy Policy in App Store HTML section",
+                method_used="app_store_html_failed"
             )
 
         # Check for user/customer privacy links with highest priority

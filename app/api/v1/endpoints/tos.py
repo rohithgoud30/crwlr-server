@@ -1,5 +1,5 @@
 import random
-from urllib.parse import urlparse, urljoin, parse_qs
+from urllib.parse import urlparse, urljoin, parse_qs, unquote
 import re
 import traceback
 import time
@@ -261,9 +261,21 @@ async def find_tos(request: ToSRequest) -> ToSResponse:
         privacy_response = await find_privacy_policy(privacy_request)
         
         if privacy_response and privacy_response.pp_url:
-            # Extract base domain from privacy URL
-            logger.info(f"Found privacy policy from store: {privacy_response.pp_url}")
-            parsed_url = urlparse(privacy_response.pp_url)
+            # Extract privacy policy URL (resolve search engine redirects if needed)
+            pp_url = privacy_response.pp_url
+            logger.info(f"Found privacy policy from store: {pp_url}")
+            # Handle Yahoo redirect URLs (e.g., r.search.yahoo.com)
+            if 'r.search.yahoo.com' in pp_url:
+                parsed_search = urlparse(pp_url)
+                params = parse_qs(parsed_search.query)
+                for param in ['RU', 'RO', 'RD']:
+                    if param in params and params[param]:
+                        actual_pp = unquote(params[param][0])
+                        logger.info(f"Extracted actual privacy policy URL from Yahoo redirect ({param}): {actual_pp}")
+                        pp_url = actual_pp
+                        break
+            logger.info(f"Using privacy policy URL: {pp_url}")
+            parsed_url = urlparse(pp_url)
             
             # Construct the base URL (scheme + domain)
             base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
