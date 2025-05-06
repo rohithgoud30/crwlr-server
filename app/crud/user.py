@@ -32,12 +32,18 @@ class UserCRUD(FirebaseCRUDBase):
 
     async def get_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         """Get a user by email address."""
-        async with async_engine.connect() as conn:
-            query = self.table.select().where(self.table.c.email == email)
-            result = await conn.execute(query)
-            row = result.fetchone()
-            if row:
-                return dict(row)
+        try:
+            # Query for user with matching email
+            query = self.collection.where("email", "==", email).limit(1)
+            users = list(query.stream())
+            
+            if users:
+                user_data = users[0].to_dict()
+                user_data['id'] = users[0].id
+                return user_data
+            return None
+        except Exception as e:
+            logger.error(f"Error getting user by email: {str(e)}")
             return None
 
 # Create an instance
