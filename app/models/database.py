@@ -16,7 +16,7 @@ class UserCreate(UserBase):
 
 
 class User(UserBase):
-    id: UUID
+    id: str
     created_at: datetime
     updated_at: datetime
 
@@ -43,7 +43,7 @@ class DocumentCreate(DocumentBase):
 
 
 class Document(DocumentBase):
-    id: UUID
+    id: str
     created_at: datetime
     updated_at: datetime
 
@@ -52,8 +52,8 @@ class Document(DocumentBase):
 
 
 class SubmissionBase(BaseModel):
-    user_id: Optional[UUID] = None
-    document_id: Optional[UUID] = None
+    user_id: Optional[str] = None
+    document_id: Optional[str] = None
     requested_url: str
     document_type: Literal["tos", "pp"]
     status: str = "pending"
@@ -65,7 +65,7 @@ class SubmissionCreate(SubmissionBase):
 
 
 class Submission(SubmissionBase):
-    id: UUID
+    id: str
     created_at: datetime
     updated_at: datetime
 

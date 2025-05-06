@@ -1,23 +1,35 @@
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, Optional, List
 from uuid import UUID
+import logging
 
-from app.crud.base import CRUDBase
-from app.core.database import users, async_engine
+from app.crud.firebase_base import FirebaseCRUDBase
 
+# Setup logging
+logger = logging.getLogger(__name__)
 
-class CRUDUser(CRUDBase):
-    """CRUD operations for users."""
+class UserCRUD(FirebaseCRUDBase):
+    """CRUD for user management."""
+    
+    def __init__(self):
+        """Initialize with Users collection."""
+        super().__init__("users")
     
     async def get_by_clerk_id(self, clerk_user_id: str) -> Optional[Dict[str, Any]]:
         """Get a user by Clerk user ID."""
-        async with async_engine.connect() as conn:
-            query = self.table.select().where(self.table.c.clerk_user_id == clerk_user_id)
-            result = await conn.execute(query)
-            row = result.fetchone()
-            if row:
-                return dict(row)
+        try:
+            # Query for user with matching clerk_user_id
+            query = self.collection.where("clerk_user_id", "==", clerk_user_id).limit(1)
+            users = list(query.stream())
+            
+            if users:
+                user_data = users[0].to_dict()
+                user_data['id'] = users[0].id
+                return user_data
             return None
-    
+        except Exception as e:
+            logger.error(f"Error getting user by clerk ID: {str(e)}")
+            return None
+
     async def get_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         """Get a user by email address."""
         async with async_engine.connect() as conn:
@@ -28,6 +40,5 @@ class CRUDUser(CRUDBase):
                 return dict(row)
             return None
 
-
-# Create CRUD instance
-user_crud = CRUDUser(users) 
+# Create an instance
+user = UserCRUD() 

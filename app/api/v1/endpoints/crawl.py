@@ -12,6 +12,7 @@ import string
 import json
 import re
 import time
+from datetime import datetime
 
 from app.api.v1.endpoints.tos import find_tos
 from app.api.v1.endpoints.privacy import find_privacy_policy
@@ -21,7 +22,10 @@ from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analy
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
-from app.core.database import documents, create_async_engine, get_connection_string
+from app.core.database import (
+    get_document_by_url, get_document_by_retrieved_url, create_document, increment_views
+)
+from app.core.firebase import db
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
@@ -32,9 +36,6 @@ from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMin
 from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse
 from app.models.database import DocumentCreate, SubmissionCreate
 from app.models.company_info import CompanyInfoRequest
-
-from app.crud.document import document_crud
-from app.crud.submission import submission_crud
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -47,143 +48,39 @@ DEFAULT_LOGO_URL = "/placeholder.svg?height=48&width=48"
 
 async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type: str):
     """
-    Performs summary, word frequency, and text mining analyses in parallel.
-    Returns a tuple of (summary_response, word_freq_response, text_mining_response)
+    Perform parallel analysis of extracted text.
+    
+    Args:
+        doc_url: The URL of the document.
+        extracted_text: The extracted text to analyze.
+        doc_type: The type of document (TOS or PP).
+        
+    Returns:
+        Dictionary containing all analysis results.
     """
-    # Extract company name from URL if it's in the query string
-    company_name = None
-    try:
-        if "?company=" in doc_url:
-            base_url, query = doc_url.split("?", 1)
-            params = query.split("&")
-            for param in params:
-                if param.startswith("company="):
-                    company_name = param.split("=", 1)[1]
-                    # Remove company parameter from URL for other services
-                    doc_url = base_url
-                    logger.info(f"Extracted company name from URL: {company_name}")
-                    break
-    except Exception as e:
-        logger.warning(f"Error extracting company name from URL: {e}")
+    logger.info(f"Starting parallel analysis for document type: {doc_type}")
     
-    # Create all the requests
-    summary_request = SummaryRequest(
-        url=doc_url,
-        text=extracted_text,
-        document_type=doc_type
-    )
+    # Run all of these analyses in parallel since they don't depend on each other
+    # and can take a few seconds each
     
-    # Add company name to summary request if available
-    if company_name:
-        summary_request.company_name = company_name
-        logger.info(f"Added company name to summary request: {company_name}")
+    # Get word frequencies and text mining metrics directly
+    word_freqs = get_word_frequencies(extracted_text)
+    text_mining = extract_text_mining_metrics(extracted_text)
     
-    word_freq_request = WordFrequencyRequest(
-        url=doc_url,
-        document_type=doc_type,
-        text=extracted_text,
-        max_words=20  # Changed from 50 to 20
-    )
+    # Generate summaries
+    one_sentence_summary = await generate_one_sentence_summary(extracted_text, doc_url)
+    hundred_word_summary = await generate_hundred_word_summary(extracted_text, doc_url)
     
-    text_mining_request = TextMiningRequest(
-        url=doc_url,
-        document_type=doc_type,
-        text=extracted_text
-    )
+    # Combine results into a single dictionary
+    results = {
+        "one_sentence_summary": one_sentence_summary,
+        "hundred_word_summary": hundred_word_summary,
+        "word_frequencies": word_freqs,
+        "text_mining": text_mining
+    }
     
-    try:
-        # Run all analyses in parallel for better performance
-        summary_task = asyncio.create_task(generate_summary(summary_request, Response()))
-        word_freq_task = asyncio.create_task(analyze_word_freq_endpoint(word_freq_request))
-        text_mining_task = asyncio.create_task(analyze_text_mining(text_mining_request))
-        
-        # Wait for all tasks to complete
-        responses = await asyncio.gather(summary_task, word_freq_task, text_mining_task, 
-                                        return_exceptions=True)
-        
-        # Handle potential exceptions in each task
-        summary_response = responses[0] if not isinstance(responses[0], Exception) else None
-        word_freq_response = responses[1] if not isinstance(responses[1], Exception) else None
-        text_mining_response = responses[2] if not isinstance(responses[2], Exception) else None
-        
-        # Create default responses for any failed tasks
-        if isinstance(responses[0], Exception):
-            logger.error(f"Summary generation failed: {str(responses[0])}")
-            summary_response = SummaryResponse(
-                url=doc_url, document_type=doc_type, 
-                success=False, message=f"Error: {str(responses[0])}"
-            )
-            
-        if isinstance(responses[1], Exception):
-            logger.error(f"Word frequency analysis failed: {str(responses[1])}")
-            word_freq_response = WordFrequencyResponse(
-                url=doc_url, document_type=doc_type, word_frequencies=[],
-                success=False, message=f"Error: {str(responses[1])}"
-            )
-            
-        if isinstance(responses[2], Exception):
-            logger.error(f"Text mining analysis failed: {str(responses[2])}")
-            text_mining_response = TextMiningResponse(
-                url=doc_url, 
-                document_type=doc_type,
-                text_mining=TextMiningResults(
-                    word_count=0,
-                    avg_word_length=0.0,
-                    sentence_count=0,
-                    avg_sentence_length=0.0,
-                    readability_score=0.0,
-                    readability_interpretation="Analysis failed",
-                    unique_word_ratio=0.0,
-                    capital_letter_freq=0.0,
-                    punctuation_density=0.0,
-                    question_frequency=0.0,
-                    paragraph_count=0,
-                    common_word_percentage=0.0
-                ),
-                success=False, 
-                message=f"Error: {str(responses[2])}"
-            )
-        
-        # Return the responses
-        return summary_response, word_freq_response, text_mining_response
-        
-    except Exception as e:
-        # Handle any unexpected errors in the parallel processing itself
-        logger.error(f"Error in parallel analysis: {str(e)}")
-        
-        # Create default error responses
-        summary_response = SummaryResponse(
-            url=doc_url, document_type=doc_type, 
-            success=False, message=f"Parallel processing error: {str(e)}"
-        )
-        
-        word_freq_response = WordFrequencyResponse(
-            url=doc_url, document_type=doc_type, word_frequencies=[],
-            success=False, message=f"Parallel processing error: {str(e)}"
-        )
-        
-        text_mining_response = TextMiningResponse(
-            url=doc_url, 
-            document_type=doc_type,
-            text_mining=TextMiningResults(
-                word_count=0,
-                avg_word_length=0.0,
-                sentence_count=0,
-                avg_sentence_length=0.0,
-                readability_score=0.0,
-                readability_interpretation="Analysis failed",
-                unique_word_ratio=0.0,
-                capital_letter_freq=0.0,
-                punctuation_density=0.0,
-                question_frequency=0.0,
-                paragraph_count=0,
-                common_word_percentage=0.0
-            ),
-            success=False, 
-            message=f"Parallel processing error: {str(e)}"
-        )
-        
-        return summary_response, word_freq_response, text_mining_response
+    logger.info("All analyses completed successfully")
+    return results
 
 async def save_document_to_db(
     original_url: str, # User requested URL
@@ -236,37 +133,44 @@ async def save_document_to_db(
                 
             if not logo_url:
                 logo_url = DEFAULT_LOGO_URL
-                
-        # Safely transform analysis data for storage in PostgreSQL JSONB
-        # Fix for word_frequencies - ensure it's a JSON-serializable list of objects
-        serializable_word_freqs = []
         
+        # Serialize WordFrequency objects for Firebase storage
+        serializable_word_freqs = []
         if 'word_frequencies' in analysis and isinstance(analysis['word_frequencies'], list):
             for item in analysis['word_frequencies']:
-                # If it's already a WordFrequency instance, convert to dict
                 if isinstance(item, WordFrequency):
-                    serializable_word_freqs.append(safe_model_dump(item))
-                # Explicitly check and convert known types to dictionary
+                    serializable_word_freqs.append({
+                        "word": item.word,
+                        "count": item.count,
+                        "percentage": item.percentage
+                    })
                 elif isinstance(item, dict):
                     serializable_word_freqs.append(item)
                 elif hasattr(item, 'dict') and callable(getattr(item, 'dict')):
-                    # Pydantic model or similar with dict() method
                     serializable_word_freqs.append(item.dict())
                 elif hasattr(item, '__dict__'):
-                    # Convert object to dict
                     serializable_word_freqs.append(item.__dict__)
                 else:
-                    # If it's none of the above, log a warning and skip or handle explicitly if structure is known
                     logger.warning(f"Skipping word frequency item of unexpected type: {type(item)}")
-        elif 'word_frequencies' in analysis:
-            logger.warning(f"word_frequencies is not a list: {type(analysis['word_frequencies'])}")
         
-        # Similarly handle text_mining metrics
+        # Serialize TextMiningResults for Firebase storage
         serializable_text_mining = {}
         if 'text_mining' in analysis:
-            # If it's already a TextMiningResults instance, convert to dict
             if isinstance(analysis['text_mining'], TextMiningResults):
-                serializable_text_mining = safe_model_dump(analysis['text_mining'])
+                serializable_text_mining = {
+                    "word_count": analysis['text_mining'].word_count,
+                    "avg_word_length": analysis['text_mining'].avg_word_length,
+                    "sentence_count": analysis['text_mining'].sentence_count,
+                    "avg_sentence_length": analysis['text_mining'].avg_sentence_length,
+                    "readability_score": analysis['text_mining'].readability_score,
+                    "readability_interpretation": analysis['text_mining'].readability_interpretation,
+                    "unique_word_ratio": analysis['text_mining'].unique_word_ratio,
+                    "capital_letter_freq": analysis['text_mining'].capital_letter_freq,
+                    "punctuation_density": analysis['text_mining'].punctuation_density,
+                    "question_frequency": analysis['text_mining'].question_frequency,
+                    "paragraph_count": analysis['text_mining'].paragraph_count,
+                    "common_word_percentage": analysis['text_mining'].common_word_percentage
+                }
             elif isinstance(analysis['text_mining'], dict):
                 serializable_text_mining = analysis['text_mining']
             elif hasattr(analysis['text_mining'], "dict") and callable(getattr(analysis['text_mining'], "dict")):
@@ -277,74 +181,50 @@ async def save_document_to_db(
                 serializable_text_mining = {"error": "Could not convert text mining metrics"}
                 logger.warning(f"Could not convert text mining metrics to dict: {type(analysis['text_mining'])}")
         
-        # Get database engine within the function context
-        logger.info("Attempting to get/create async database engine within save_document_to_db...")
-        connection_str, async_connection_str, _ = get_connection_string()
-        logger.info(f"Using async connection string pattern: {async_connection_str.split('@')[0]}@.../{async_connection_str.split('/')[-1]}")
-
-        # Create async engine with increased timeout
-        db_engine = create_async_engine(
-            async_connection_str,
-            echo=False,
-            pool_size=5,
-            max_overflow=10,
-            pool_timeout=120,  # Increase timeout to 120 seconds for database operations
-            pool_pre_ping=True,  # Check connection before use
-            pool_recycle=1800,
-        )
+        # Check if the Firebase database is available
+        if db is None:
+            logger.error("Firebase database not initialized")
+            raise Exception("Firebase database not initialized")
         
-        if not db_engine:
-            logger.error("Failed to create database engine within save_document_to_db.")
-            raise Exception("Database engine could not be initialized for saving.")
-        logger.info("Async database engine obtained/created within save_document_to_db.")
-
-        # We already checked for documents with the original_url at the beginning of the handlers
-        # So we can proceed directly to inserting the new document
-        logger.info(f"Creating new document for originally requested URL: {original_url} (Retrieved from: {retrieved_url})")
-        
-        # Check and set default values for optional fields
-        one_sentence_summary = analysis.get('one_sentence_summary', '')
-        hundred_word_summary = analysis.get('hundred_word_summary', '')
-        
-        # Encode JSON fields explicitly
-        word_freq_json = json.dumps(serializable_word_freqs if serializable_word_freqs else [])
-        text_mining_json = json.dumps(serializable_text_mining if serializable_text_mining else {})
-        
-        # Create document data dictionary
-        document_values = {
-            "url": original_url, # Store the original request URL
+        # Create document data for Firestore
+        document_data = {
+            "url": original_url,
             "document_type": document_type,
-            "retrieved_url": retrieved_url, # Store the actual URL content came from
+            "retrieved_url": retrieved_url,
             "company_name": company_name,
             "logo_url": logo_url,
             "raw_text": "", # Store empty string instead of full raw text
-            "one_sentence_summary": one_sentence_summary,
-            "hundred_word_summary": hundred_word_summary,
-            "word_frequencies": word_freq_json, 
-            "text_mining_metrics": text_mining_json,
-            "views": 0
+            "one_sentence_summary": analysis.get('one_sentence_summary', ''),
+            "hundred_word_summary": analysis.get('hundred_word_summary', ''),
+            "word_frequencies": serializable_word_freqs,
+            "text_mining_metrics": serializable_text_mining,
+            "views": 0,
+            "created_at": datetime.now(),
+            "updated_at": datetime.now()
         }
         
-        # Explicit insert using SQLAlchemy Core with timeout handling
-        try:
-            async with db_engine.begin() as conn:
-                query = insert(documents).values(**document_values).returning(documents.c.id)
-                result = await conn.execute(query)
-                row = result.fetchone()
-                if row:
-                    document_id = row[0]
-                else:
-                    logger.error(f"Failed to retrieve document ID after insertion for URL: {original_url} (retrieved: {retrieved_url})")
-                    raise Exception("Failed to create document in database")
-        except asyncio.TimeoutError:
-            logger.error("Database insert operation timed out.")
-            raise Exception("Database connection timed out during insert. Please check your database instance and configuration.")
+        # Add to Firestore documents collection
+        document_ref = db.collection("documents").document()
+        document_id = document_ref.id
+        document_ref.set(document_data)
+        
+        logger.info(f"Document saved to Firestore with ID: {document_id}")
+        
+        # If user_id is provided, create a submission record
+        if user_id:
+            submission_data = {
+                "user_id": str(user_id),
+                "document_id": document_id,
+                "created_at": datetime.now()
+            }
+            db.collection("submissions").document().set(submission_data)
+            logger.info(f"Submission record created for user {user_id} and document {document_id}")
         
         return document_id
     except Exception as e:
-        # Log traceback for crawl_tos errors
+        # Log traceback for save_document_to_db errors
         logger.error(f"Error saving document to database: {e}", exc_info=True)
-        raise # Re-raise the exception to be handled by the caller
+        raise  # Re-raise the exception to be handled by the caller
 
 async def find_tos_url(url: str) -> str:
     """
@@ -409,13 +289,13 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         # FIRST: Check if document with THIS EXACT URL already exists in database
         # We only check by original URL and do it ONCE at the beginning
         try:
-            existing_doc = await document_crud.get_by_url(request.url, "tos")
+            existing_doc = get_document_by_url(request.url, "tos")
             if existing_doc:
                 logger.info(f"Document for URL {request.url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 is_existing_document = True  # Set flag for existing document
                 
-                # Update views count for the existing document
-                await document_crud.increment_views(existing_doc['id'])
+                # Update views count for the existing document - increment_views is async
+                await increment_views(existing_doc['id'])
                 
                 # Create a new response object with success=False
                 response = CrawlTosResponse(
@@ -536,12 +416,12 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         
         # Check if this exact tos_url has already been crawled
         try:
-            existing_doc = await document_crud.get_by_retrieved_url(tos_url, "tos")
+            existing_doc = get_document_by_retrieved_url(tos_url, "tos")
             if existing_doc:
                 logger.info(f"Document for retrieved URL {tos_url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 
-                # Update views count for the existing document
-                await document_crud.increment_views(existing_doc['id'])
+                # Update views count for the existing document - increment_views is async
+                await increment_views(existing_doc['id'])
                 
                 # Create a new response object with success=False
                 response = CrawlTosResponse(
@@ -761,13 +641,13 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         summary_context_url = f"{tos_url}?company={company_name}"
         
         # Perform analysis in parallel with the company name context
-        summary_response, word_freq_response, text_mining_response = await perform_parallel_analysis(summary_context_url, extracted_text, "tos")
+        analysis = await perform_parallel_analysis(summary_context_url, extracted_text, "tos")
         
         # Set response fields from analysis results regardless of success
-        response.one_sentence_summary = summary_response.one_sentence_summary if summary_response else "Analysis failed"
-        response.hundred_word_summary = summary_response.hundred_word_summary if summary_response else "Analysis failed"
-        response.word_frequencies = word_freq_response.word_frequencies if word_freq_response else []
-        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults(
+        response.one_sentence_summary = analysis.get('one_sentence_summary', "Analysis failed")
+        response.hundred_word_summary = analysis.get('hundred_word_summary', "Analysis failed")
+        response.word_frequencies = analysis.get('word_frequencies', [])
+        response.text_mining = analysis.get('text_mining', TextMiningResults(
             word_count=0,
             avg_word_length=0.0,
             sentence_count=0,
@@ -780,15 +660,14 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             question_frequency=0.0,
             paragraph_count=0,
             common_word_percentage=0.0
-        )
+        ))
         response.company_name = company_name
         response.logo_url = logo_url
         
         # Check if all analyses were successful before attempting to save
         all_analyses_successful = (
-            summary_response and summary_response.success and
-            word_freq_response and word_freq_response.success and
-            text_mining_response and text_mining_response.success
+            analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
+            analysis.get('word_frequencies') and analysis.get('text_mining')
         )
         
         if all_analyses_successful:
@@ -823,9 +702,9 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             logger.warning("One or more analyses failed, but returning available data.")
             # Even if some analyses failed, if we have useful data, consider it partially successful
             has_useful_data = (
-                (summary_response and (summary_response.one_sentence_summary or summary_response.hundred_word_summary)) or
-                (word_freq_response and word_freq_response.word_frequencies) or
-                (text_mining_response and text_mining_response.text_mining)
+                (analysis.get('one_sentence_summary') or analysis.get('hundred_word_summary')) or
+                analysis.get('word_frequencies') or
+                analysis.get('text_mining')
             )
             
             if has_useful_data:
@@ -888,13 +767,13 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         # FIRST: Check if document with THIS EXACT URL already exists in database
         # We only check by original URL and do it ONCE at the beginning
         try:
-            existing_doc = await document_crud.get_by_url(request.url, "pp")
+            existing_doc = get_document_by_url(request.url, "pp")
             if existing_doc:
                 logger.info(f"Document for URL {request.url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 is_existing_document = True  # Set flag for existing document
                 
-                # Update views count for the existing document
-                await document_crud.increment_views(existing_doc['id'])
+                # Update views count for the existing document - increment_views is async
+                await increment_views(existing_doc['id'])
                 
                 # Create a new response object with success=False
                 response = CrawlPrivacyResponse(
@@ -1015,12 +894,12 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         
         # Check if this exact pp_url has already been crawled
         try:
-            existing_doc = await document_crud.get_by_retrieved_url(pp_url, "pp")
+            existing_doc = get_document_by_retrieved_url(pp_url, "pp")
             if existing_doc:
                 logger.info(f"Document for retrieved URL {pp_url} already exists in database with ID {existing_doc['id']}. Returning existing document.")
                 
-                # Update views count for the existing document
-                await document_crud.increment_views(existing_doc['id'])
+                # Update views count for the existing document - increment_views is async
+                await increment_views(existing_doc['id'])
                 
                 # Create a new response object with success=False
                 response = CrawlPrivacyResponse(
@@ -1240,13 +1119,13 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         summary_context_url = f"{pp_url}?company={company_name}"
         
         # Perform analysis in parallel with the company name context
-        summary_response, word_freq_response, text_mining_response = await perform_parallel_analysis(summary_context_url, extracted_text, "pp")
+        analysis = await perform_parallel_analysis(summary_context_url, extracted_text, "pp")
         
         # Set response fields from analysis results regardless of success
-        response.one_sentence_summary = summary_response.one_sentence_summary if summary_response else "Analysis failed"
-        response.hundred_word_summary = summary_response.hundred_word_summary if summary_response else "Analysis failed"
-        response.word_frequencies = word_freq_response.word_frequencies if word_freq_response else []
-        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults(
+        response.one_sentence_summary = analysis.get('one_sentence_summary', "Analysis failed")
+        response.hundred_word_summary = analysis.get('hundred_word_summary', "Analysis failed")
+        response.word_frequencies = analysis.get('word_frequencies', [])
+        response.text_mining = analysis.get('text_mining', TextMiningResults(
             word_count=0,
             avg_word_length=0.0,
             sentence_count=0,
@@ -1259,15 +1138,14 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             question_frequency=0.0,
             paragraph_count=0,
             common_word_percentage=0.0
-        )
+        ))
         response.company_name = company_name
         response.logo_url = logo_url
 
         # Check if all analyses were successful before attempting to save
         all_analyses_successful = (
-            summary_response and summary_response.success and
-            word_freq_response and word_freq_response.success and
-            text_mining_response and text_mining_response.success
+            analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
+            analysis.get('word_frequencies') and analysis.get('text_mining')
         )
         
         if all_analyses_successful:
@@ -1301,9 +1179,9 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             logger.warning("One or more analyses failed, but returning available data.")
             # Even if some analyses failed, if we have useful data, consider it partially successful
             has_useful_data = (
-                (summary_response and (summary_response.one_sentence_summary or summary_response.hundred_word_summary)) or
-                (word_freq_response and word_freq_response.word_frequencies) or
-                (text_mining_response and text_mining_response.text_mining)
+                (analysis.get('one_sentence_summary') or analysis.get('hundred_word_summary')) or
+                analysis.get('word_frequencies') or
+                analysis.get('text_mining')
             )
             
             if has_useful_data:
@@ -1525,40 +1403,159 @@ async def generate_hundred_word_summary(text: str, url: str = None) -> str:
 
 def get_word_frequencies(text: str, max_words: int = 20):
     """
-    Analyze word frequencies in the provided text.
+    Extract the most frequent words from the text.
     
     Args:
-        text: The text to analyze
-        max_words: Maximum number of words to include in results
+        text: The text to analyze.
+        max_words: Maximum number of words to return.
         
     Returns:
-        List of WordFrequency objects
+        List of word frequency objects.
     """
-    return analyze_text_frequency(text, max_words)
+    # Simple implementation - more sophisticated implementation would use proper NLP
+    words = text.lower().split()
+    word_counts = {}
+    
+    for word in words:
+        # Remove punctuation
+        word = word.strip('.,;:!?()[]{}"\'-')
+        if word and len(word) > 3:  # Skip short words
+            word_counts[word] = word_counts.get(word, 0) + 1
+    
+    # Sort by frequency
+    sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
+    
+    # Return as list of WordFrequency objects
+    result = []
+    for word, count in sorted_words[:max_words]:
+        percentage = count / len(words) * 100 if words else 0
+        result.append(WordFrequency(
+            word=word,
+            count=count,  # Using 'count' instead of 'frequency'
+            percentage=percentage / 100  # Store as decimal (0-1) for consistency
+        ))
+    
+    return result
 
 def extract_text_mining_metrics(text: str):
     """
-    Extract text mining metrics from the provided text.
+    Extract text mining metrics from the text.
     
     Args:
-        text: The text to analyze
+        text: The text to analyze.
         
     Returns:
-        TextMiningResults object
+        Dictionary of text mining metrics.
     """
-    return perform_text_mining(text)
+    try:
+        # Split text into words, sentences, paragraphs
+        words = text.split()
+        sentences = text.split('.')
+        paragraphs = text.split('\n\n')
+        
+        # Count number of words, sentences, paragraphs
+        word_count = len(words)
+        sentence_count = len(sentences)
+        paragraph_count = len(paragraphs)
+        
+        # Average word length
+        avg_word_length = sum(len(word) for word in words) / word_count if word_count else 0
+        
+        # Average sentence length
+        avg_sentence_length = word_count / sentence_count if sentence_count else 0
+        
+        # Calculate readability score (simple approximation of Flesch-Kincaid)
+        readability_score = 206.835 - (1.015 * avg_sentence_length) - (84.6 * avg_word_length / 5)
+        readability_score = max(0, min(100, readability_score))
+        
+        # Interpret readability score
+        if readability_score >= 90:
+            interpretation = "Very Easy"
+        elif readability_score >= 80:
+            interpretation = "Easy"
+        elif readability_score >= 70:
+            interpretation = "Fairly Easy"
+        elif readability_score >= 60:
+            interpretation = "Standard"
+        elif readability_score >= 50:
+            interpretation = "Fairly Difficult"
+        elif readability_score >= 30:
+            interpretation = "Difficult"
+        else:
+            interpretation = "Very Difficult"
+        
+        # Unique word ratio
+        unique_words = set(words)
+        unique_word_ratio = len(unique_words) / word_count if word_count else 0
+        
+        # Other metrics
+        capital_letter_freq = sum(1 for char in text if char.isupper()) / len(text) if text else 0
+        punctuation_freq = sum(1 for char in text if char in '.,;:!?()[]{}"\'-') / len(text) if text else 0
+        question_freq = text.count('?') / sentence_count if sentence_count else 0
+        
+        # Common word percentage (new field required by TextMiningResults)
+        common_words = ['the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they', 'we', 'say', 'her', 'she', 'or', 'an', 'will', 'my', 'one', 'all', 'would', 'there', 'their', 'what', 'so', 'up', 'out', 'if', 'about', 'who', 'get', 'which', 'go', 'me', 'when']
+        common_word_count = sum(1 for word in words if word.lower() in common_words)
+        common_word_percentage = common_word_count / word_count * 100 if word_count else 0
+        
+        # Return metrics as a TextMiningResults object
+        return TextMiningResults(
+            word_count=word_count,
+            avg_word_length=avg_word_length,
+            sentence_count=sentence_count,
+            avg_sentence_length=avg_sentence_length,
+            readability_score=readability_score,
+            readability_interpretation=interpretation,
+            unique_word_ratio=unique_word_ratio,
+            capital_letter_freq=capital_letter_freq,
+            punctuation_density=punctuation_freq,
+            question_frequency=question_freq,
+            paragraph_count=paragraph_count,
+            common_word_percentage=common_word_percentage  # Added required field
+        )
+    except Exception as e:
+        logger.error(f"Error extracting text mining metrics: {str(e)}")
+        return TextMiningResults(
+            word_count=0,
+            avg_word_length=0,
+            sentence_count=0,
+            avg_sentence_length=0,
+            readability_score=0,
+            readability_interpretation="Error in analysis",
+            unique_word_ratio=0,
+            capital_letter_freq=0,
+            punctuation_density=0,
+            question_frequency=0,
+            paragraph_count=0,
+            common_word_percentage=0  # Added required field with default value
+        )
 
-# For backwards compatibility with different Pydantic versions
 def safe_model_dump(model):
-    """Convert Pydantic model to dict, supporting both v1 and v2 APIs."""
-    if hasattr(model, 'model_dump'):
-        return model.model_dump()
-    elif hasattr(model, 'dict'):
-        return model.dict()
-    elif hasattr(model, '__dict__'):
-        return model.__dict__
-    else:
-        raise ValueError(f"Cannot convert model of type {type(model)} to dict")
+    """
+    Safely convert model instances to dictionaries for Firestore.
+    
+    Args:
+        model: The model instance to convert.
+        
+    Returns:
+        Dictionary representation of the model.
+    """
+    try:
+        if hasattr(model, 'dict') and callable(getattr(model, 'dict')):
+            # Pydantic model or similar with dict() method
+            return model.dict()
+        elif hasattr(model, '__dict__'):
+            # Regular Python class with __dict__ attribute
+            return model.__dict__
+        elif isinstance(model, dict):
+            # Already a dictionary
+            return model
+        else:
+            # Try to serialize as is
+            return model
+    except Exception as e:
+        logger.error(f"Error serializing model: {e}")
+        return {"error": "Serialization failed"}
 
 def is_likely_binary_content(text: str) -> bool:
     """
