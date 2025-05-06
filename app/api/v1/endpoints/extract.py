@@ -1230,3 +1230,33 @@ async def extract_text(request: ExtractRequest, response: Response) -> ExtractRe
         message="Extraction failed - all methods exhausted",
         method_used="standard",
     )
+
+async def extract_content(url: str, document_type: str = None) -> tuple:
+    """
+    Extract content from a URL.
+    
+    Args:
+        url: The URL to extract content from
+        document_type: Optional document type (tos or pp)
+        
+    Returns:
+        Tuple of (extracted_text, retrieved_url)
+    """
+    logger.info(f"Extracting content from URL: {url}, document_type: {document_type}")
+    
+    # Ensure document_type is valid (required by ExtractRequest model)
+    valid_doc_type = document_type if document_type in ['tos', 'pp'] else 'tos'
+    
+    # Create an ExtractRequest
+    request = ExtractRequest(url=url, document_type=valid_doc_type)
+    
+    # Call extract_text without the Response parameter
+    response = await extract_text(request)
+    
+    # Extract the text and URL from the response
+    if response and response.success:
+        return response.text, response.url
+    else:
+        # If extraction failed, return empty text but still return the URL to avoid errors
+        logger.error(f"Failed to extract content from {url}")
+        return "", url
