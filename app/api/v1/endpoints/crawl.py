@@ -1454,8 +1454,12 @@ def get_word_frequencies(text: str, max_words: int = 20):
     for word in words:
         # Remove punctuation
         word = word.strip('.,;:!?()[]{}"\'-')
-        if word and len(word) > 3 and word not in ignored_keywords:  # Skip short words and ignored keywords
-            word_counts[word] = word_counts.get(word, 0) + 1
+        
+        # Check if the word is mostly alphanumeric
+        if word and len(word) > 3 and word not in ignored_keywords:
+            alphanumeric_chars = sum(1 for char in word if char.isalnum())
+            if alphanumeric_chars / len(word) > 0.5:  # Require more than 50% alphanumeric characters
+                word_counts[word] = word_counts.get(word, 0) + 1
     
     # Sort by frequency
     sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
