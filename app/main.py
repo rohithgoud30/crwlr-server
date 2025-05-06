@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
 import os
@@ -17,6 +17,9 @@ from app.core.config import settings
 
 # Import Firebase (new)
 from app.core.firebase import initialize_firebase, db
+
+# Import environment validator
+from app.core.env_checker import validate_environment
 
 # Setup logging
 # logging.basicConfig(
@@ -86,32 +89,87 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Variables to track initialization status
+environment_valid = False
+firebase_initialized = False
+playwright_initialized = False
+startup_errors = []
+
 # ---> ADDED: Startup and Shutdown Events for Playwright and Firebase
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Application startup: Initializing services...")
+    """Application startup event handler that initializes all required services."""
+    global environment_valid, firebase_initialized, playwright_initialized, startup_errors
+    
+    logger.info("Application startup: Beginning initialization sequence...")
+    
+    # STEP 1: Validate environment variables first
+    logger.info("STEP 1: Validating environment variables...")
     try:
-        # Initialize Firebase
-        logger.info("Initializing Firebase...")
-        initialize_firebase()
-        if db:
-            logger.info("Firebase initialization successful.")
+        environment_valid = validate_environment()
+        if not environment_valid:
+            error_msg = "Environment validation failed - missing required variables"
+            logger.error(error_msg)
+            startup_errors.append(error_msg)
+            # We will continue with initialization but log warnings
+    except Exception as e:
+        error_msg = f"Environment validation error: {str(e)}"
+        logger.error(error_msg)
+        startup_errors.append(error_msg)
+    
+    # STEP 2: Initialize Firebase
+    logger.info("STEP 2: Initializing Firebase...")
+    try:
+        # Only proceed if environment is valid or in dev mode
+        if environment_valid or settings.ENVIRONMENT == "development":
+            # Force initialization in development mode
+            force_init = settings.ENVIRONMENT == "development"
+            initialize_firebase(force_init=force_init)
+            if db:
+                logger.info("Firebase initialization successful.")
+                firebase_initialized = True
+            else:
+                error_msg = "Firebase initialization completed but db is None"
+                logger.error(error_msg)
+                startup_errors.append(error_msg)
         else:
-            logger.error("Firebase initialization failed.")
-        
+            error_msg = "Skipping Firebase initialization due to invalid environment"
+            logger.warning(error_msg)
+            startup_errors.append(error_msg)
+    except Exception as e:
+        error_msg = f"Firebase initialization failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        startup_errors.append(error_msg)
+    
+    # STEP 3: Initialize Playwright
+    logger.info("STEP 3: Initializing Playwright...")
+    try:
         # Start Playwright with a timeout
-        logger.info("Initializing Playwright...")
         await asyncio.wait_for(auth_manager.startup(), timeout=90.0) # 90 second timeout
         logger.info("Playwright startup successful.")
+        playwright_initialized = True
     except asyncio.TimeoutError:
-        logger.error("Playwright startup timed out after 90 seconds.")
-        # Optionally prevent app startup or set a flag
+        error_msg = "Playwright startup timed out after 90 seconds."
+        logger.error(error_msg)
+        startup_errors.append(error_msg)
         auth_manager.startup_failure = "Startup timed out"
     except Exception as e:
-        logger.error(f"Service startup failed: {str(e)}", exc_info=True)
-        # Ensure startup_failure reflects the error
+        error_msg = f"Playwright initialization failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        startup_errors.append(error_msg)
         if not auth_manager.startup_failure:
             auth_manager.startup_failure = str(e)
+    
+    # Log summary of startup status
+    logger.info("===== STARTUP SUMMARY =====")
+    logger.info(f"Environment validation: {'✅ PASSED' if environment_valid else '❌ FAILED'}")
+    logger.info(f"Firebase initialization: {'✅ PASSED' if firebase_initialized else '❌ FAILED'}")
+    logger.info(f"Playwright initialization: {'✅ PASSED' if playwright_initialized else '❌ FAILED'}")
+    
+    if startup_errors:
+        logger.warning(f"Startup completed with {len(startup_errors)} errors/warnings")
+    else:
+        logger.info("✅ All services initialized successfully")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -137,13 +195,58 @@ app.include_router(test_router, prefix="/api/test")
 async def health_check():
     """
     Simple health check endpoint.
+    Returns status of all initialized services.
     """
+    global environment_valid, firebase_initialized, playwright_initialized, startup_errors
     firestore_status = "connected" if db else "disconnected"
-    return JSONResponse(content={
+    
+    status = {
         "status": "running", 
         "branch": branch_name,
-        "firestore": firestore_status
-    })
+        "environment_check": "passed" if environment_valid else "failed",
+        "firestore": firestore_status,
+        "playwright": "ready" if playwright_initialized else "not_ready"
+    }
+    
+    if startup_errors:
+        status["startup_warnings"] = len(startup_errors)
+        
+    return JSONResponse(content=status)
+
+# Detailed status endpoint for debugging
+@app.get("/debug/status", include_in_schema=False)
+async def debug_status():
+    """
+    Detailed status endpoint for debugging.
+    Shows full initialization status and errors.
+    """
+    global environment_valid, firebase_initialized, playwright_initialized, startup_errors
+    
+    # Only accessible in development mode for security
+    if settings.ENVIRONMENT != "development" and settings.ENVIRONMENT != "local":
+        raise HTTPException(status_code=403, detail="Forbidden in production mode")
+    
+    status = {
+        "status": "running", 
+        "branch": branch_name,
+        "environment": settings.ENVIRONMENT,
+        "services": {
+            "environment_check": {
+                "status": "passed" if environment_valid else "failed"
+            },
+            "firebase": {
+                "status": "initialized" if firebase_initialized else "failed",
+                "db_available": db is not None
+            },
+            "playwright": {
+                "status": "ready" if playwright_initialized else "not_ready",
+                "startup_failure": auth_manager.startup_failure if hasattr(auth_manager, "startup_failure") else None
+            }
+        },
+        "startup_errors": startup_errors
+    }
+        
+    return JSONResponse(content=status)
 
 # Root endpoint
 @app.get("/", include_in_schema=False)
