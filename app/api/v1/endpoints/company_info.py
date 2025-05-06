@@ -828,191 +828,21 @@ async def extract_company_info(url: str) -> tuple:
             if domain:
                 # ALWAYS use the domain name directly - no title override
                 company_name = extract_company_name_from_domain(domain)
-                # Set default logo URL based on domain
+                # ALWAYS use Google favicon service for logo
                 logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
                 logger.info(f"Using company name from domain: {company_name}")
+                logger.info(f"Using Google favicon for logo: {logo_url}")
+                return company_name, logo_url, True, "Successfully extracted company information using domain"
             else:
                 company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
+                logo_url = "https://www.google.com/s2/favicons?domain=unknown.com&sz=128"
+                return company_name, logo_url, True, "Extracted company name from URL"
         except Exception as parse_err:
             logger.error(f"Error parsing domain from URL '{url}': {parse_err}")
             company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
+            logo_url = "https://www.google.com/s2/favicons?domain=unknown.com&sz=128"
+            return company_name, logo_url, False, f"Error parsing URL: {str(parse_err)}"
 
-        # Check if App Store or Play Store URL
-        if is_app_store_url(url) or is_play_store_url(url):
-            logger.info(f"Detected app store URL: {url}")
-            app_name, logo_url, success, message = await extract_with_playwright(url)
-            
-            if success and app_name and logo_url:
-                # For app stores, we'll still use the app name
-                return app_name, logo_url, success, message
-        
-        # Attempt extraction
-        try:
-            headers = {"User-Agent": get_random_user_agent()}
-            response = requests.get(url, headers=headers, timeout=10)
-            if not response.ok:
-                logger.warning(f"HTTP request failed with status: {response.status_code}")
-                logger.info("Falling back to Playwright extraction")
-                playwright_name, logo_url, success, message = await extract_with_playwright(url)
-                # Keep consistent company name but use Playwright logo
-                return company_name, logo_url, success, message
-            
-            # Parse HTML
-            soup = BeautifulSoup(response.text, 'html.parser')
-            base_url = get_base_url(url)
-            
-            # REMOVED: Title-based company name extraction
-            # We're only getting the company name from the domain now
-            
-            # Expand logo detection: also check header and organization schema
-            # Look for schema.org Organization logo first (most accurate)
-            logo_found = False
-            schema_tags = soup.find_all('script', type='application/ld+json')
-            for tag in schema_tags:
-                try:
-                    import json
-                    data = json.loads(tag.string)
-                    # Check for Organization schema
-                    if isinstance(data, dict):
-                        # Direct logo property
-                        if 'logo' in data:
-                            if isinstance(data['logo'], str):
-                                logo_url = urljoin(base_url, data['logo'])
-                                logo_found = True
-                                break
-                            elif isinstance(data['logo'], dict) and 'url' in data['logo']:
-                                logo_url = urljoin(base_url, data['logo']['url'])
-                                logo_found = True
-                                break
-                        # Logo inside Organization property
-                        elif '@type' in data and data['@type'] == 'Organization' and 'logo' in data:
-                            if isinstance(data['logo'], str):
-                                logo_url = urljoin(base_url, data['logo'])
-                                logo_found = True
-                                break
-                            elif isinstance(data['logo'], dict) and 'url' in data['logo']:
-                                logo_url = urljoin(base_url, data['logo']['url'])
-                                logo_found = True
-                                break
-                        # Logo inside nested Organization
-                        elif 'organization' in data and isinstance(data['organization'], dict) and 'logo' in data['organization']:
-                            org_logo = data['organization']['logo']
-                            if isinstance(org_logo, str):
-                                logo_url = urljoin(base_url, org_logo)
-                                logo_found = True
-                                break
-                            elif isinstance(org_logo, dict) and 'url' in org_logo:
-                                logo_url = urljoin(base_url, org_logo['url'])
-                                logo_found = True
-                                break
-                except Exception as e:
-                    logger.warning(f"Error parsing JSON-LD: {e}")
-                    continue
-            
-            # Look for meta tags with 'logo' in the property/name
-            if not logo_found:
-                meta_logo_tags = soup.find_all('meta', attrs={'property': lambda x: x and 'logo' in x.lower() if x else False})
-                if not meta_logo_tags:
-                    meta_logo_tags = soup.find_all('meta', attrs={'name': lambda x: x and 'logo' in x.lower() if x else False})
-                
-                if meta_logo_tags:
-                    for tag in meta_logo_tags:
-                        if tag.get('content'):
-                            logo_url = urljoin(base_url, tag['content'])
-                            logo_found = True
-                            break
-            
-            # Look for OpenGraph image
-            if not logo_found:
-                og_image = soup.find('meta', property='og:image')
-                if og_image and og_image.get('content'):
-                    logo_url = urljoin(base_url, og_image['content'])
-                    logo_found = True
-            
-            # Look for typical logos in the header or navigation
-            if not logo_found:
-                # Find the header or nav element
-                header = soup.find(['header', 'nav', 'div.header', 'div.nav', 'div.navbar'])
-                if header:
-                    # Look for img in the header with logo-like attributes
-                    logo_candidates = header.select('img[src]')
-                    for img in logo_candidates:
-                        # Check if it looks like a logo based on attributes
-                        alt_text = img.get('alt', '').lower()
-                        class_attr = ' '.join(img.get('class', [])).lower()
-                        img_id = img.get('id', '').lower()
-                        
-                        is_likely_logo = (
-                            'logo' in alt_text or 'brand' in alt_text or
-                            'logo' in class_attr or 'brand' in class_attr or
-                            'logo' in img_id or 'brand' in img_id
-                        )
-                        
-                        if is_likely_logo:
-                            logo_url = urljoin(base_url, img['src'])
-                            logo_found = True
-                            break
-            
-            # Look for common logo class/id patterns
-            if not logo_found:
-                logo_selectors = [
-                    'img.logo', 'img#logo', '.logo img', '#logo img',
-                    'img.brand', 'img#brand', '.brand img', '#brand img',
-                    'img.site-logo', 'img#site-logo', '.site-logo img', '#site-logo img',
-                    'header img', '.header img', '#header img',
-                    '.navbar-brand img', '.brand-logo img',
-                    'a[href="/"] img', 'a[href="./"] img'  # Logo often links to homepage
-                ]
-                
-                for selector in logo_selectors:
-                    try:
-                        logo_img = soup.select_one(selector)
-                        if logo_img and logo_img.get('src'):
-                            logo_url = urljoin(base_url, logo_img['src'])
-                            logo_found = True
-                            break
-                    except Exception as e:
-                        logger.warning(f"Error with selector {selector}: {e}")
-                        continue
-            
-            # Fall back to favicon if nothing else worked
-            if not logo_found:
-                # Check for link rel="icon" or rel="shortcut icon"
-                favicon_link = soup.find('link', rel=lambda r: r and ('icon' in r.lower() if r else False))
-                if favicon_link and favicon_link.get('href'):
-                    logo_url = urljoin(base_url, favicon_link['href'])
-                    logo_found = True
-                else:
-                    # Use Google's favicon service as last resort
-                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-                    logo_found = True
-            
-            success = True
-            message = "Successfully extracted company information with BeautifulSoup"
-            
-            # Verify logo URL is valid
-            if logo_found:
-                try:
-                    # Don't download the image, just check if it exists with a HEAD request
-                    logo_test = requests.head(logo_url, timeout=5)
-                    if logo_test.status_code >= 400:
-                        logger.warning(f"Logo URL returned error: {logo_test.status_code}")
-                        # Use domain-based favicon as fallback
-                        logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-                except Exception as e:
-                    logger.warning(f"Error verifying logo URL: {e}")
-                    # Use domain-based favicon as fallback
-                    logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-            
-            return company_name, logo_url, success, message
-        
-        except Exception as e:
-            logger.warning(f"BeautifulSoup extraction failed: {e}. Falling back to Playwright.")
-            # Fall back to Playwright for JavaScript-rendered sites
-            playwright_name, logo_url, success, message = await extract_with_playwright(url)
-            # Keep consistent company name but use Playwright logo
-            return company_name, logo_url, success, message
-    
     except Exception as e:
         logger.error(f"Error extracting company info: {e}")
         
@@ -1021,13 +851,11 @@ async def extract_company_info(url: str) -> tuple:
             domain = urlparse(url).netloc if url else ""
             if domain:
                 company_name = extract_company_name_from_domain(domain)
-                logger.info(f"Fallback: Extracted company name '{company_name}' from domain '{domain}'")
                 # Use domain-based favicon
                 logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
             else:
                 # If domain can't be extracted, use first part of URL
                 company_name = url.split('/')[0].capitalize() if '/' in url else url.capitalize()
-                logger.info(f"Final fallback (no domain): Using URL part as company name: '{company_name}'")
                 # Use generic favicon
                 logo_url = "https://www.google.com/s2/favicons?domain=unknown.com&sz=128"
         except Exception as inner_e:
@@ -1270,21 +1098,7 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
                     message="URL appears to be a search engine result, unable to extract actual URL"
                 )
         
-        # If this is an App Store or Play Store URL, use specialized extraction
-        if is_app_store_url(sanitized_url) or is_play_store_url(sanitized_url):
-            logger.info(f"Detected app store URL: {sanitized_url}")
-            company_name, logo_url, success, message = await extract_with_playwright(sanitized_url)
-            
-            if success and company_name and logo_url:
-                return CompanyInfoResponse(
-                    url=url,
-                    company_name=company_name,
-                    logo_url=logo_url,
-                    success=True,
-                    message=message or "Successfully extracted app info from store page"
-                )
-
-        # First try the direct extraction method
+        # Extract company info using the simplified approach (domain only, Google favicon)
         company_name, logo_url, success, message = await extract_company_info(sanitized_url)
         
         return CompanyInfoResponse(
@@ -1297,21 +1111,18 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
             
     except Exception as e:
         logger.error(f"Error extracting company info: {str(e)}")
-        
-        # Even in error case, extract company name from domain if possible
-        if hasattr(request, 'logo_url') and request.logo_url:
-            return CompanyInfoResponse(
-                url=url,
-                company_name=company_name,
-                logo_url=request.logo_url,  # Use the provided logo URL
-                success=False,
-                message=f"Error extracting company info: {str(e)}"
-            )
-        else:
-            return CompanyInfoResponse(
-                url=url,
-                company_name=company_name,
-                logo_url=logo_url,  # This will be either a favicon or placeholder
-                success=False,
-                message=f"Error extracting company info: {str(e)}"
-            ) 
+        domain = ""
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+        except:
+            pass
+            
+        # Always return a response, even in case of error
+        return CompanyInfoResponse(
+            url=url,
+            company_name="Unknown",
+            logo_url=f"https://www.google.com/s2/favicons?domain={domain or 'unknown.com'}&sz=128",
+            success=False,
+            message=f"Error extracting company info: {str(e)}"
+        ) 
