@@ -6,7 +6,7 @@ import random
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import re
 from typing import Optional, Tuple, Dict, Any
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qs, unquote
 from playwright.async_api import async_playwright
 import string
 import warnings
@@ -103,6 +103,41 @@ def is_app_store_url(url: str) -> bool:
 def is_play_store_url(url: str) -> bool:
     """Check if the URL is from Google Play Store."""
     return "play.google.com" in url
+
+def is_search_engine_url(url: str) -> bool:
+    """Check if the URL is from a search engine."""
+    search_engines = [
+        "google.com/search", "bing.com/search", "yahoo.com/search", 
+        "r.search.yahoo.com", "search.yahoo.com",
+        "duckduckgo.com", "yandex.com/search", "baidu.com/s"
+    ]
+    return any(engine in url for engine in search_engines)
+
+def extract_actual_url_from_search(url: str) -> Optional[str]:
+    """
+    Try to extract the actual URL from a search engine result URL.
+    Returns None if extraction fails.
+    """
+    try:
+        # Handle Yahoo redirect URLs which often contain RU= parameter
+        if "r.search.yahoo.com" in url:
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+            
+            # Try several parameter names Yahoo uses for redirects
+            redirect_params = ["RU", "RO", "RD"]
+            for param in redirect_params:
+                if param in query_params and query_params[param]:
+                    actual_url = query_params[param][0]
+                    # Yahoo tends to URL-encode these values
+                    actual_url = unquote(actual_url)
+                    logger.info(f"Extracted URL from Yahoo search via '{param}' parameter: {actual_url}")
+                    return actual_url
+        
+        return None
+    except Exception as e:
+        logger.error(f"Failed to extract actual URL from search result: {e}")
+        return None
 
 async def extract_app_store_info(page) -> Tuple[Optional[str], Optional[str]]:
     """
@@ -1107,6 +1142,30 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
                 success=False,
                 message="Invalid URL format"
             )
+        
+        # Check if URL is from a search engine and try to extract the actual URL
+        if is_search_engine_url(sanitized_url):
+            actual_url = extract_actual_url_from_search(sanitized_url)
+            if actual_url:
+                logger.info(f"Extracted actual URL from search engine: {actual_url}")
+                # Use the extracted URL instead
+                sanitized_url = sanitize_url(actual_url)
+                if not sanitized_url:
+                    return CompanyInfoResponse(
+                        url=url,
+                        company_name=None,
+                        logo_url=None,
+                        success=False,
+                        message="Invalid URL extracted from search engine result"
+                    )
+            else:
+                return CompanyInfoResponse(
+                    url=url,
+                    company_name=None,
+                    logo_url=None,
+                    success=False,
+                    message="URL appears to be a search engine result, unable to extract actual URL"
+                )
         
         # If this is an App Store or Play Store URL, use specialized extraction
         if is_app_store_url(sanitized_url) or is_play_store_url(sanitized_url):
