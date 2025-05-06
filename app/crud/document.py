@@ -99,7 +99,9 @@ class DocumentCRUD(FirebaseCRUDBase):
         query: str,
         document_type: Optional[str] = None,
         page: int = 1,
-        per_page: int = 10
+        per_page: int = 10,
+        sort_by: Optional[str] = "updated_at",
+        sort_order: Optional[str] = "desc"
     ) -> Dict[str, Any]:
         """
         Search for documents based on a text query.
@@ -109,6 +111,8 @@ class DocumentCRUD(FirebaseCRUDBase):
             document_type: Optional filter by document_type (e.g. 'tos' or 'pp')
             page: Page number for pagination (1-indexed)
             per_page: Number of results per page
+            sort_by: Field to sort by (e.g., "updated_at", "views", "company_name", "url")
+            sort_order: Sort direction ("asc" or "desc")
         
         Returns:
             A dictionary containing search results and pagination information
@@ -118,26 +122,65 @@ class DocumentCRUD(FirebaseCRUDBase):
             query_lower = query.lower()
             
             # Since we're using Firestore which doesn't have built-in full-text search,
-            # we need to fetch all documents and filter them manually
+            # we need to fetch all documents and filter them manually.
+            # Firestore also has limitations on complex queries (e.g. multiple inequalities or combining text search with ordering on different fields easily)
+            
             filters = {}
             if document_type:
                 filters["document_type"] = document_type
                 
-            # Get all documents matching the document_type filter (if any)
-            all_docs = await self.get_multi(limit=1000, filters=filters)  # Limit of 1000 to prevent extreme loads
+            all_docs_query = self.collection
+            if document_type:
+                all_docs_query = all_docs_query.where(filter=firestore.FieldFilter("document_type", "==", document_type))
+
+            # Attempt to apply Firestore-level sorting if possible and beneficial.
+            # This is most effective if not combined with a text search that requires client-side filtering.
+            # For simplicity in this manual search, we'll sort client-side after filtering.
             
-            # Filter documents that match the query in any of the searchable fields
+            all_docs_stream = all_docs_query.stream() # Stream all (or filtered by type)
+            
             matching_docs = []
-            for doc in all_docs:
-                searchable_text = (
-                    (doc.get("raw_text", "") or "").lower() + 
-                    (doc.get("one_sentence_summary", "") or "").lower() + 
-                    (doc.get("hundred_word_summary", "") or "").lower() + 
-                    (doc.get("url", "") or "").lower() +
-                    (doc.get("company_name", "") or "").lower()
-                )
+            for doc_snapshot in all_docs_stream:
+                doc = doc_snapshot.to_dict()
+                doc['id'] = doc_snapshot.id # Ensure ID is part of the dict
+                
+                # Construct searchable text from relevant fields
+                searchable_text_parts = [
+                    str(doc.get("url", "")).lower(),
+                    str(doc.get("company_name", "")).lower(),
+                    str(doc.get("one_sentence_summary", "")).lower(),
+                    str(doc.get("hundred_word_summary", "")).lower(),
+                    # Consider adding raw_text if it's stored and searchable, but be mindful of performance
+                ]
+                searchable_text = " ".join(filter(None, searchable_text_parts))
+
                 if query_lower in searchable_text:
                     matching_docs.append(doc)
+
+            # Client-side sorting after filtering
+            if sort_by:
+                # Handle missing keys or None values gracefully for sorting
+                # For 'updated_at', ensure it's a datetime object or comparable
+                # For 'views', ensure it's an int
+                # For string fields, handle None by treating them as empty strings or placing them last/first
+                def get_sort_key(item):
+                    val = item.get(sort_by)
+                    if val is None:
+                        if sort_by == "views": return 0 # Treat None views as 0 for sorting
+                        # For other fields, decide a consistent way to handle None
+                        # For string fields, an empty string is fine. For dates, a very old/new date.
+                        return "" if isinstance(item.get(sort_by, ""), str) else (datetime.min if isinstance(item.get(sort_by, datetime.min), datetime) else 0)
+                    if sort_by == "updated_at" and isinstance(val, str):
+                        try:
+                            return datetime.fromisoformat(val.replace("Z", "+00:00"))
+                        except ValueError: # If parsing fails, return a default sortable value
+                           return datetime.min
+                    return val
+
+                try:
+                    matching_docs.sort(key=get_sort_key, reverse=(sort_order.lower() == "desc"))
+                except TypeError as te:
+                    logger.error(f"TypeError during sorting by {sort_by}: {te}. Documents might not be sorted correctly.")
             
             # Calculate pagination
             total = len(matching_docs)

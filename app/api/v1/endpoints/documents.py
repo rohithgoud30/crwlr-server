@@ -69,7 +69,9 @@ async def search_documents(
         query=search_request.search_text, 
         document_type=search_request.document_type,
         page=search_request.page,
-        per_page=search_request.per_page
+        per_page=search_request.per_page,
+        sort_by=search_request.sort_by,
+        sort_order=search_request.sort_order
     )
     return results
 
