@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from typing import Optional, List, Dict, Any, Literal
-from uuid import UUID
 from datetime import datetime
 import json
+import logging
 
 from app.core.auth import get_api_key
 from app.models.database import Document
@@ -13,7 +13,7 @@ router = APIRouter()
 
 # Define the structure for items in the search/list response
 class DocumentListItem(BaseModel):
-    id: str  # Changed from UUID to str to support Firestore document IDs
+    id: str
     url: str
     document_type: Literal["tos", "pp"]
     company_name: Optional[str] = None

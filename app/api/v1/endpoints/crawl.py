@@ -1,9 +1,6 @@
 from fastapi import APIRouter, Response, HTTPException, status, Depends, Header
 import logging
 import asyncio
-from uuid import UUID
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import insert
 from urllib.parse import urlparse
 import requests
 import random
@@ -14,9 +11,9 @@ import re
 import time
 from datetime import datetime
 
-from app.api.v1.endpoints.tos import find_tos
-from app.api.v1.endpoints.privacy import find_privacy_policy
-from app.api.v1.endpoints.extract import extract_text
+from app.api.v1.endpoints.tos import find_tos, ToSRequest
+from app.api.v1.endpoints.privacy import find_privacy_policy, PrivacyRequest
+from app.api.v1.endpoints.extract import extract_text, extract_with_playwright
 from app.api.v1.endpoints.summary import generate_summary
 from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analyze_text_frequency
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
@@ -26,9 +23,8 @@ from app.core.database import (
     get_document_by_url, get_document_by_retrieved_url, create_document, increment_views
 )
 from app.core.firebase import db
+from app.core.gemini import generate_summary
 
-from app.models.tos import ToSRequest
-from app.models.privacy import PrivacyRequest
 from app.models.summary import SummaryRequest, SummaryResponse
 from app.models.extract import ExtractRequest, ExtractResponse
 from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse, WordFrequency
@@ -88,8 +84,8 @@ async def save_document_to_db(
     document_type: str,
     document_content: str,
     analysis: Dict,
-    user_id: Optional[UUID] = None
-) -> Optional[UUID]:
+    user_id: Optional[str] = None  # Changed from UUID to str
+) -> Optional[str]:  # Changed return type from UUID to str
     """
     Save document to database after crawling.
     
@@ -102,7 +98,7 @@ async def save_document_to_db(
         user_id: Optional user ID for submission tracking.
         
     Returns:
-        UUID of created/existing document or None if operation fails.
+        String ID of created/existing document or None if operation fails.
     """
     # Handle binary content - sanitize before saving to prevent UTF-8 errors
     document_content = sanitize_text_for_db(document_content)
@@ -213,7 +209,7 @@ async def save_document_to_db(
         # If user_id is provided, create a submission record
         if user_id:
             submission_data = {
-                "user_id": str(user_id),
+                "user_id": user_id,
                 "document_id": document_id,
                 "created_at": datetime.now()
             }

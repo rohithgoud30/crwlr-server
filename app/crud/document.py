@@ -1,10 +1,9 @@
 from typing import Dict, Any, Optional, List, Union
-from uuid import UUID
 import logging
+from app.crud.firebase_base import FirebaseCRUDBase
+from app.core.database import db
 from datetime import datetime
 from google.cloud import firestore
-
-from app.crud.firebase_base import FirebaseCRUDBase
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -48,77 +47,115 @@ class DocumentCRUD(FirebaseCRUDBase):
             logger.error(f"Error getting document by retrieved URL and type: {str(e)}")
             return None
     
-    async def increment_views(self, id: Union[str, UUID]) -> Optional[Dict[str, Any]]:
-        """Increment the views counter for a document."""
+    async def increment_views(self, id: str) -> Optional[Dict[str, Any]]:
+        """Increment the view count for a document."""
+        if not self.collection or not id:
+            return None
+            
         try:
-            doc_id = str(id)
-            doc_ref = self.collection.document(doc_id)
+            # Get document reference
+            doc_ref = self.collection.document(str(id))
             
-            # Check if document exists
-            doc = doc_ref.get()
-            if not doc.exists:
+            # Use Firestore transaction to atomically increment views
+            transaction = db.transaction()
+            
+            @firestore.transactional
+            def increment_in_transaction(transaction, doc_ref):
+                doc = doc_ref.get(transaction=transaction)
+                if not doc.exists:
+                    return None
+                    
+                doc_data = doc.to_dict()
+                current_views = doc_data.get('views', 0)
+                transaction.update(doc_ref, {
+                    'views': current_views + 1,
+                    'updated_at': datetime.now()
+                })
+                
+                # Return updated document
+                updated_data = doc_data.copy()
+                updated_data['views'] = current_views + 1
+                updated_data['id'] = doc.id
+                return updated_data
+                
+            result = increment_in_transaction(transaction, doc_ref)
+            if result:
+                logger.info(f"Incremented views for document {id}")
+                return result
+            else:
+                logger.warning(f"Document {id} not found - could not increment views")
                 return None
-            
-            # Get current views count
-            doc_data = doc.to_dict()
-            current_views = doc_data.get("views", 0)
-            
-            # Increment views
-            doc_ref.update({
-                "views": current_views + 1,
-                "updated_at": datetime.now()
-            })
-            
-            # Get updated document
-            updated_doc = doc_ref.get()
-            result = updated_doc.to_dict()
-            result['id'] = doc_id
-            return result
+                
         except Exception as e:
-            logger.error(f"Error incrementing views: {str(e)}")
+            logger.error(f"Error incrementing views for document {id}: {str(e)}")
             return None
     
     async def search_documents(
-        self, 
-        query: str, 
+        self,
+        query: str,
         document_type: Optional[str] = None,
-        page: int = 1, 
+        page: int = 1,
         per_page: int = 10
     ) -> Dict[str, Any]:
         """
-        Search for documents by company name or URL.
-        Very basic implementation - in production would use a proper search engine.
+        Search for documents based on a text query.
+        
+        Args:
+            query: The search query to look for (will search in text, url, and company_name)
+            document_type: Optional filter by document_type (e.g. 'tos' or 'pp')
+            page: Page number for pagination (1-indexed)
+            per_page: Number of results per page
+        
+        Returns:
+            A dictionary containing search results and pagination information
         """
         try:
+            # Use .lower() for case-insensitive search
+            query_lower = query.lower()
+            
+            # Since we're using Firestore which doesn't have built-in full-text search,
+            # we need to fetch all documents and filter them manually
             filters = {}
             if document_type:
                 filters["document_type"] = document_type
                 
-            # Get all documents that match the filters
-            all_docs = await self.get_multi(skip=0, limit=1000, filters=filters)
+            # Get all documents matching the document_type filter (if any)
+            all_docs = await self.get_multi(limit=1000, filters=filters)  # Limit of 1000 to prevent extreme loads
             
-            # Filter locally for documents matching the query string
-            # This is not efficient for large collections - in production use a proper search engine
+            # Filter documents that match the query in any of the searchable fields
             matching_docs = []
             for doc in all_docs:
-                company_name = doc.get("company_name", "").lower()
-                url = doc.get("url", "").lower()
-                query_lower = query.lower()
-                
-                if query_lower in company_name or query_lower in url:
+                searchable_text = (
+                    (doc.get("raw_text", "") or "").lower() + 
+                    (doc.get("one_sentence_summary", "") or "").lower() + 
+                    (doc.get("hundred_word_summary", "") or "").lower() + 
+                    (doc.get("url", "") or "").lower() +
+                    (doc.get("company_name", "") or "").lower()
+                )
+                if query_lower in searchable_text:
                     matching_docs.append(doc)
             
-            # Manual pagination
-            total_count = len(matching_docs)
-            offset = (page - 1) * per_page
-            paged_docs = matching_docs[offset:offset+per_page]
+            # Calculate pagination
+            total = len(matching_docs)
+            total_pages = (total + per_page - 1) // per_page if total > 0 else 0
             
-            # Calculate pagination info
-            total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 0
+            # Ensure page is within bounds
+            if page < 1:
+                page = 1
+            if page > total_pages and total_pages > 0:
+                page = total_pages
             
+            # Get the slice for the current page
+            start_idx = (page - 1) * per_page
+            end_idx = min(start_idx + per_page, total)
+            
+            # Slice the results for the current page
+            items = matching_docs[start_idx:end_idx] if start_idx < total else []
+            
+            # Return paginated results
             return {
-                "items": paged_docs,
-                "total": total_count,
+                "items": items,
+                "total": total,
                 "page": page,
                 "per_page": per_page,
                 "total_pages": total_pages,
@@ -127,18 +164,10 @@ class DocumentCRUD(FirebaseCRUDBase):
             }
         except Exception as e:
             logger.error(f"Error searching documents: {str(e)}")
-            return {
-                "items": [],
-                "total": 0,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": 0,
-                "has_next": False,
-                "has_prev": False
-            }
+            return {"items": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0, "has_next": False, "has_prev": False}
     
-    async def get_popular_documents(self, limit: int = 10, document_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get most popular documents by views."""
+    async def get_popular_documents(self, limit: int = 5, document_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get most viewed documents."""
         try:
             query = self.collection
             
@@ -189,8 +218,12 @@ class DocumentCRUD(FirebaseCRUDBase):
             logger.error(f"Error getting recent documents: {str(e)}")
             return []
             
-    async def delete_document(self, id: Union[str, UUID]) -> bool:
+    async def delete_document(self, id: str) -> bool:
         """Delete a document by ID."""
+        if not self.collection:
+            logger.error("Firebase database not initialized")
+            return False
+            
         try:
             doc_id = str(id)
             doc_ref = self.collection.document(doc_id)
@@ -198,12 +231,12 @@ class DocumentCRUD(FirebaseCRUDBase):
             # Check if document exists
             doc = doc_ref.get()
             if not doc.exists:
-                logger.warning(f"Document {doc_id} not found for deletion")
+                logger.warning(f"Document {id} not found - cannot delete")
                 return False
-            
+                
             # Delete the document
             doc_ref.delete()
-            logger.info(f"Document {doc_id} deleted successfully")
+            logger.info(f"Document {id} deleted successfully")
             return True
         except Exception as e:
             logger.error(f"Error deleting document {id}: {str(e)}")
@@ -238,5 +271,5 @@ class DocumentCRUD(FirebaseCRUDBase):
                 "total_count": 0
             }
 
-# Create an instance
+# Create a global instance for reuse
 document_crud = DocumentCRUD() 

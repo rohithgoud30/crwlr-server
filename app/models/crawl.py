@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
-from uuid import UUID
 
 from app.models.wordfrequency import WordFrequency
 from app.models.textmining import TextMiningResults
@@ -18,7 +17,7 @@ class CrawlTosResponse(BaseModel):
     hundred_word_summary: Optional[str] = None
     text_mining: Optional[TextMiningResults] = None
     word_frequencies: Optional[List[WordFrequency]] = None
-    document_id: Optional[UUID] = None
+    document_id: Optional[str] = None
     success: bool
     message: str
     
@@ -42,7 +41,7 @@ class CrawlPrivacyResponse(BaseModel):
     hundred_word_summary: Optional[str] = None
     text_mining: Optional[TextMiningResults] = None
     word_frequencies: Optional[List[WordFrequency]] = None
-    document_id: Optional[UUID] = None
+    document_id: Optional[str] = None
     success: bool
     message: str
     

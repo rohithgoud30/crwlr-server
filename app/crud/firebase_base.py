@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, TypeVar, Generic, Union
-from uuid import UUID, uuid4
+from uuid import uuid4
 import logging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from firebase_admin import firestore
@@ -18,7 +18,7 @@ class FirebaseCRUDBase:
         self.collection_name = collection_name
         self.collection = db.collection(collection_name) if db else None
     
-    async def get(self, id: Union[str, UUID]) -> Optional[Dict[str, Any]]:
+    async def get(self, id: str) -> Optional[Dict[str, Any]]:
         """Get a document by ID."""
         if not self.collection:
             logger.error("Firebase not initialized")
@@ -98,7 +98,7 @@ class FirebaseCRUDBase:
             logger.error(f"Error creating document in {self.collection_name}: {str(e)}")
             return {}
     
-    async def update(self, id: Union[str, UUID], obj_in: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def update(self, id: str, obj_in: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update a document by ID."""
         if not self.collection:
             logger.error("Firebase not initialized")
@@ -130,7 +130,7 @@ class FirebaseCRUDBase:
             logger.error(f"Error updating document in {self.collection_name}: {str(e)}")
             return None
     
-    async def remove(self, id: Union[str, UUID]) -> Optional[Dict[str, Any]]:
+    async def remove(self, id: str) -> Optional[Dict[str, Any]]:
         """Delete a document by ID."""
         if not self.collection:
             logger.error("Firebase not initialized")
