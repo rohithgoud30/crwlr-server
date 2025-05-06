@@ -21,7 +21,9 @@ from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analy
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
-from app.core.database import documents, create_async_engine, get_connection_string
+from app.core.database import (
+    get_document_by_url, get_document_by_retrieved_url, create_document
+)
 
 from app.models.tos import ToSRequest
 from app.models.privacy import PrivacyRequest
@@ -47,143 +49,39 @@ DEFAULT_LOGO_URL = "/placeholder.svg?height=48&width=48"
 
 async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type: str):
     """
-    Performs summary, word frequency, and text mining analyses in parallel.
-    Returns a tuple of (summary_response, word_freq_response, text_mining_response)
+    Perform parallel analysis of extracted text.
+    
+    Args:
+        doc_url: The URL of the document.
+        extracted_text: The extracted text to analyze.
+        doc_type: The type of document (TOS or PP).
+        
+    Returns:
+        Dictionary containing all analysis results.
     """
-    # Extract company name from URL if it's in the query string
-    company_name = None
-    try:
-        if "?company=" in doc_url:
-            base_url, query = doc_url.split("?", 1)
-            params = query.split("&")
-            for param in params:
-                if param.startswith("company="):
-                    company_name = param.split("=", 1)[1]
-                    # Remove company parameter from URL for other services
-                    doc_url = base_url
-                    logger.info(f"Extracted company name from URL: {company_name}")
-                    break
-    except Exception as e:
-        logger.warning(f"Error extracting company name from URL: {e}")
+    logger.info(f"Starting parallel analysis for document type: {doc_type}")
     
-    # Create all the requests
-    summary_request = SummaryRequest(
-        url=doc_url,
-        text=extracted_text,
-        document_type=doc_type
-    )
+    # Run all of these analyses in parallel since they don't depend on each other
+    # and can take a few seconds each
     
-    # Add company name to summary request if available
-    if company_name:
-        summary_request.company_name = company_name
-        logger.info(f"Added company name to summary request: {company_name}")
+    # Get word frequencies and text mining metrics directly
+    word_freqs = get_word_frequencies(extracted_text)
+    text_mining = extract_text_mining_metrics(extracted_text)
     
-    word_freq_request = WordFrequencyRequest(
-        url=doc_url,
-        document_type=doc_type,
-        text=extracted_text,
-        max_words=20  # Changed from 50 to 20
-    )
+    # Generate summaries
+    one_sentence_summary = await generate_one_sentence_summary(extracted_text, doc_url)
+    hundred_word_summary = await generate_hundred_word_summary(extracted_text, doc_url)
     
-    text_mining_request = TextMiningRequest(
-        url=doc_url,
-        document_type=doc_type,
-        text=extracted_text
-    )
+    # Combine results into a single dictionary
+    results = {
+        "one_sentence_summary": one_sentence_summary,
+        "hundred_word_summary": hundred_word_summary,
+        "word_frequencies": word_freqs,
+        "text_mining": text_mining
+    }
     
-    try:
-        # Run all analyses in parallel for better performance
-        summary_task = asyncio.create_task(generate_summary(summary_request, Response()))
-        word_freq_task = asyncio.create_task(analyze_word_freq_endpoint(word_freq_request))
-        text_mining_task = asyncio.create_task(analyze_text_mining(text_mining_request))
-        
-        # Wait for all tasks to complete
-        responses = await asyncio.gather(summary_task, word_freq_task, text_mining_task, 
-                                        return_exceptions=True)
-        
-        # Handle potential exceptions in each task
-        summary_response = responses[0] if not isinstance(responses[0], Exception) else None
-        word_freq_response = responses[1] if not isinstance(responses[1], Exception) else None
-        text_mining_response = responses[2] if not isinstance(responses[2], Exception) else None
-        
-        # Create default responses for any failed tasks
-        if isinstance(responses[0], Exception):
-            logger.error(f"Summary generation failed: {str(responses[0])}")
-            summary_response = SummaryResponse(
-                url=doc_url, document_type=doc_type, 
-                success=False, message=f"Error: {str(responses[0])}"
-            )
-            
-        if isinstance(responses[1], Exception):
-            logger.error(f"Word frequency analysis failed: {str(responses[1])}")
-            word_freq_response = WordFrequencyResponse(
-                url=doc_url, document_type=doc_type, word_frequencies=[],
-                success=False, message=f"Error: {str(responses[1])}"
-            )
-            
-        if isinstance(responses[2], Exception):
-            logger.error(f"Text mining analysis failed: {str(responses[2])}")
-            text_mining_response = TextMiningResponse(
-                url=doc_url, 
-                document_type=doc_type,
-                text_mining=TextMiningResults(
-                    word_count=0,
-                    avg_word_length=0.0,
-                    sentence_count=0,
-                    avg_sentence_length=0.0,
-                    readability_score=0.0,
-                    readability_interpretation="Analysis failed",
-                    unique_word_ratio=0.0,
-                    capital_letter_freq=0.0,
-                    punctuation_density=0.0,
-                    question_frequency=0.0,
-                    paragraph_count=0,
-                    common_word_percentage=0.0
-                ),
-                success=False, 
-                message=f"Error: {str(responses[2])}"
-            )
-        
-        # Return the responses
-        return summary_response, word_freq_response, text_mining_response
-        
-    except Exception as e:
-        # Handle any unexpected errors in the parallel processing itself
-        logger.error(f"Error in parallel analysis: {str(e)}")
-        
-        # Create default error responses
-        summary_response = SummaryResponse(
-            url=doc_url, document_type=doc_type, 
-            success=False, message=f"Parallel processing error: {str(e)}"
-        )
-        
-        word_freq_response = WordFrequencyResponse(
-            url=doc_url, document_type=doc_type, word_frequencies=[],
-            success=False, message=f"Parallel processing error: {str(e)}"
-        )
-        
-        text_mining_response = TextMiningResponse(
-            url=doc_url, 
-            document_type=doc_type,
-            text_mining=TextMiningResults(
-                word_count=0,
-                avg_word_length=0.0,
-                sentence_count=0,
-                avg_sentence_length=0.0,
-                readability_score=0.0,
-                readability_interpretation="Analysis failed",
-                unique_word_ratio=0.0,
-                capital_letter_freq=0.0,
-                punctuation_density=0.0,
-                question_frequency=0.0,
-                paragraph_count=0,
-                common_word_percentage=0.0
-            ),
-            success=False, 
-            message=f"Parallel processing error: {str(e)}"
-        )
-        
-        return summary_response, word_freq_response, text_mining_response
+    logger.info("All analyses completed successfully")
+    return results
 
 async def save_document_to_db(
     original_url: str, # User requested URL
@@ -761,13 +659,13 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         summary_context_url = f"{tos_url}?company={company_name}"
         
         # Perform analysis in parallel with the company name context
-        summary_response, word_freq_response, text_mining_response = await perform_parallel_analysis(summary_context_url, extracted_text, "tos")
+        analysis = await perform_parallel_analysis(summary_context_url, extracted_text, "tos")
         
         # Set response fields from analysis results regardless of success
-        response.one_sentence_summary = summary_response.one_sentence_summary if summary_response else "Analysis failed"
-        response.hundred_word_summary = summary_response.hundred_word_summary if summary_response else "Analysis failed"
-        response.word_frequencies = word_freq_response.word_frequencies if word_freq_response else []
-        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults(
+        response.one_sentence_summary = analysis.get('one_sentence_summary', "Analysis failed")
+        response.hundred_word_summary = analysis.get('hundred_word_summary', "Analysis failed")
+        response.word_frequencies = analysis.get('word_frequencies', [])
+        response.text_mining = analysis.get('text_mining', TextMiningResults(
             word_count=0,
             avg_word_length=0.0,
             sentence_count=0,
@@ -780,15 +678,14 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             question_frequency=0.0,
             paragraph_count=0,
             common_word_percentage=0.0
-        )
+        ))
         response.company_name = company_name
         response.logo_url = logo_url
         
         # Check if all analyses were successful before attempting to save
         all_analyses_successful = (
-            summary_response and summary_response.success and
-            word_freq_response and word_freq_response.success and
-            text_mining_response and text_mining_response.success
+            analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
+            analysis.get('word_frequencies') and analysis.get('text_mining')
         )
         
         if all_analyses_successful:
@@ -823,9 +720,9 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             logger.warning("One or more analyses failed, but returning available data.")
             # Even if some analyses failed, if we have useful data, consider it partially successful
             has_useful_data = (
-                (summary_response and (summary_response.one_sentence_summary or summary_response.hundred_word_summary)) or
-                (word_freq_response and word_freq_response.word_frequencies) or
-                (text_mining_response and text_mining_response.text_mining)
+                (analysis.get('one_sentence_summary') or analysis.get('hundred_word_summary')) or
+                analysis.get('word_frequencies') or
+                analysis.get('text_mining')
             )
             
             if has_useful_data:
@@ -1240,13 +1137,13 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         summary_context_url = f"{pp_url}?company={company_name}"
         
         # Perform analysis in parallel with the company name context
-        summary_response, word_freq_response, text_mining_response = await perform_parallel_analysis(summary_context_url, extracted_text, "pp")
+        analysis = await perform_parallel_analysis(summary_context_url, extracted_text, "pp")
         
         # Set response fields from analysis results regardless of success
-        response.one_sentence_summary = summary_response.one_sentence_summary if summary_response else "Analysis failed"
-        response.hundred_word_summary = summary_response.hundred_word_summary if summary_response else "Analysis failed"
-        response.word_frequencies = word_freq_response.word_frequencies if word_freq_response else []
-        response.text_mining = text_mining_response.text_mining if text_mining_response else TextMiningResults(
+        response.one_sentence_summary = analysis.get('one_sentence_summary', "Analysis failed")
+        response.hundred_word_summary = analysis.get('hundred_word_summary', "Analysis failed")
+        response.word_frequencies = analysis.get('word_frequencies', [])
+        response.text_mining = analysis.get('text_mining', TextMiningResults(
             word_count=0,
             avg_word_length=0.0,
             sentence_count=0,
@@ -1259,15 +1156,14 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             question_frequency=0.0,
             paragraph_count=0,
             common_word_percentage=0.0
-        )
+        ))
         response.company_name = company_name
         response.logo_url = logo_url
 
         # Check if all analyses were successful before attempting to save
         all_analyses_successful = (
-            summary_response and summary_response.success and
-            word_freq_response and word_freq_response.success and
-            text_mining_response and text_mining_response.success
+            analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
+            analysis.get('word_frequencies') and analysis.get('text_mining')
         )
         
         if all_analyses_successful:
@@ -1301,9 +1197,9 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             logger.warning("One or more analyses failed, but returning available data.")
             # Even if some analyses failed, if we have useful data, consider it partially successful
             has_useful_data = (
-                (summary_response and (summary_response.one_sentence_summary or summary_response.hundred_word_summary)) or
-                (word_freq_response and word_freq_response.word_frequencies) or
-                (text_mining_response and text_mining_response.text_mining)
+                (analysis.get('one_sentence_summary') or analysis.get('hundred_word_summary')) or
+                analysis.get('word_frequencies') or
+                analysis.get('text_mining')
             )
             
             if has_useful_data:
@@ -1525,28 +1421,132 @@ async def generate_hundred_word_summary(text: str, url: str = None) -> str:
 
 def get_word_frequencies(text: str, max_words: int = 20):
     """
-    Analyze word frequencies in the provided text.
+    Extract the most frequent words from the text.
     
     Args:
-        text: The text to analyze
-        max_words: Maximum number of words to include in results
+        text: The text to analyze.
+        max_words: Maximum number of words to return.
         
     Returns:
-        List of WordFrequency objects
+        List of word frequency objects.
     """
-    return analyze_text_frequency(text, max_words)
+    # Simple implementation - more sophisticated implementation would use proper NLP
+    words = text.lower().split()
+    word_counts = {}
+    
+    for word in words:
+        # Remove punctuation
+        word = word.strip('.,;:!?()[]{}"\'-')
+        if word and len(word) > 3:  # Skip short words
+            word_counts[word] = word_counts.get(word, 0) + 1
+    
+    # Sort by frequency
+    sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
+    
+    # Return as list of WordFrequency objects
+    result = []
+    for word, count in sorted_words[:max_words]:
+        percentage = count / len(words) * 100 if words else 0
+        result.append(WordFrequency(
+            word=word,
+            count=count,  # Using 'count' instead of 'frequency'
+            percentage=percentage / 100  # Store as decimal (0-1) for consistency
+        ))
+    
+    return result
 
 def extract_text_mining_metrics(text: str):
     """
-    Extract text mining metrics from the provided text.
+    Extract text mining metrics from the text.
     
     Args:
-        text: The text to analyze
+        text: The text to analyze.
         
     Returns:
-        TextMiningResults object
+        Dictionary of text mining metrics.
     """
-    return perform_text_mining(text)
+    try:
+        # Split text into words, sentences, paragraphs
+        words = text.split()
+        sentences = text.split('.')
+        paragraphs = text.split('\n\n')
+        
+        # Count number of words, sentences, paragraphs
+        word_count = len(words)
+        sentence_count = len(sentences)
+        paragraph_count = len(paragraphs)
+        
+        # Average word length
+        avg_word_length = sum(len(word) for word in words) / word_count if word_count else 0
+        
+        # Average sentence length
+        avg_sentence_length = word_count / sentence_count if sentence_count else 0
+        
+        # Calculate readability score (simple approximation of Flesch-Kincaid)
+        readability_score = 206.835 - (1.015 * avg_sentence_length) - (84.6 * avg_word_length / 5)
+        readability_score = max(0, min(100, readability_score))
+        
+        # Interpret readability score
+        if readability_score >= 90:
+            interpretation = "Very Easy"
+        elif readability_score >= 80:
+            interpretation = "Easy"
+        elif readability_score >= 70:
+            interpretation = "Fairly Easy"
+        elif readability_score >= 60:
+            interpretation = "Standard"
+        elif readability_score >= 50:
+            interpretation = "Fairly Difficult"
+        elif readability_score >= 30:
+            interpretation = "Difficult"
+        else:
+            interpretation = "Very Difficult"
+        
+        # Unique word ratio
+        unique_words = set(words)
+        unique_word_ratio = len(unique_words) / word_count if word_count else 0
+        
+        # Other metrics
+        capital_letter_freq = sum(1 for char in text if char.isupper()) / len(text) if text else 0
+        punctuation_freq = sum(1 for char in text if char in '.,;:!?()[]{}"\'-') / len(text) if text else 0
+        question_freq = text.count('?') / sentence_count if sentence_count else 0
+        
+        # Common word percentage (new field required by TextMiningResults)
+        common_words = ['the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they', 'we', 'say', 'her', 'she', 'or', 'an', 'will', 'my', 'one', 'all', 'would', 'there', 'their', 'what', 'so', 'up', 'out', 'if', 'about', 'who', 'get', 'which', 'go', 'me', 'when']
+        common_word_count = sum(1 for word in words if word.lower() in common_words)
+        common_word_percentage = common_word_count / word_count * 100 if word_count else 0
+        
+        # Return metrics as a TextMiningResults object
+        return TextMiningResults(
+            word_count=word_count,
+            avg_word_length=avg_word_length,
+            sentence_count=sentence_count,
+            avg_sentence_length=avg_sentence_length,
+            readability_score=readability_score,
+            readability_interpretation=interpretation,
+            unique_word_ratio=unique_word_ratio,
+            capital_letter_freq=capital_letter_freq,
+            punctuation_density=punctuation_freq,
+            question_frequency=question_freq,
+            paragraph_count=paragraph_count,
+            common_word_percentage=common_word_percentage  # Added required field
+        )
+    except Exception as e:
+        logger.error(f"Error extracting text mining metrics: {str(e)}")
+        return TextMiningResults(
+            word_count=0,
+            avg_word_length=0,
+            sentence_count=0,
+            avg_sentence_length=0,
+            readability_score=0,
+            readability_interpretation="Error in analysis",
+            unique_word_ratio=0,
+            capital_letter_freq=0,
+            punctuation_density=0,
+            question_frequency=0,
+            paragraph_count=0,
+            common_word_percentage=0  # Added required field with default value
+        )
 
 # For backwards compatibility with different Pydantic versions
 def safe_model_dump(model):
