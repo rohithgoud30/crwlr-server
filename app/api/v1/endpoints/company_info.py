@@ -1100,9 +1100,9 @@ def extract_company_name_from_domain(domain: str) -> str:
         # Handle very short names (just use as is, capitalized)
         if len(company) <= 2:
             return company.upper()
-            
-        # Format company name (capitalize first letter of each word)
-        company_name = string.capwords(company.replace('-', ' ').replace('_', ' '))
+        
+        # Simple approach: replace hyphens with spaces and capitalize first letter
+        company_name = company.replace('-', ' ').replace('_', ' ').capitalize()
         
         return company_name
     except Exception as e:
