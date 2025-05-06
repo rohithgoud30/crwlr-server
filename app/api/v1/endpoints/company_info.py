@@ -152,122 +152,156 @@ async def extract_app_store_info(page) -> Tuple[Optional[str], Optional[str]]:
     try:
         logger.info("Extracting info from App Store page")
         
-        # Extract app name from title element
+        # Extract app name from title element - enhanced with better selector targeting
         app_name = await page.evaluate("""
             () => {
-                // Try the product header title first (most reliable)
-                const titleEl = document.querySelector('.product-header__title, .app-header__title');
-                if (titleEl) {
-                    // Get only the text content without any child elements (like badges)
+                // First try to get the app name from the most specific selector
+                const appTitle = document.querySelector('h1.product-header__title');
+                if (appTitle) {
+                    // Get only text nodes (exclude badges and other elements)
                     let title = '';
-                    for (const node of titleEl.childNodes) {
+                    for (const node of appTitle.childNodes) {
                         if (node.nodeType === Node.TEXT_NODE) {
                             title += node.textContent;
                         }
                     }
-                    return title.trim();
+                    const cleanTitle = title.trim();
+                    if (cleanTitle && cleanTitle !== 'Apps') {
+                        return cleanTitle;
+                    }
                 }
                 
-                // Try dedicated h1 with app name
-                const h1 = document.querySelector('h1.product-header__title');
-                if (h1) {
-                    let title = '';
-                    for (const node of h1.childNodes) {
-                        if (node.nodeType === Node.TEXT_NODE) {
-                            title += node.textContent;
+                // Try other selectors for app titles
+                const titleSelectors = [
+                    '.product-header__title', 
+                    '.app-header__title',
+                    'h1[itemprop="name"]'
+                ];
+                
+                for (const selector of titleSelectors) {
+                    const titleEl = document.querySelector(selector);
+                    if (titleEl) {
+                        // Extract text only from the title element, excluding child elements
+                        let title = '';
+                        for (const node of titleEl.childNodes) {
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                title += node.textContent;
+                            }
+                        }
+                        const cleanTitle = title.trim();
+                        if (cleanTitle && cleanTitle !== 'Apps') {
+                            return cleanTitle;
                         }
                     }
-                    return title.trim();
                 }
                 
-                // Fallbacks
-                // 1. Try meta title
-                const metaTitle = document.querySelector('meta[name="apple:title"]');
-                if (metaTitle && metaTitle.content) {
-                    return metaTitle.content.trim();
+                // Try to extract from the URL - often contains app name
+                const pathParts = window.location.pathname.split('/');
+                // App name is typically after /app/ in the URL or before /id
+                const appIndex = pathParts.findIndex(part => part === 'app');
+                if (appIndex >= 0 && appIndex < pathParts.length - 1) {
+                    const appNameFromPath = pathParts[appIndex + 1]
+                        .split('-')
+                        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                        .join(' ');
+                    if (appNameFromPath && appNameFromPath.length > 1) {
+                        return appNameFromPath;
+                    }
                 }
                 
-                // 2. Try open graph title
-                const ogTitle = document.querySelector('meta[property="og:title"]');
-                if (ogTitle && ogTitle.content) {
-                    const title = ogTitle.content.replace(' on the App Store', '');
-                    return title.trim();
+                // Try extracting name from id part of URL
+                const idPart = pathParts.find(part => part.startsWith('id'));
+                if (idPart) {
+                    // Try to find the app name from the developer section
+                    const developerSection = document.querySelector('.app-privacy');
+                    if (developerSection) {
+                        const appName = developerSection.querySelector('h2, h3, .section__headline');
+                        if (appName && appName.textContent) {
+                            const nameText = appName.textContent.trim();
+                            if (nameText && nameText !== 'App Privacy') {
+                                return nameText;
+                            }
+                        }
+                        
+                        // Try to get developer name - better than "Apps"
+                        const developerNameSpan = developerSection.querySelector('.app-privacy__developer-name');
+                        if (developerNameSpan) {
+                            const devName = developerNameSpan.textContent.trim();
+                            return devName + ' App'; // Add "App" to make it clear this is the developer name
+                        }
+                    }
                 }
                 
-                // 3. Use page title
+                // Try meta tags
+                const metaTags = [
+                    'meta[name="apple:name"]',
+                    'meta[property="og:title"]',
+                    'meta[name="title"]'
+                ];
+                
+                for (const selector of metaTags) {
+                    const meta = document.querySelector(selector);
+                    if (meta && meta.content) {
+                        const title = meta.content.replace(' on the App Store', '').trim();
+                        if (title && title !== 'Apps') {
+                            return title;
+                        }
+                    }
+                }
+                
+                // Last resort - use document title but clean it
                 if (document.title) {
-                    const title = document.title.replace(' on the App Store', '');
-                    return title.trim();
+                    const title = document.title
+                        .replace(' on the App Store', '')
+                        .replace('‎', '') // Remove invisible character
+                        .trim();
+                    if (title && title !== 'Apps') {
+                        return title;
+                    }
                 }
                 
-                return null;
-            }
-        """)
-        
-        # Make sure we're not returning just "Apps" as the name
-        if app_name == "Apps":
-            app_name = await page.evaluate("""
-                () => {
-                    // Try to find a better app name if we got "Apps"
-                    
-                    // Check if there's an app name in the URL path
-                    const pathParts = window.location.pathname.split('/');
-                    // App name is usually after /app/ in the URL
-                    const appNameIndex = pathParts.indexOf('app');
-                    if (appNameIndex >= 0 && appNameIndex < pathParts.length - 1) {
-                        // Convert app-name-with-dashes to App Name With Dashes
-                        const nameFromUrl = pathParts[appNameIndex + 1]
+                // If nothing else works, try to extract from URL directly
+                if (window.location.pathname.includes('/app/')) {
+                    const appSegment = window.location.pathname.split('/app/')[1].split('/')[0];
+                    if (appSegment) {
+                        return appSegment
                             .split('-')
                             .map(word => word.charAt(0).toUpperCase() + word.slice(1))
                             .join(' ');
-                        if (nameFromUrl && nameFromUrl.length > 1) {
-                            return nameFromUrl;
-                        }
                     }
-                    
-                    // Try other metadata elements
-                    const developerInfo = document.querySelector('.product-header__identity');
-                    if (developerInfo) {
-                        return developerInfo.textContent.trim();
-                    }
-                    
-                    // Try app subtitle
-                    const subtitle = document.querySelector('.product-header__subtitle');
-                    if (subtitle) {
-                        return subtitle.textContent.trim();
-                    }
-                    
-                    return document.title.replace(' on the App Store', '').trim();
                 }
-            """)
+                
+                return "Unknown App";
+            }
+        """)
         
-        # Extract logo URL
+        # Extract logo URL with enhanced logic
         logo_url = await page.evaluate("""
             () => {
-                // Try multiple selectors for app icon
-                const selectors = [
-                    // Primary selectors for app icon
+                // Try multiple selectors for app icon with priority
+                const iconSelectors = [
+                    // App icon specific selectors
                     '.we-artwork--ios-app-icon source[srcset]',
                     '.product-hero__artwork source[srcset]',
                     '.we-artwork--ios-app-icon img[src]',
                     '.product-hero__artwork img[src]',
-                    
-                    // Fallbacks
                     'picture.we-artwork--ios-app-icon source',
+                    '.ember-view .we-artwork--downloaded img',
+                    
+                    // Fallbacks to meta tags
                     'meta[property="og:image"]',
-                    'link[rel="apple-touch-icon"]',
-                    '.ember-view .we-artwork--downloaded img'
+                    'link[rel="apple-touch-icon"]'
                 ];
                 
-                for (const selector of selectors) {
+                // Find the first matching element
+                for (const selector of iconSelectors) {
                     const elements = document.querySelectorAll(selector);
                     for (const el of elements) {
-                        // Handle srcset (preferred for high quality)
+                        // Try srcset first for better quality
                         if (el.srcset) {
-                            // Parse srcset to get the largest image
                             const srcsetParts = el.srcset.split(',').map(s => s.trim());
                             if (srcsetParts.length > 0) {
-                                // Find the image with the largest width
+                                // Find the image with the largest width for best quality
                                 let largestWidth = 0;
                                 let largestUrl = '';
                                 
@@ -286,26 +320,39 @@ async def extract_app_store_info(page) -> Tuple[Optional[str], Optional[str]]:
                                     return largestUrl;
                                 }
                                 
-                                // If we couldn't parse widths, just use the last image
+                                // If we couldn't parse widths, use the last image
                                 const lastSrc = srcsetParts[srcsetParts.length - 1];
                                 return lastSrc.split(' ')[0]; // Get URL part only
                             }
                         }
                         
-                        // Try src for images
-                        if (el.src && el.src !== '/assets/artwork/1x1-42817eea7ade52607a760cbee00d1495.gif') {
+                        // Try src attribute
+                        if (el.src && !el.src.includes('1x1-42817eea7ade52607a760cbee00d1495.gif')) {
                             return el.src;
                         }
                         
-                        // Try content for meta tags
+                        // Try content attribute (for meta tags)
                         if (el.getAttribute('content')) {
                             return el.getAttribute('content');
                         }
                         
-                        // Try href for link tags
+                        // Try href attribute (for link tags)
                         if (el.getAttribute('href')) {
                             return el.getAttribute('href');
                         }
+                    }
+                }
+                
+                // Last resort - try to find any app icon
+                const imgTags = document.querySelectorAll('img');
+                for (const img of imgTags) {
+                    if (img.src && (
+                        img.src.includes('AppIcon') || 
+                        img.src.includes('app-icon') || 
+                        img.src.includes('app_icon') ||
+                        (img.alt && img.alt.toLowerCase().includes('icon'))
+                    )) {
+                        return img.src;
                     }
                 }
                 
@@ -1159,13 +1206,49 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
                         message="Invalid URL extracted from search engine result"
                     )
             else:
-                return CompanyInfoResponse(
-                    url=url,
-                    company_name=None,
-                    logo_url=None,
-                    success=False,
-                    message="URL appears to be a search engine result, unable to extract actual URL"
-                )
+                # If we can't extract a valid URL, attempt to analyze the search result page
+                # This is especially important for Yahoo redirect URLs with privacy policies
+                logger.info("Couldn't extract actual URL, will attempt to analyze the search results page")
+                
+                # Try to extract the company name from the URL path or query
+                company_name = None
+                try:
+                    parsed = urlparse(url)
+                    # Look for common indicators of Yahoo search
+                    if any(term in parsed.netloc for term in ["yahoo", "search"]):
+                        # Check query parameters for hints about the content
+                        if parsed.query:
+                            query_dict = {k: v[0] for k, v in parse_qs(parsed.query).items() if v}
+                            # Look for search query parameter which might indicate what was searched
+                            search_params = ["p", "q", "query", "text", "s"]
+                            for param in search_params:
+                                if param in query_dict:
+                                    search_text = query_dict[param]
+                                    # Extract potential company name from search query
+                                    words = search_text.split()
+                                    if len(words) > 0:
+                                        # Use the first word as potential company name
+                                        company_name = words[0].capitalize()
+                except Exception as e:
+                    logger.warning(f"Error analyzing search URL: {e}")
+                
+                # If we found a company name from the URL, use it
+                if company_name:
+                    return CompanyInfoResponse(
+                        url=url,
+                        company_name=company_name,
+                        logo_url="/placeholder.svg?height=48&width=48",  # Default placeholder
+                        success=True,
+                        message="Extracted limited information from search engine URL"
+                    )
+                else:
+                    return CompanyInfoResponse(
+                        url=url,
+                        company_name="Unknown",
+                        logo_url="/placeholder.svg?height=48&width=48",
+                        success=False,
+                        message="URL appears to be a search engine result, unable to extract information"
+                    )
         
         # If this is an App Store or Play Store URL, use specialized extraction
         if is_app_store_url(sanitized_url) or is_play_store_url(sanitized_url):
@@ -1196,6 +1279,16 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
         logger.error(f"Error extracting company info: {str(e)}")
         
         # Even in error case, extract company name from domain if possible
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+            if domain:
+                company_name = extract_company_name_from_domain(domain)
+            else:
+                company_name = "Unknown"
+        except Exception:
+            company_name = "Unknown"
+            
         if hasattr(request, 'logo_url') and request.logo_url:
             return CompanyInfoResponse(
                 url=url,
@@ -1208,7 +1301,7 @@ async def get_company_info(request: CompanyInfoRequest) -> CompanyInfoResponse:
             return CompanyInfoResponse(
                 url=url,
                 company_name=company_name,
-                logo_url=logo_url,  # This will be either a favicon or placeholder
+                logo_url="/placeholder.svg?height=48&width=48",  # Default placeholder
                 success=False,
                 message=f"Error extracting company info: {str(e)}"
             ) 

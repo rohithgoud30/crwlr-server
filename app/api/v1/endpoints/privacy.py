@@ -1,5 +1,5 @@
 import random
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, unquote
 import logging
 from typing import List, Optional, Union, Any
 import asyncio
@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from playwright.async_api import async_playwright, Page
 
 from app.models.privacy import PrivacyRequest, PrivacyResponse
+from app.api.v1.endpoints.company_info import is_app_store_url, is_play_store_url, is_search_engine_url
 
 async def click_and_wait_for_navigation(page, element, timeout=2000):
     """Click an element and wait for navigation, with optimized timeout."""
@@ -362,18 +363,82 @@ async def extract_app_store_privacy_link(page):
             return None
             
         print("✅ Detected Apple App Store page, extracting privacy policy link from HTML section")
-        # Use only the <section class="app-privacy"> HTML to find the developer's policy link
+        
+        # Extract developer's privacy policy from the app-privacy section
         privacy_link = await page.evaluate("""
             () => {
-                const section = document.querySelector('section.app-privacy');
-                if (!section) return null;
-                const link = section.querySelector('a[href*="privacy"]');
-                return (link && link.href) ? link.href : null;
+                // Look specifically for the app-privacy section that contains developer's privacy policy
+                const appPrivacySection = document.querySelector('section.app-privacy');
+                if (!appPrivacySection) {
+                    console.log("No app-privacy section found");
+                    return null;
+                }
+                
+                // Look for the link to developer's privacy policy inside this section
+                // This targets the specific structure: "developer's privacy policy" link
+                const privacyPolicyLink = appPrivacySection.querySelector('a[href*="privacy"]');
+                if (privacyPolicyLink && privacyPolicyLink.href) {
+                    console.log("Found developer's privacy policy link:", privacyPolicyLink.href);
+                    return privacyPolicyLink.href;
+                }
+                
+                // Alternative approach: look for any link with privacy-related text inside the section
+                const allLinks = Array.from(appPrivacySection.querySelectorAll('a[href]'));
+                const privacyLinks = allLinks.filter(link => {
+                    const href = link.href.toLowerCase();
+                    const text = link.textContent.toLowerCase();
+                    return href.includes('privacy') || 
+                           text.includes('privacy') || 
+                           href.includes('policy') || 
+                           text.includes('policy');
+                });
+                
+                if (privacyLinks.length > 0) {
+                    console.log("Found privacy link through alternative approach:", privacyLinks[0].href);
+                    return privacyLinks[0].href;
+                }
+                
+                console.log("No privacy policy link found in app-privacy section");
+                return null;
             }
         """)
+        
         if privacy_link:
             print(f"🍏 Found privacy policy link in App Store HTML section: {privacy_link}")
             return privacy_link
+            
+        # Try to find developer name and construct a likely privacy policy URL
+        developer_info = await page.evaluate("""
+            () => {
+                // Try to find the developer name from the app-privacy section
+                const appPrivacySection = document.querySelector('section.app-privacy');
+                if (appPrivacySection) {
+                    const developerNameSpan = appPrivacySection.querySelector('.app-privacy__developer-name');
+                    if (developerNameSpan) {
+                        return {
+                            name: developerNameSpan.textContent.trim(),
+                            found: true
+                        };
+                    }
+                }
+                
+                // Try other common locations for developer name
+                const developerLink = document.querySelector('a[href*="developer/id"]');
+                if (developerLink) {
+                    return {
+                        name: developerLink.textContent.trim(),
+                        found: true
+                    };
+                }
+                
+                return { found: false };
+            }
+        """)
+        
+        if developer_info["found"]:
+            print(f"Found developer name: {developer_info['name']}, but couldn't find direct privacy policy link")
+            # We could potentially use a search engine fallback with the developer name here
+            
         # Fail immediately if not found in the designated HTML snippet
         print("❌ No privacy policy link found in App Store HTML section")
         return None
@@ -702,20 +767,152 @@ async def extract_play_store_privacy_link(page):
 @router.post("/privacy", response_model=PrivacyResponse)
 async def find_privacy_policy(request: PrivacyRequest) -> PrivacyResponse:
     """
-    Find the Privacy Policy URL for a given website.
+    Find privacy policy URL for the given website.
     """
-    logger.info(f"Processing request for URL: {request.url}")
-    start_time = time.time()
-    
     playwright = None
     browser = None
     browser_context = None
     page = None
     
     try:
-        # Validate and normalize URL
         url = request.url.strip()
+        from_store = request.from_store if hasattr(request, 'from_store') else False
+        print(f"\n------------------------------------------------------------")
+        print(f"PRIVACY POLICY REQUEST: {url}")
+        print(f"From store: {from_store}")
+        print(f"------------------------------------------------------------\n")
         
+        # Sanitize URL
+        url = sanitize_url(url)
+        if not url:
+            return PrivacyResponse(
+                url=request.url,
+                pp_url=None,
+                success=False,
+                message="Invalid URL format",
+                method_used="invalid_url"
+            )
+        
+        # Extract domain for later use
+        domain = urlparse(url).netloc
+        
+        # Setup browser
+        playwright, browser, browser_context = await setup_browser(playwright)
+        page = await browser_context.new_page()
+
+        # Special handling for App Store and Play Store
+        if is_app_store_url(url):
+            print("🍎 Detected Apple App Store URL")
+            # Navigate to the page
+            success, _, _ = await navigate_with_retry(page, url)
+            if not success:
+                return handle_navigation_failure(url)
+                
+            # Try to extract privacy policy directly from the App Store page
+            app_store_pp = await extract_app_store_privacy_link(page)
+            if app_store_pp:
+                print(f"✅ Successfully extracted privacy policy from App Store page: {app_store_pp}")
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=app_store_pp,
+                    success=True,
+                    message="Found privacy policy on App Store page",
+                    method_used="app_store_direct"
+                )
+                
+            # If direct extraction failed but we know this is App Store, try to get the developer name
+            developer_name = await page.evaluate("""
+                () => {
+                    // Try to find the developer name from the app-privacy section
+                    const appPrivacySection = document.querySelector('section.app-privacy');
+                    if (appPrivacySection) {
+                        const developerNameSpan = appPrivacySection.querySelector('.app-privacy__developer-name');
+                        if (developerNameSpan) {
+                            return developerNameSpan.textContent.trim();
+                        }
+                    }
+                    
+                    // Try other common locations for developer name
+                    const developerLink = document.querySelector('a[href*="developer/id"]');
+                    if (developerLink) {
+                        return developerLink.textContent.trim();
+                    }
+                    
+                    // Last resort - try other developer indicators
+                    const developerInfo = document.querySelector('.information-list__item__definition');
+                    if (developerInfo) {
+                        return developerInfo.textContent.trim();
+                    }
+                    
+                    return null;
+                }
+            """)
+            
+            if developer_name:
+                print(f"Found developer name: {developer_name}")
+                # Try a search with the developer name
+                search_url = f"https://www.google.com/search?q={developer_name}+privacy+policy"
+                print(f"Trying search with developer name: {search_url}")
+                
+                try:
+                    # Navigate to the search page
+                    await page.goto(search_url, wait_until="domcontentloaded", timeout=10000)
+                    # Extract top search result
+                    search_result = await page.evaluate("""
+                        () => {
+                            const results = Array.from(document.querySelectorAll('a[href]'))
+                                .filter(a => {
+                                    const href = a.href.toLowerCase();
+                                    return href.includes('privacy') && 
+                                           !href.includes('google.com') &&
+                                           !href.includes('support.apple.com') &&
+                                           !href.includes('apple.com/legal/privacy');
+                                });
+                            return results.length > 0 ? results[0].href : null;
+                        }
+                    """)
+                    
+                    if search_result:
+                        print(f"Found developer privacy policy via search: {search_result}")
+                        return PrivacyResponse(
+                            url=url,
+                            pp_url=search_result,
+                            success=True,
+                            message=f"Found privacy policy for developer '{developer_name}' via search",
+                            method_used="developer_search"
+                        )
+                except Exception as e:
+                    print(f"Error during developer name search: {e}")
+            
+            # Fallback to search engine methods if direct App Store methods fail
+            print("Direct App Store methods failed, falling back to search engines...")
+        
+        elif is_play_store_url(url):
+            print("🤖 Detected Google Play Store URL")
+            # Navigate to the page
+            success, _, _ = await navigate_with_retry(page, url)
+            if not success:
+                return handle_navigation_failure(url)
+                
+            # Try to extract privacy policy directly from the Play Store page
+            play_store_pp = await extract_play_store_privacy_link(page)
+            if play_store_pp:
+                print(f"✅ Successfully extracted privacy policy from Play Store page: {play_store_pp}")
+                return PrivacyResponse(
+                    url=url,
+                    pp_url=play_store_pp,
+                    success=True,
+                    message="Found privacy policy on Play Store page",
+                    method_used="play_store_direct"
+                )
+                
+            # Fallback to regular methods if direct Play Store methods fail
+            print("Direct Play Store methods failed, falling back to regular methods...")
+        
+        # Continue with normal privacy policy extraction for non-store URLs or if store methods failed
+        # ... rest of the existing find_privacy_policy function below ...
+
+        # Validate and normalize URL
         sanitized_url = sanitize_url(url)
         if not sanitized_url:
             logger.warning(f"Invalid URL provided: {url}")
@@ -2922,6 +3119,32 @@ async def yahoo_search_fallback(domain, page):
                         if (snippetLower.includes('privacy policy') || snippetLower.includes('privacy notice'))
                             score += 30;
                         
+                        // Penalties for certain URLs
+                        // Avoid redirecting Yahoo searches back to our own process
+                        if (urlLower.includes('r.search.yahoo.com')) {
+                            // Try to extract the real destination from the RU parameter
+                            try {
+                                const searchParams = new URLSearchParams(new URL(url).search);
+                                const ruParam = searchParams.get('RU');
+                                if (ruParam) {
+                                    const decodedUrl = decodeURIComponent(ruParam);
+                                    // If decoded URL looks good, score it instead
+                                    if (decodedUrl.startsWith('http')) {
+                                        const decodedLower = decodedUrl.toLowerCase();
+                                        if (decodedLower.includes('privacy')) {
+                                            // Modify score based on the actual URL
+                                            if (decodedLower.includes('privacy-policy') || decodedLower.includes('privacy_policy'))
+                                                score += 40;
+                                            else if (decodedLower.includes('privacy'))
+                                                score += 30;
+                                        }
+                                    }
+                                }
+                            } catch(e) {
+                                // Continue with the search result if extraction fails
+                            }
+                        }
+                        
                         return { title, url, snippet, score };
                     })
                     .filter(result => result !== null)
@@ -2954,10 +3177,32 @@ async def yahoo_search_fallback(domain, page):
                     
                 best_result = search_results[result_index]["url"]
                 
+                # Check if this is a Yahoo redirect URL and extract the real URL if possible
+                if "r.search.yahoo.com" in best_result:
+                    print(f"Found Yahoo redirect URL: {best_result}")
+                    try:
+                        parsed_url = urlparse(best_result)
+                        query_params = parse_qs(parsed_url.query)
+                        
+                        # Try several parameter names Yahoo uses for redirects
+                        redirect_params = ["RU", "RO", "RD"]
+                        for param in redirect_params:
+                            if param in query_params and query_params[param]:
+                                actual_url = query_params[param][0]
+                                # Yahoo tends to URL-encode these values
+                                actual_url = unquote(actual_url)
+                                print(f"Extracted actual URL from Yahoo redirect: {actual_url}")
+                                
+                                # Replace the redirect URL with the actual destination
+                                best_result = actual_url
+                                break
+                    except Exception as e:
+                        print(f"Error extracting destination from Yahoo redirect: {e}")
+                
                 try:
                     # Visit the page to verify it's a privacy page
                     print(f"Checking Yahoo result: {best_result}")
-                    await page.goto(best_result, timeout=2000, wait_until="domcontentloaded")
+                    await page.goto(best_result, timeout=5000, wait_until="domcontentloaded")
                     
                     # Get the page title
                     title = await page.title()
@@ -2974,14 +3219,30 @@ async def yahoo_search_fallback(domain, page):
                     privacy_indicators = await page.evaluate(
                         """() => {
                             const text = document.body.innerText.toLowerCase();
+                            
+                            // First check for strong privacy indicators
+                            const strongIndicators = [
+                                'privacy policy', 'privacy notice', 'privacy statement',
+                                'personal information', 'information we collect',
+                                'use of your personal information', 'data subject rights',
+                                'right to access', 'right to delete', 'data controller'
+                            ];
+                            
+                            const hasStrongIndicator = strongIndicators.some(term => text.includes(term));
+                            
                             return {
                                 hasPrivacyHeader: /privacy|data\\s+policy/i.test(document.body.innerText),
                                 hasPrivacyWords: text.includes('information we collect') || 
                                                 text.includes('data we collect') || 
-                                                text.includes('personal information')
+                                                text.includes('personal information'),
+                                hasStrongIndicator
                             };
                         }"""
                     )
+                    
+                    if privacy_indicators["hasStrongIndicator"]:
+                        print(f"✅ Confirmed privacy page from strong content indicators")
+                        return best_result
                     
                     if privacy_indicators["hasPrivacyHeader"] and privacy_indicators["hasPrivacyWords"]:
                         print(f"✅ Confirmed privacy page from content analysis")
@@ -2999,8 +3260,29 @@ async def yahoo_search_fallback(domain, page):
                         best_result_score = search_results[result_index]['score']
             
             # If we get here, no verified result was found
-            if search_results[0]['score'] >= 60:
+            if best_result_url:
+                print(f"Returning best unverified Yahoo result: {best_result_url}")
+                return best_result_url
+            elif search_results[0]['score'] >= 60:
                 print(f"Returning unverified high-confidence result: {search_results[0]['url']}")
+                # Try to extract from Yahoo redirect if needed
+                if "r.search.yahoo.com" in search_results[0]['url']:
+                    try:
+                        parsed_url = urlparse(search_results[0]['url'])
+                        query_params = parse_qs(parsed_url.query)
+                        
+                        # Try several parameter names Yahoo uses for redirects
+                        redirect_params = ["RU", "RO", "RD"]
+                        for param in redirect_params:
+                            if param in query_params and query_params[param]:
+                                actual_url = query_params[param][0]
+                                # Yahoo tends to URL-encode these values
+                                actual_url = unquote(actual_url)
+                                print(f"Extracted actual URL from Yahoo redirect: {actual_url}")
+                                return actual_url
+                    except Exception as e:
+                        print(f"Error extracting destination from Yahoo redirect: {e}")
+                
                 return search_results[0]['url']
             else:
                 print("No high-confidence results found from Yahoo")
