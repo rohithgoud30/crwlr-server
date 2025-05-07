@@ -4,6 +4,7 @@ from app.crud.firebase_base import FirebaseCRUDBase
 from app.core.database import db
 from datetime import datetime
 from google.cloud import firestore
+from app.crud.stats import stats_crud
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -253,7 +254,7 @@ class DocumentCRUD(FirebaseCRUDBase):
             return []
             
     async def delete_document(self, id: str) -> bool:
-        """Delete a document by ID."""
+        """Delete a document by ID and update stats."""
         if not self.collection:
             logger.error("Firebase database not initialized")
             return False
@@ -262,58 +263,32 @@ class DocumentCRUD(FirebaseCRUDBase):
             doc_id = str(id)
             doc_ref = self.collection.document(doc_id)
             
-            # Check if document exists
+            # Check if document exists and get its type
             doc = doc_ref.get()
             if not doc.exists:
                 logger.warning(f"Document {id} not found - cannot delete")
                 return False
+            
+            # Get document type for stats update
+            doc_data = doc.to_dict()
+            document_type = doc_data.get("document_type")
                 
             # Delete the document
             doc_ref.delete()
             logger.info(f"Document {id} deleted successfully")
+            
+            # Update stats
+            if document_type:
+                await stats_crud.decrement_document_count(document_type)
+            
             return True
         except Exception as e:
             logger.error(f"Error deleting document {id}: {str(e)}")
             return False
     
     async def get_document_counts(self) -> Dict[str, int]:
-        """Get counts of documents by type."""
-        try:
-            # First check if Firebase is available
-            if not self.collection:
-                logger.error("Firebase not initialized - returning default document counts")
-                return {
-                    "tos_count": 0,
-                    "pp_count": 0,
-                    "total_count": 0
-                }
-                
-            # Query for ToS documents
-            tos_query = self.collection.where("document_type", "==", "tos")
-            tos_docs = list(tos_query.stream())
-            tos_count = len(tos_docs)
-            
-            # Query for PP documents
-            pp_query = self.collection.where("document_type", "==", "pp")
-            pp_docs = list(pp_query.stream())
-            pp_count = len(pp_docs)
-            
-            # Total count
-            total_count = tos_count + pp_count
-            
-            return {
-                "tos_count": tos_count,
-                "pp_count": pp_count,
-                "total_count": total_count
-            }
-        except Exception as e:
-            logger.error(f"Error getting document counts: {str(e)}")
-            # Return default counts when an error occurs
-            return {
-                "tos_count": 0,
-                "pp_count": 0,
-                "total_count": 0
-            }
+        """Get counts of documents by type from the stats table."""
+        return await stats_crud.get_document_counts()
 
     async def update_document_analysis(self, id: str, analysis_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -403,8 +378,13 @@ class DocumentCRUD(FirebaseCRUDBase):
             return None
 
     async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Create a new document."""
+        """Create a new document and update stats."""
         result = await super().create(data)
+        
+        # Update stats if document was created successfully
+        if result and "document_type" in data:
+            await stats_crud.increment_document_count(data["document_type"])
+            
         return result
 
 # Create a global instance for reuse

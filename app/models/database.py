@@ -69,4 +69,13 @@ class Submission(SubmissionBase):
     updated_at: datetime
 
     class Config:
-        from_attributes = True 
+        from_attributes = True
+
+
+class Stats(BaseModel):
+    """Model for document statistics."""
+    id: str = "global_stats"  # We'll use a single document for all stats
+    tos_count: int = 0
+    pp_count: int = 0
+    total_count: int = 0
+    last_updated: datetime = Field(default_factory=datetime.now) 
