@@ -1478,6 +1478,57 @@ def get_word_frequencies(text: str, max_words: int = 20):
     
     return result
 
+def count_syllables(word: str) -> int:
+    """
+    Count the number of syllables in a word.
+    
+    This is a simple estimation based on vowel groups:
+    - Each group of consecutive vowels is counted as one syllable
+    - Special cases for common patterns like 'e' at the end of words
+    
+    Args:
+        word: The word to count syllables in
+        
+    Returns:
+        The estimated number of syllables
+    """
+    word = word.lower()
+    
+    # Remove non-alphabetic characters
+    word = ''.join(c for c in word if c.isalpha())
+    
+    if not word:
+        return 0
+        
+    # Count groups of vowels as syllables
+    vowels = "aeiouy"
+    count = 0
+    prev_is_vowel = False
+    
+    for i, char in enumerate(word):
+        is_vowel = char in vowels
+        
+        # Count a new syllable at the start of a vowel group
+        if is_vowel and not prev_is_vowel:
+            count += 1
+            
+        prev_is_vowel = is_vowel
+    
+    # Special case: words ending with 'e' often don't count as a separate syllable
+    if word.endswith('e') and len(word) > 2 and word[-2] not in vowels:
+        count = max(1, count - 1)  # Ensure we have at least 1 syllable
+        
+    # Special case: words ending with 'le' usually count as a syllable if preceded by a consonant
+    elif word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
+        count = max(1, count)
+    
+    # Special case: words ending with 'es' or 'ed' often don't count as a separate syllable
+    elif (word.endswith('es') or word.endswith('ed')) and len(word) > 2:
+        count = max(1, count - 1)  # Ensure we have at least 1 syllable
+    
+    # Every word has at least one syllable
+    return max(1, count)
+
 def extract_text_mining_metrics(text: str):
     """
     Extract text mining metrics from the given text.
