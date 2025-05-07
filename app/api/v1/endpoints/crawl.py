@@ -31,7 +31,7 @@ from app.models.summary import SummaryRequest, SummaryResponse
 from app.models.extract import ExtractRequest, ExtractResponse
 from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse, WordFrequency
 from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMiningResults
-from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse
+from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse, ReanalyzeTosRequest, ReanalyzeTosResponse, ReanalyzePrivacyRequest, ReanalyzePrivacyResponse
 from app.models.database import DocumentCreate, SubmissionCreate
 from app.models.company_info import CompanyInfoRequest
 
@@ -721,7 +721,9 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 
                 # Check if summaries failed and provide a more specific message
                 if (analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") or 
-                    analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result")):
+                    analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") or
+                    analysis.get('one_sentence_summary', "").startswith("Error generating summary:") or
+                    analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
                     logger.warning(f"Document NOT saved to database due to summary generation failure. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
                     response.message = "Document analysis incomplete: Summary generation failed. Document not saved."
                 else:
@@ -1209,11 +1211,11 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 
                 # Check if summaries failed and provide a more specific message
                 if (analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") or 
-                    analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result")):
-                    logger.warning(f"Document NOT saved to database due to summary generation failure. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
-                    response.message = "Document analysis incomplete: Summary generation failed. Document not saved."
-                else:
-                    response.message = "Partial success: some analyses completed, returning available data but not saved."
+                    analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") or
+                    analysis.get('one_sentence_summary', "").startswith("Error generating summary:") or
+                    analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
+                    logger.warning(f"Summary generation failed when reanalyzing document {request.document_id}. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
+                    response.message = "Document analysis incomplete: Summary generation failed. Document not updated."
             else:
                 response.success = False
                 response.message = "Failed to analyze content properly, no useful data available."
@@ -1670,3 +1672,357 @@ def sanitize_text_for_db(text: str) -> str:
         sanitized = ''.join(c for c in sanitized if c in string.printable)
     
     return sanitized 
+
+@router.post("/reanalyze-tos", response_model=ReanalyzeTosResponse)
+async def reanalyze_tos(request: ReanalyzeTosRequest) -> ReanalyzeTosResponse:
+    """
+    Reanalyze an existing Terms of Service document.
+    
+    This endpoint:
+    1. Retrieves the existing document using the provided ID
+    2. Extracts text from the stored URL (doesn't search for new URLs)
+    3. Performs text analysis (summaries, word frequencies, text mining)
+    4. Updates the document with the new analysis
+    
+    Args:
+        request: Contains the document_id to reanalyze
+        
+    Returns:
+        Response with reanalysis results and status
+    """
+    # Initialize response
+    response = ReanalyzeTosResponse(
+        url="",
+        success=False,
+        message="Failed to reanalyze Terms of Service"
+    )
+    
+    try:
+        logger.info(f"Reanalyzing ToS document with ID: {request.document_id}")
+        
+        # Get the document from Firestore
+        from app.crud.document import document_crud
+        document = await document_crud.get(request.document_id)
+        
+        if not document:
+            response.message = f"Document with ID {request.document_id} not found"
+            return response
+        
+        # Ensure the document is a ToS document
+        if document.get('document_type') != 'tos':
+            response.message = f"Document with ID {request.document_id} is not a Terms of Service document"
+            return response
+        
+        # Get the retrieved URL from the document
+        retrieved_url = document.get('retrieved_url')
+        if not retrieved_url:
+            response.message = "Document doesn't have a retrieved URL"
+            return response
+        
+        original_url = document.get('url', '')
+        response.url = original_url
+        response.tos_url = retrieved_url
+        
+        # Extract text from the retrieved URL
+        logger.info(f"Extracting text from stored URL: {retrieved_url}")
+        try:
+            text_result = await extract_text_from_url(retrieved_url, 'tos')
+            
+            if not text_result:
+                response.message = f"Failed to extract text from URL: {retrieved_url}"
+                return response
+            
+            extracted_text, actual_url = text_result
+        except Exception as extract_err:
+            logger.error(f"Error extracting text from URL {retrieved_url}: {str(extract_err)}")
+            response.message = f"Error extracting text: {str(extract_err)}"
+            return response
+        
+        # Check if we have text to analyze
+        if not extracted_text or is_likely_binary_content(extracted_text):
+            response.message = "Failed to extract valid text from the document URL"
+            return response
+        
+        # Perform parallel analysis
+        logger.info("Starting analysis of extracted text")
+        analysis = await perform_parallel_analysis(retrieved_url, extracted_text, 'tos')
+        
+        # Set company info
+        company_name = document.get('company_name', '')
+        logo_url = document.get('logo_url', DEFAULT_LOGO_URL)
+        
+        analysis['company_name'] = company_name
+        analysis['logo_url'] = logo_url
+        
+        # Check if all analyses were successful
+        all_analyses_successful = (
+            analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
+            analysis.get('word_frequencies') and analysis.get('text_mining') and
+            analysis.get('one_sentence_summary') != "Summary generation returned empty result" and
+            analysis.get('hundred_word_summary') != "Summary generation returned empty result" and
+            not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
+            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:")
+        )
+        
+        # Prepare serialized data for Firestore
+        serializable_word_freqs = []
+        if 'word_frequencies' in analysis and isinstance(analysis['word_frequencies'], list):
+            for item in analysis['word_frequencies']:
+                if isinstance(item, WordFrequency):
+                    serializable_word_freqs.append({
+                        "word": item.word,
+                        "count": item.count,
+                        "percentage": item.percentage
+                    })
+                elif isinstance(item, dict):
+                    serializable_word_freqs.append(item)
+                else:
+                    serializable_word_freqs.append(item.__dict__ if hasattr(item, '__dict__') else {"word": str(item), "count": 0, "percentage": 0})
+        
+        # Serialize TextMiningResults
+        serializable_text_mining = {}
+        if 'text_mining' in analysis:
+            if isinstance(analysis['text_mining'], TextMiningResults):
+                serializable_text_mining = analysis['text_mining'].__dict__
+            elif isinstance(analysis['text_mining'], dict):
+                serializable_text_mining = analysis['text_mining']
+            else:
+                serializable_text_mining = {"error": "Could not convert text mining metrics"}
+                logger.warning(f"Could not convert text mining metrics to dict: {type(analysis['text_mining'])}")
+        
+        # Prepare update data
+        update_data = {
+            "one_sentence_summary": analysis.get('one_sentence_summary', ''),
+            "hundred_word_summary": analysis.get('hundred_word_summary', ''),
+            "word_frequencies": serializable_word_freqs,
+            "text_mining_metrics": serializable_text_mining
+        }
+        
+        if all_analyses_successful:
+            # Update the document with new analysis
+            logger.info(f"Updating document {request.document_id} with new analysis")
+            updated_doc = await document_crud.update_document_analysis(request.document_id, update_data)
+            
+            if updated_doc:
+                response.success = True
+                response.message = "Document successfully reanalyzed and updated"
+                response.document_id = request.document_id
+                response.company_name = company_name
+                response.logo_url = logo_url
+                response.one_sentence_summary = analysis.get('one_sentence_summary', '')
+                response.hundred_word_summary = analysis.get('hundred_word_summary', '')
+                
+                # Convert to response models
+                if 'word_frequencies' in analysis and analysis['word_frequencies']:
+                    response.word_frequencies = analysis['word_frequencies']
+                
+                if 'text_mining' in analysis and analysis['text_mining']:
+                    response.text_mining = analysis['text_mining']
+                
+                response.views = document.get('views', 0)
+            else:
+                response.message = "Failed to update document with new analysis"
+        else:
+            response.message = "Document analysis incomplete: Some analyses failed"
+            logger.warning(f"Incomplete analysis when reanalyzing document {request.document_id}")
+            
+            # Still include any partial analysis in the response
+            response.one_sentence_summary = analysis.get('one_sentence_summary', '')
+            response.hundred_word_summary = analysis.get('hundred_word_summary', '')
+            
+            if 'word_frequencies' in analysis and analysis['word_frequencies']:
+                response.word_frequencies = analysis['word_frequencies']
+            
+            if 'text_mining' in analysis and analysis['text_mining']:
+                response.text_mining = analysis['text_mining']
+                
+            # Check if summaries failed and provide a more specific message
+            if (analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") or 
+                analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") or
+                analysis.get('one_sentence_summary', "").startswith("Error generating summary:") or
+                analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
+                logger.warning(f"Summary generation failed when reanalyzing document {request.document_id}. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
+                response.message = "Document analysis incomplete: Summary generation failed. Document not updated."
+    
+    except Exception as e:
+        logger.error(f"Error reanalyzing ToS document: {e}", exc_info=True)
+        response.message = f"Error reanalyzing document: {str(e)}"
+    
+    return response
+
+@router.post("/reanalyze-pp", response_model=ReanalyzePrivacyResponse)
+async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResponse:
+    """
+    Reanalyze an existing Privacy Policy document.
+    
+    This endpoint:
+    1. Retrieves the existing document using the provided ID
+    2. Extracts text from the stored URL (doesn't search for new URLs)
+    3. Performs text analysis (summaries, word frequencies, text mining)
+    4. Updates the document with the new analysis
+    
+    Args:
+        request: Contains the document_id to reanalyze
+        
+    Returns:
+        Response with reanalysis results and status
+    """
+    # Initialize response
+    response = ReanalyzePrivacyResponse(
+        url="",
+        success=False,
+        message="Failed to reanalyze Privacy Policy"
+    )
+    
+    try:
+        logger.info(f"Reanalyzing Privacy Policy document with ID: {request.document_id}")
+        
+        # Get the document from Firestore
+        from app.crud.document import document_crud
+        document = await document_crud.get(request.document_id)
+        
+        if not document:
+            response.message = f"Document with ID {request.document_id} not found"
+            return response
+        
+        # Ensure the document is a PP document
+        if document.get('document_type') != 'pp':
+            response.message = f"Document with ID {request.document_id} is not a Privacy Policy document"
+            return response
+        
+        # Get the retrieved URL from the document
+        retrieved_url = document.get('retrieved_url')
+        if not retrieved_url:
+            response.message = "Document doesn't have a retrieved URL"
+            return response
+        
+        original_url = document.get('url', '')
+        response.url = original_url
+        response.pp_url = retrieved_url
+        
+        # Extract text from the retrieved URL
+        logger.info(f"Extracting text from stored URL: {retrieved_url}")
+        try:
+            text_result = await extract_text_from_url(retrieved_url, 'pp')
+            
+            if not text_result:
+                response.message = f"Failed to extract text from URL: {retrieved_url}"
+                return response
+            
+            extracted_text, actual_url = text_result
+        except Exception as extract_err:
+            logger.error(f"Error extracting text from URL {retrieved_url}: {str(extract_err)}")
+            response.message = f"Error extracting text: {str(extract_err)}"
+            return response
+        
+        # Check if we have text to analyze
+        if not extracted_text or is_likely_binary_content(extracted_text):
+            response.message = "Failed to extract valid text from the document URL"
+            return response
+        
+        # Perform parallel analysis
+        logger.info("Starting analysis of extracted text")
+        analysis = await perform_parallel_analysis(retrieved_url, extracted_text, 'pp')
+        
+        # Set company info
+        company_name = document.get('company_name', '')
+        logo_url = document.get('logo_url', DEFAULT_LOGO_URL)
+        
+        analysis['company_name'] = company_name
+        analysis['logo_url'] = logo_url
+        
+        # Check if all analyses were successful
+        all_analyses_successful = (
+            analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
+            analysis.get('word_frequencies') and analysis.get('text_mining') and
+            analysis.get('one_sentence_summary') != "Summary generation returned empty result" and
+            analysis.get('hundred_word_summary') != "Summary generation returned empty result" and
+            not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
+            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:")
+        )
+        
+        # Prepare serialized data for Firestore
+        serializable_word_freqs = []
+        if 'word_frequencies' in analysis and isinstance(analysis['word_frequencies'], list):
+            for item in analysis['word_frequencies']:
+                if isinstance(item, WordFrequency):
+                    serializable_word_freqs.append({
+                        "word": item.word,
+                        "count": item.count,
+                        "percentage": item.percentage
+                    })
+                elif isinstance(item, dict):
+                    serializable_word_freqs.append(item)
+                else:
+                    serializable_word_freqs.append(item.__dict__ if hasattr(item, '__dict__') else {"word": str(item), "count": 0, "percentage": 0})
+        
+        # Serialize TextMiningResults
+        serializable_text_mining = {}
+        if 'text_mining' in analysis:
+            if isinstance(analysis['text_mining'], TextMiningResults):
+                serializable_text_mining = analysis['text_mining'].__dict__
+            elif isinstance(analysis['text_mining'], dict):
+                serializable_text_mining = analysis['text_mining']
+            else:
+                serializable_text_mining = {"error": "Could not convert text mining metrics"}
+                logger.warning(f"Could not convert text mining metrics to dict: {type(analysis['text_mining'])}")
+        
+        # Prepare update data
+        update_data = {
+            "one_sentence_summary": analysis.get('one_sentence_summary', ''),
+            "hundred_word_summary": analysis.get('hundred_word_summary', ''),
+            "word_frequencies": serializable_word_freqs,
+            "text_mining_metrics": serializable_text_mining
+        }
+        
+        if all_analyses_successful:
+            # Update the document with new analysis
+            logger.info(f"Updating document {request.document_id} with new analysis")
+            updated_doc = await document_crud.update_document_analysis(request.document_id, update_data)
+            
+            if updated_doc:
+                response.success = True
+                response.message = "Document successfully reanalyzed and updated"
+                response.document_id = request.document_id
+                response.company_name = company_name
+                response.logo_url = logo_url
+                response.one_sentence_summary = analysis.get('one_sentence_summary', '')
+                response.hundred_word_summary = analysis.get('hundred_word_summary', '')
+                
+                # Convert to response models
+                if 'word_frequencies' in analysis and analysis['word_frequencies']:
+                    response.word_frequencies = analysis['word_frequencies']
+                
+                if 'text_mining' in analysis and analysis['text_mining']:
+                    response.text_mining = analysis['text_mining']
+                
+                response.views = document.get('views', 0)
+            else:
+                response.message = "Failed to update document with new analysis"
+        else:
+            response.message = "Document analysis incomplete: Some analyses failed"
+            logger.warning(f"Incomplete analysis when reanalyzing document {request.document_id}")
+            
+            # Still include any partial analysis in the response
+            response.one_sentence_summary = analysis.get('one_sentence_summary', '')
+            response.hundred_word_summary = analysis.get('hundred_word_summary', '')
+            
+            if 'word_frequencies' in analysis and analysis['word_frequencies']:
+                response.word_frequencies = analysis['word_frequencies']
+            
+            if 'text_mining' in analysis and analysis['text_mining']:
+                response.text_mining = analysis['text_mining']
+                
+            # Check if summaries failed and provide a more specific message
+            if (analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") or 
+                analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") or
+                analysis.get('one_sentence_summary', "").startswith("Error generating summary:") or
+                analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
+                logger.warning(f"Summary generation failed when reanalyzing document {request.document_id}. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
+                response.message = "Document analysis incomplete: Summary generation failed. Document not updated."
+    
+    except Exception as e:
+        logger.error(f"Error reanalyzing Privacy Policy document: {e}", exc_info=True)
+        response.message = f"Error reanalyzing document: {str(e)}"
+    
+    return response 

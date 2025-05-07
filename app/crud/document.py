@@ -328,5 +328,64 @@ class DocumentCRUD(FirebaseCRUDBase):
                 "total_count": 0
             }
 
+    async def update_document_analysis(self, id: str, analysis_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Update a document with new analysis results.
+        
+        Args:
+            id: The document ID to update
+            analysis_data: Dictionary containing the new analysis data
+            
+        Returns:
+            Updated document data or None if update fails
+        """
+        if not self.collection:
+            logger.error("Firebase database not initialized")
+            return None
+            
+        try:
+            # Get document reference
+            doc_ref = self.collection.document(str(id))
+            
+            # Check if document exists
+            doc = doc_ref.get()
+            if not doc.exists:
+                logger.warning(f"Document {id} not found - cannot update analysis")
+                return None
+                
+            # Get current document data
+            doc_data = doc.to_dict()
+            
+            # Prepare update data
+            update_data = {
+                'updated_at': datetime.now()
+            }
+            
+            # Update only the analysis fields that are provided
+            if 'one_sentence_summary' in analysis_data:
+                update_data['one_sentence_summary'] = analysis_data['one_sentence_summary']
+                
+            if 'hundred_word_summary' in analysis_data:
+                update_data['hundred_word_summary'] = analysis_data['hundred_word_summary']
+                
+            if 'word_frequencies' in analysis_data:
+                update_data['word_frequencies'] = analysis_data['word_frequencies']
+                
+            if 'text_mining_metrics' in analysis_data:
+                update_data['text_mining_metrics'] = analysis_data['text_mining_metrics']
+            
+            # Update the document
+            doc_ref.update(update_data)
+            
+            # Create updated document data
+            updated_doc = {**doc_data, **update_data, 'id': id}
+            
+            logger.info(f"Document {id} analysis updated successfully")
+            return updated_doc
+                
+        except Exception as e:
+            logger.error(f"Error updating document analysis for {id}: {str(e)}")
+            return None
+
 # Create a global instance for reuse
 document_crud = DocumentCRUD() 

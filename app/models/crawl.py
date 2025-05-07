@@ -50,4 +50,16 @@ class CrawlPrivacyResponse(BaseModel):
         # If message indicates document exists, ensure success is False
         if 'message' in values and values['message'] == "Document already exists in database.":
             return False
-        return v 
+        return v
+
+class ReanalyzeTosRequest(BaseModel):
+    document_id: str
+    
+class ReanalyzeTosResponse(CrawlTosResponse):
+    pass
+    
+class ReanalyzePrivacyRequest(BaseModel):
+    document_id: str
+    
+class ReanalyzePrivacyResponse(CrawlPrivacyResponse):
+    pass 
