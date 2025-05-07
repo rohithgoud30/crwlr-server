@@ -205,4 +205,55 @@ async def delete_document(
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+class UpdateCompanyNameRequest(BaseModel):
+    company_name: str = Field(..., description="The new company name")
+
+
+@router.patch("/documents/{document_id}/company-name", response_model=Document)
+async def update_document_company_name(
+    request: UpdateCompanyNameRequest,
+    document_id: str = Path(..., description="The ID of the document to update"),
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Update a document's company name by ID.
+    
+    - **document_id**: ID of the document to update
+    - **company_name**: The new company name
+    
+    Returns:
+    - The updated document
+    """
+    try:
+        # Check if document exists first
+        document = await document_crud.get(document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Update the document's company name
+        updated_document = await document_crud.update_company_name(document_id, request.company_name)
+        
+        if not updated_document:
+            raise HTTPException(status_code=500, detail="Failed to update document company name")
+        
+        # Parse JSON fields if they are strings
+        if updated_document.get('word_frequencies') and isinstance(updated_document['word_frequencies'], str):
+            try:
+                updated_document['word_frequencies'] = json.loads(updated_document['word_frequencies'])
+            except json.JSONDecodeError:
+                updated_document['word_frequencies'] = []
+                
+        if updated_document.get('text_mining_metrics') and isinstance(updated_document['text_mining_metrics'], str):
+            try:
+                updated_document['text_mining_metrics'] = json.loads(updated_document['text_mining_metrics'])
+            except json.JSONDecodeError:
+                updated_document['text_mining_metrics'] = {}
+        
+        return Document(**updated_document)
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") 

@@ -330,19 +330,19 @@ class DocumentCRUD(FirebaseCRUDBase):
 
     async def update_document_analysis(self, id: str, analysis_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Update a document with new analysis results.
+        Update document analysis data (summaries, metrics, word frequencies).
         
         Args:
             id: The document ID to update
-            analysis_data: Dictionary containing the new analysis data
+            analysis_data: Dictionary containing the analysis fields to update
             
         Returns:
-            Updated document data or None if update fails
+            Updated document or None if update fails
         """
-        if not self.collection:
-            logger.error("Firebase database not initialized")
+        if not self.collection or not id:
+            logger.error("Cannot update document analysis: invalid collection or ID")
             return None
-            
+        
         try:
             # Get document reference
             doc_ref = self.collection.document(str(id))
@@ -350,41 +350,69 @@ class DocumentCRUD(FirebaseCRUDBase):
             # Check if document exists
             doc = doc_ref.get()
             if not doc.exists:
-                logger.warning(f"Document {id} not found - cannot update analysis")
+                logger.warning(f"Document {id} not found for analysis update")
                 return None
-                
-            # Get current document data
-            doc_data = doc.to_dict()
             
-            # Prepare update data
+            # Add updated_at timestamp
+            analysis_data["updated_at"] = datetime.now()
+            
+            # Update document with new analysis data
+            doc_ref.update(analysis_data)
+            
+            # Get updated document
+            updated_doc = doc_ref.get()
+            updated_data = updated_doc.to_dict()
+            updated_data['id'] = updated_doc.id
+            
+            logger.info(f"Successfully updated analysis for document {id}")
+            return updated_data
+        except Exception as e:
+            logger.error(f"Error updating document analysis: {str(e)}")
+            return None
+            
+    async def update_company_name(self, id: str, company_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Update a document's company name.
+        
+        Args:
+            id: The document ID to update
+            company_name: The new company name
+            
+        Returns:
+            Updated document or None if update fails
+        """
+        if not self.collection or not id:
+            logger.error("Cannot update company name: invalid collection or ID")
+            return None
+        
+        try:
+            # Get document reference
+            doc_ref = self.collection.document(str(id))
+            
+            # Check if document exists
+            doc = doc_ref.get()
+            if not doc.exists:
+                logger.warning(f"Document {id} not found for company name update")
+                return None
+            
+            # Update document with new company name and updated timestamp
             update_data = {
-                'updated_at': datetime.now()
+                "company_name": company_name,
+                "updated_at": datetime.now()
             }
             
-            # Update only the analysis fields that are provided
-            if 'one_sentence_summary' in analysis_data:
-                update_data['one_sentence_summary'] = analysis_data['one_sentence_summary']
-                
-            if 'hundred_word_summary' in analysis_data:
-                update_data['hundred_word_summary'] = analysis_data['hundred_word_summary']
-                
-            if 'word_frequencies' in analysis_data:
-                update_data['word_frequencies'] = analysis_data['word_frequencies']
-                
-            if 'text_mining_metrics' in analysis_data:
-                update_data['text_mining_metrics'] = analysis_data['text_mining_metrics']
-            
-            # Update the document
+            # Update document
             doc_ref.update(update_data)
             
-            # Create updated document data
-            updated_doc = {**doc_data, **update_data, 'id': id}
+            # Get updated document
+            updated_doc = doc_ref.get()
+            updated_data = updated_doc.to_dict()
+            updated_data['id'] = updated_doc.id
             
-            logger.info(f"Document {id} analysis updated successfully")
-            return updated_doc
-                
+            logger.info(f"Successfully updated company name for document {id}")
+            return updated_data
         except Exception as e:
-            logger.error(f"Error updating document analysis for {id}: {str(e)}")
+            logger.error(f"Error updating document company name: {str(e)}")
             return None
 
 # Create a global instance for reuse
