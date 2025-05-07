@@ -80,63 +80,34 @@ class DocumentCountResponse(BaseModel):
     tos_count: int
     pp_count: int
     total_count: int
-    cache_age_seconds: Optional[int] = None
-    from_cache: bool = False
 
 
 @router.get("/documents/stats", response_model=DocumentCountResponse)
 async def get_document_counts(
-    refresh_cache: bool = Query(False, description="Force refresh the stats cache"),
     api_key: str = Depends(get_api_key)
 ):
     """
     Get total counts of ToS and Privacy Policy documents.
     
-    Parameters:
-    - **refresh_cache**: Set to true to force a refresh of cached statistics
-    
     Returns:
     - **tos_count**: Total number of Terms of Service documents
     - **pp_count**: Total number of Privacy Policy documents
     - **total_count**: Total number of all documents
-    - **cache_age_seconds**: Age of cache in seconds (null if not from cache)
-    - **from_cache**: Whether the results came from cache
     """
     try:
-        # Invalidate cache if requested
-        if refresh_cache:
-            await document_crud.invalidate_counts_cache()
-            
-        # Get the counts (will use cache unless invalidated)
         counts = await document_crud.get_document_counts()
-        
-        # Add cache information
-        from_cache = document_crud._cache_timestamp is not None and document_crud._document_counts_cache is not None
-        
-        result = {
+        return {
             "tos_count": counts.get("tos_count", 0),
             "pp_count": counts.get("pp_count", 0),
-            "total_count": counts.get("total_count", 0),
+            "total_count": counts.get("total_count", 0)
         }
-        
-        if from_cache:
-            cache_age = (datetime.now() - document_crud._cache_timestamp).total_seconds()
-            result["cache_age_seconds"] = int(cache_age)
-            result["from_cache"] = True
-        else:
-            result["cache_age_seconds"] = None
-            result["from_cache"] = False
-            
-        return result
     except Exception as e:
         logger.error(f"Error getting document counts: {str(e)}")
         # Return default counts in case of an error
         return {
             "tos_count": 0,
             "pp_count": 0,
-            "total_count": 0,
-            "cache_age_seconds": None,
-            "from_cache": False
+            "total_count": 0
         }
 
 
