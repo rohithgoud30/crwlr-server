@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright without dependencies first
-RUN python -m playwright install chromium --with-deps false
+RUN python -m playwright install chromium
 
 # Install Playwright system dependencies with retries
 RUN apt-get update && \
