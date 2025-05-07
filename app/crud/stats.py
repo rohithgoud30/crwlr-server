@@ -220,6 +220,49 @@ class StatsCRUD(FirebaseCRUDBase):
         except Exception as e:
             logger.error(f"Error decrementing document count: {str(e)}")
             return False
+    
+    async def update_last_updated(self) -> bool:
+        """Update only the last_updated timestamp without changing counts."""
+        if not self.collection:
+            logger.error("Firebase not initialized - cannot update timestamp")
+            return False
+            
+        try:
+            # Get document reference
+            doc_ref = self.collection.document(self.stats_id)
+            
+            # Use transaction to ensure atomic update
+            transaction = db.transaction()
+            
+            @firestore.transactional
+            def update_in_transaction(transaction: Transaction, doc_ref):
+                doc = doc_ref.get(transaction=transaction)
+                
+                if not doc.exists:
+                    # Document doesn't exist, initialize it with zeros
+                    stats_data = {
+                        "tos_count": 0,
+                        "pp_count": 0,
+                        "total_count": 0,
+                        "last_updated": datetime.now()
+                    }
+                    transaction.set(doc_ref, stats_data)
+                else:
+                    # Only update the last_updated field
+                    transaction.update(doc_ref, {
+                        "last_updated": datetime.now()
+                    })
+                
+                return True
+            
+            # Execute the transaction
+            result = update_in_transaction(transaction, doc_ref)
+            logger.info(f"Updated last_updated timestamp in stats")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error updating last_updated timestamp: {str(e)}")
+            return False
 
 # Create a global instance for reuse
 stats_crud = StatsCRUD() 
