@@ -53,11 +53,11 @@ async def search_documents(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Search for documents using text, which can be a keyword, URL, or company name.
+    Search for documents matching the provided text in company name or URL only.
     Includes filtering and pagination.
     Returns a limited set of fields for each document in the list.
     
-    - **search_text**: Text to search for (keywords, URL, company name)
+    - **search_text**: Text to search for (only searches in company name and URL fields)
     - **document_type**: Optional filter by document type ("tos" or "pp")
     - **page**: Page number (starting from 1)
     - **per_page**: Number of items per page (default: 6, max: 100)

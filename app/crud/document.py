@@ -104,10 +104,10 @@ class DocumentCRUD(FirebaseCRUDBase):
         sort_order: Optional[str] = "desc"
     ) -> Dict[str, Any]:
         """
-        Search for documents based on a text query.
+        Search for documents based on company name or URL only.
         
         Args:
-            query: The search query to look for (will search in text, url, and company_name)
+            query: The search query to look for (will search only in company_name and url)
             document_type: Optional filter by document_type (e.g. 'tos' or 'pp')
             page: Page number for pagination (1-indexed)
             per_page: Number of results per page
@@ -123,7 +123,6 @@ class DocumentCRUD(FirebaseCRUDBase):
             
             # Since we're using Firestore which doesn't have built-in full-text search,
             # we need to fetch all documents and filter them manually.
-            # Firestore also has limitations on complex queries (e.g. multiple inequalities or combining text search with ordering on different fields easily)
             
             filters = {}
             if document_type:
@@ -133,10 +132,6 @@ class DocumentCRUD(FirebaseCRUDBase):
             if document_type:
                 all_docs_query = all_docs_query.where(filter=firestore.FieldFilter("document_type", "==", document_type))
 
-            # Attempt to apply Firestore-level sorting if possible and beneficial.
-            # This is most effective if not combined with a text search that requires client-side filtering.
-            # For simplicity in this manual search, we'll sort client-side after filtering.
-            
             all_docs_stream = all_docs_query.stream() # Stream all (or filtered by type)
             
             matching_docs = []
@@ -144,25 +139,17 @@ class DocumentCRUD(FirebaseCRUDBase):
                 doc = doc_snapshot.to_dict()
                 doc['id'] = doc_snapshot.id # Ensure ID is part of the dict
                 
-                # Construct searchable text from relevant fields
-                searchable_text_parts = [
-                    str(doc.get("url", "")).lower(),
-                    str(doc.get("company_name", "")).lower(),
-                    str(doc.get("one_sentence_summary", "")).lower(),
-                    str(doc.get("hundred_word_summary", "")).lower(),
-                    # Consider adding raw_text if it's stored and searchable, but be mindful of performance
-                ]
-                searchable_text = " ".join(filter(None, searchable_text_parts))
-
-                if query_lower in searchable_text:
+                # ONLY search in company_name and url fields
+                company_name = str(doc.get("company_name", "")).lower()
+                url = str(doc.get("url", "")).lower()
+                
+                # Match if query is found in either company name or URL
+                if query_lower in company_name or query_lower in url:
                     matching_docs.append(doc)
 
             # Client-side sorting after filtering
             if sort_by:
                 # Handle missing keys or None values gracefully for sorting
-                # For 'updated_at', ensure it's a datetime object or comparable
-                # For 'views', ensure it's an int
-                # For string fields, handle None by treating them as empty strings or placing them last/first
                 def get_sort_key(item):
                     val = item.get(sort_by)
                     if val is None:
