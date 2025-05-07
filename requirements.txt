@@ -28,6 +28,9 @@ tldextract==3.6.0  # For extracting top-level domains
 nltk==3.8.1
 textstat==0.7.3
 
+# Search
+algoliasearch>=4,<5  # Algolia search integration
+
 # Web Automation
 playwright==1.42.0
 # fake-useragent==2.1.0  # Removed - using consistent user agent instead

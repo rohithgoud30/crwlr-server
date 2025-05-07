@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     FIREBASE_CLIENT_EMAIL: Optional[str] = None
     FIREBASE_PRIVATE_KEY: Optional[str] = None
     
+    # Algolia settings
+    ALGOLIA_APP_ID: Optional[str] = None
+    ALGOLIA_API_KEY: Optional[str] = None
+    
     # API Keys - try to get them directly from os.environ first, then from .env
     GEMINI_API_KEY: Optional[str] = None
     API_KEY: Optional[str] = None
@@ -81,6 +85,15 @@ if not settings.FIREBASE_PRIVATE_KEY and os.environ.get("FIREBASE_PRIVATE_KEY"):
     settings.FIREBASE_PRIVATE_KEY = os.environ.get("FIREBASE_PRIVATE_KEY")
     logger.info("Loaded FIREBASE_PRIVATE_KEY from environment variables")
 
+# Try to load Algolia settings directly from environment
+if not settings.ALGOLIA_APP_ID and os.environ.get("ALGOLIA_APP_ID"):
+    settings.ALGOLIA_APP_ID = os.environ.get("ALGOLIA_APP_ID")
+    logger.info("Loaded ALGOLIA_APP_ID from environment variables")
+
+if not settings.ALGOLIA_API_KEY and os.environ.get("ALGOLIA_API_KEY"):
+    settings.ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY")
+    logger.info("Loaded ALGOLIA_API_KEY from environment variables")
+
 # Try to load API keys directly from environment if they're not in settings
 if not settings.GEMINI_API_KEY and os.environ.get("GEMINI_API_KEY"):
     settings.GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -93,5 +106,7 @@ if not settings.API_KEY and os.environ.get("API_KEY"):
 # Log whether API keys are set (without printing them)
 logger.info(f"GEMINI_API_KEY is {'SET' if settings.GEMINI_API_KEY else 'NOT SET'}")
 logger.info(f"API_KEY is {'SET' if settings.API_KEY else 'NOT SET'}")
+logger.info(f"ALGOLIA_APP_ID is {'SET' if settings.ALGOLIA_APP_ID else 'NOT SET'}")
+logger.info(f"ALGOLIA_API_KEY is {'SET' if settings.ALGOLIA_API_KEY else 'NOT SET'}")
 logger.info(f"Environment: {settings.ENVIRONMENT}")
 logger.info(f"Firebase Project ID: {settings.FIREBASE_PROJECT_ID if settings.FIREBASE_PROJECT_ID else 'NOT SET'}")

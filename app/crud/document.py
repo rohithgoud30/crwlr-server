@@ -5,6 +5,7 @@ from app.core.database import db
 from datetime import datetime
 from google.cloud import firestore
 from app.crud.stats import stats_crud
+from app.core.algolia import index_document, search_documents as algolia_search
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -86,6 +87,13 @@ class DocumentCRUD(FirebaseCRUDBase):
             result = increment_in_transaction(transaction, doc_ref)
             if result:
                 logger.info(f"Incremented views for document {id}")
+                
+                # Also update the document in Algolia
+                try:
+                    await index_document(result)
+                except Exception as algolia_err:
+                    logger.warning(f"Failed to update Algolia after incrementing views: {algolia_err}")
+                
                 return result
             else:
                 logger.warning(f"Document {id} not found - could not increment views")
@@ -105,10 +113,13 @@ class DocumentCRUD(FirebaseCRUDBase):
         sort_order: Optional[str] = "desc"
     ) -> Dict[str, Any]:
         """
-        Search for documents based on company name or URL only.
+        Search for documents based on provided query.
+        
+        Attempts to use Algolia first for faster search.
+        Falls back to Firebase if Algolia is not available.
         
         Args:
-            query: The search query to look for (will search only in company_name and url)
+            query: The search query
             document_type: Optional filter by document_type (e.g. 'tos' or 'pp')
             page: Page number for pagination (1-indexed)
             per_page: Number of results per page
@@ -119,6 +130,58 @@ class DocumentCRUD(FirebaseCRUDBase):
             A dictionary containing search results and pagination information
         """
         try:
+            # Try Algolia search first
+            algolia_results = None
+            try:
+                # Convert pagination parameters for Algolia
+                algolia_page = page - 1  # Algolia uses 0-indexed pagination
+                
+                # Create filters if document_type is specified
+                filters = f"document_type:{document_type}" if document_type else None
+                
+                # Attempt Algolia search
+                algolia_results = await algolia_search(
+                    query=query,
+                    document_type=document_type,
+                    filters=filters
+                )
+                
+                # Check if Algolia search was successful
+                if algolia_results and "hits" in algolia_results:
+                    logger.info(f"Algolia search successful for query: {query}")
+                    
+                    # Extract results from Algolia's response format
+                    total = algolia_results.get("nbHits", 0)
+                    total_pages = (total + per_page - 1) // per_page if total > 0 else 0
+                    
+                    # Convert Algolia hits to our format
+                    hits = algolia_results.get("hits", [])
+                    items = []
+                    for hit in hits:
+                        # Algolia hits have objectID that maps to our document ID
+                        item = hit.copy()
+                        item["id"] = hit.get("objectID", "")
+                        items.append(item)
+                    
+                    # Apply pagination manually since we're getting all results from Algolia
+                    start_idx = (page - 1) * per_page
+                    end_idx = min(start_idx + per_page, len(items))
+                    items_page = items[start_idx:end_idx] if start_idx < len(items) else []
+                    
+                    return {
+                        "items": items_page,
+                        "total": total,
+                        "page": page,
+                        "per_page": per_page,
+                        "total_pages": total_pages,
+                        "has_next": page < total_pages,
+                        "has_prev": page > 1,
+                        "search_provider": "algolia"
+                    }
+            except Exception as algolia_err:
+                logger.warning(f"Algolia search failed for query '{query}', falling back to Firebase: {algolia_err}")
+                # Fall back to Firebase search if Algolia fails
+
             # Use .lower() for case-insensitive search
             query_lower = query.lower()
             
@@ -140,12 +203,19 @@ class DocumentCRUD(FirebaseCRUDBase):
                 doc = doc_snapshot.to_dict()
                 doc['id'] = doc_snapshot.id # Ensure ID is part of the dict
                 
-                # ONLY search in company_name and url fields
+                # Search in multiple fields including summaries for better results
                 company_name = str(doc.get("company_name", "")).lower()
                 url = str(doc.get("url", "")).lower()
+                retrieved_url = str(doc.get("retrieved_url", "")).lower()
+                one_sentence_summary = str(doc.get("one_sentence_summary", "")).lower()
+                hundred_word_summary = str(doc.get("hundred_word_summary", "")).lower()
                 
-                # Match if query is found in either company name or URL
-                if query_lower in company_name or query_lower in url:
+                # Match if query is found in any of these fields
+                if (query_lower in company_name or 
+                    query_lower in url or 
+                    query_lower in retrieved_url or
+                    query_lower in one_sentence_summary or
+                    query_lower in hundred_word_summary):
                     matching_docs.append(doc)
 
             # Client-side sorting after filtering
@@ -195,11 +265,24 @@ class DocumentCRUD(FirebaseCRUDBase):
                 "per_page": per_page,
                 "total_pages": total_pages,
                 "has_next": page < total_pages,
-                "has_prev": page > 1
+                "has_prev": page > 1,
+                "search_provider": "firebase"
             }
         except Exception as e:
-            logger.error(f"Error searching documents: {str(e)}")
-            return {"items": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0, "has_next": False, "has_prev": False}
+            logger.error(f"Error in search_documents: {str(e)}")
+            
+            # Return empty results on error
+            return {
+                "items": [],
+                "total": 0,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": 0,
+                "has_next": False,
+                "has_prev": False,
+                "error": str(e),
+                "search_provider": "error"
+            }
     
     async def get_popular_documents(self, limit: int = 5, document_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get most viewed documents."""
@@ -291,45 +374,46 @@ class DocumentCRUD(FirebaseCRUDBase):
         return await stats_crud.get_document_counts()
 
     async def update_document_analysis(self, id: str, analysis_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Update document analysis data (summaries, metrics, word frequencies).
-        
-        Args:
-            id: The document ID to update
-            analysis_data: Dictionary containing the analysis fields to update
-            
-        Returns:
-            Updated document or None if update fails
-        """
+        """Update document analysis data."""
         if not self.collection or not id:
-            logger.error("Cannot update document analysis: invalid collection or ID")
+            logger.error("Cannot update document analysis: missing collection or ID")
             return None
-        
+            
         try:
             # Get document reference
             doc_ref = self.collection.document(str(id))
             
-            # Check if document exists
+            # Get current document to preserve fields not included in update
             doc = doc_ref.get()
             if not doc.exists:
-                logger.warning(f"Document {id} not found for analysis update")
+                logger.warning(f"Document {id} not found - cannot update analysis")
                 return None
+                
+            # Update the document with the new analysis data
+            doc_ref.update({
+                **analysis_data,
+                'updated_at': datetime.now()
+            })
             
-            # Add updated_at timestamp
-            analysis_data["updated_at"] = datetime.now()
-            
-            # Update document with new analysis data
-            doc_ref.update(analysis_data)
-            
-            # Get updated document
+            # Get the updated document to return
             updated_doc = doc_ref.get()
-            updated_data = updated_doc.to_dict()
-            updated_data['id'] = updated_doc.id
+            result = updated_doc.to_dict()
+            result['id'] = updated_doc.id
+            
+            # Update stats collection
+            await stats_crud.update_last_updated()
+            
+            # Also update the document in Algolia
+            try:
+                await index_document(result)
+            except Exception as algolia_err:
+                logger.warning(f"Failed to update Algolia after updating document analysis: {algolia_err}")
             
             logger.info(f"Successfully updated analysis for document {id}")
-            return updated_data
+            return result
+            
         except Exception as e:
-            logger.error(f"Error updating document analysis: {str(e)}")
+            logger.error(f"Error updating document analysis for {id}: {str(e)}")
             return None
             
     async def update_company_name(self, id: str, company_name: str) -> Optional[Dict[str, Any]]:
@@ -378,14 +462,52 @@ class DocumentCRUD(FirebaseCRUDBase):
             return None
 
     async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Create a new document and update stats."""
-        result = await super().create(data)
-        
-        # Update stats if document was created successfully
-        if result and "document_type" in data:
-            await stats_crud.increment_document_count(data["document_type"])
+        """Create a new document."""
+        if not self.collection:
+            logger.error("Cannot create document: missing collection")
+            return None
             
-        return result
+        try:
+            # Validate that required fields are present
+            required_fields = ['url', 'document_type']
+            for field in required_fields:
+                if field not in data or not data[field]:
+                    logger.error(f"Cannot create document: missing required field '{field}'")
+                    return None
+            
+            # Set created_at and updated_at
+            now = datetime.now()
+            data['created_at'] = now
+            data['updated_at'] = now
+            
+            # Add the document
+            doc_ref = self.collection.document()
+            doc_ref.set(data)
+            
+            # Get the created document
+            created_doc = doc_ref.get()
+            if created_doc.exists:
+                result = created_doc.to_dict()
+                result['id'] = created_doc.id
+                
+                # Update stats collection
+                await stats_crud.update_last_updated()
+                
+                # Also index the document in Algolia
+                try:
+                    await index_document(result)
+                except Exception as algolia_err:
+                    logger.warning(f"Failed to index new document in Algolia: {algolia_err}")
+                
+                logger.info(f"Successfully created document with ID {created_doc.id}")
+                return result
+            else:
+                logger.error("Document creation failed - document does not exist after creation")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error creating document: {str(e)}")
+            return None
 
 # Create a global instance for reuse
 document_crud = DocumentCRUD() 

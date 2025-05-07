@@ -1,3 +1,90 @@
+# CRWLR API Server
+
+CRWLR is a backend API for extracting and analyzing Terms of Service (ToS) and Privacy Policy (PP) documents from websites.
+
+## Features
+
+- Find and extract Terms of Service and Privacy Policy documents from any website URL
+- Generate concise summaries of legal texts
+- Analyze text for readability, complexity, and key terms
+- Store and retrieve processed documents
+- Search through processed documents
+
+## Requirements
+
+- Python 3.8 or higher
+- See requirements.txt for Python packages
+
+## Installation
+
+1. Clone the repository
+2. Create a virtual environment (Python 3.8+)
+3. Install dependencies with `pip install -r requirements.txt`
+4. Set up your environment variables (see Configuration below)
+5. Run the server with `uvicorn app.main:app --reload`
+
+## Configuration
+
+Create a `.env` file in the root directory with the following variables:
+
+```
+# API Keys
+API_KEY=your_api_key
+GEMINI_API_KEY=your_gemini_api_key
+
+# Firebase Configuration
+FIREBASE_PROJECT_ID=your_firebase_project_id
+FIREBASE_CLIENT_EMAIL=your_firebase_client_email
+FIREBASE_PRIVATE_KEY="your_firebase_private_key"
+FIREBASE_SERVICE_ACCOUNT_PATH=path/to/firebase-credentials.json
+
+# Algolia Configuration (for search functionality)
+ALGOLIA_APP_ID=your_algolia_app_id
+ALGOLIA_API_KEY=your_algolia_admin_api_key
+
+# CORS Settings (comma-separated)
+BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000,https://yourdomain.com
+```
+
+### Algolia Setup
+
+For faster, more efficient document search:
+
+1. Create an [Algolia account](https://dashboard.algolia.com/)
+2. Create a new application in Algolia dashboard
+3. Get your Application ID and Admin API Key
+4. Add these to your `.env` file as shown above
+
+## API Endpoints
+
+The server exposes a FastAPI interface with the following key endpoints:
+
+- `/api/v1/crawl/crawl-tos` - Find and analyze a Terms of Service document
+- `/api/v1/crawl/crawl-pp` - Find and analyze a Privacy Policy document
+- `/api/v1/browse/` - Browse previously processed documents
+- `/api/v1/search/` - Search through documents
+
+## Development
+
+- Run tests with `pytest`
+- Format code with `black`
+- Check typing with `mypy`
+
+## Deployment
+
+The application can be deployed using Docker:
+
+```bash
+docker build -t crwlr-api .
+docker run -p 8000:8000 crwlr-api
+```
+
+Or deploy directly to Google Cloud Run using the provided `deploy_to_cloud_run.sh` script.
+
+## License
+
+See LICENSE file.
+
 # CRWLR Server
 
 API server for CRWLR application.
