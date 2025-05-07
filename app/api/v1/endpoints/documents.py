@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Path
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 import json
@@ -7,6 +7,7 @@ import logging
 from app.core.auth import get_api_key
 from app.models.database import Document
 from app.crud.document import document_crud
+from app.crud.stats import stats_crud
 from pydantic import BaseModel, Field
 
 # Setup logger
@@ -268,4 +269,52 @@ async def update_document_company_name(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post("/recount-stats", response_model=Dict[str, Any])
+async def recount_stats():
+    """
+    Force a recount of all documents and update the stats table.
+    
+    This is useful when the stats table may be out of sync with the actual document counts.
+    It performs a full scan of the documents collection and updates the stats with accurate counts.
+    """
+    logger.info("Manual stats recount triggered")
+    
+    try:
+        recount_result = await stats_crud.force_recount_stats()
+        
+        if not recount_result.get("success", False):
+            logger.error(f"Stats recount failed: {recount_result.get('message', 'Unknown error')}")
+            return {
+                "success": False,
+                "message": recount_result.get("message", "Stats recount failed"),
+                "counts": {
+                    "tos_count": recount_result.get("tos_count", 0),
+                    "pp_count": recount_result.get("pp_count", 0),
+                    "total_count": recount_result.get("total_count", 0)
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        logger.info(f"Stats recount successful: ToS={recount_result.get('tos_count', 0)}, PP={recount_result.get('pp_count', 0)}, Total={recount_result.get('total_count', 0)}")
+        
+        return {
+            "success": True,
+            "message": "Stats recounted successfully",
+            "counts": {
+                "tos_count": recount_result.get("tos_count", 0),
+                "pp_count": recount_result.get("pp_count", 0),
+                "total_count": recount_result.get("total_count", 0)
+            },
+            "last_updated": recount_result.get("last_updated", datetime.now()).isoformat() if isinstance(recount_result.get("last_updated"), datetime) else recount_result.get("last_updated"),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error during stats recount: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error during stats recount: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        } 

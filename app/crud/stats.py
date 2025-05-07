@@ -112,6 +112,102 @@ class StatsCRUD(FirebaseCRUDBase):
                 "last_updated": None
             }
     
+    async def force_recount_stats(self) -> Dict[str, Any]:
+        """
+        Force a recount of all documents and update the stats table.
+        
+        This is useful when the stats table may be out of sync with the actual document counts.
+        It performs a full scan of the documents collection and updates the stats with accurate counts.
+        
+        Returns:
+            Updated document counts after recount.
+        """
+        try:
+            if not self.collection:
+                logger.error("Firebase not initialized - cannot recount stats")
+                return {
+                    "tos_count": 0,
+                    "pp_count": 0,
+                    "total_count": 0,
+                    "last_updated": None,
+                    "success": False,
+                    "message": "Firebase not initialized"
+                }
+                
+            logger.info("Starting forced recount of all documents")
+            
+            # Get a reference to the documents collection
+            docs_collection = db.collection("documents")
+            
+            # Count ToS documents
+            tos_query = docs_collection.where("document_type", "==", "tos")
+            tos_docs = list(tos_query.stream())
+            tos_count = len(tos_docs)
+            logger.info(f"Recount found {tos_count} ToS documents")
+            
+            # Count PP documents
+            pp_query = docs_collection.where("document_type", "==", "pp")
+            pp_docs = list(pp_query.stream())
+            pp_count = len(pp_docs)
+            logger.info(f"Recount found {pp_count} PP documents")
+            
+            # Total count
+            total_count = tos_count + pp_count
+            
+            # Get current time for last_updated
+            now = datetime.now()
+            
+            # Update the stats document
+            stats_data = {
+                "tos_count": tos_count,
+                "pp_count": pp_count,
+                "total_count": total_count,
+                "last_updated": now
+            }
+            
+            # Use a transaction to update the stats document
+            doc_ref = self.collection.document(self.stats_id)
+            transaction = db.transaction()
+            
+            @firestore.transactional
+            def update_in_transaction(transaction, doc_ref, stats_data):
+                # Always set the document, whether it exists or not
+                transaction.set(doc_ref, stats_data)
+                return True
+                
+            result = update_in_transaction(transaction, doc_ref, stats_data)
+            
+            if result:
+                logger.info(f"Stats recounted and updated: ToS={tos_count}, PP={pp_count}, Total={total_count}")
+                return {
+                    "tos_count": tos_count,
+                    "pp_count": pp_count,
+                    "total_count": total_count,
+                    "last_updated": now,
+                    "success": True,
+                    "message": "Stats recounted successfully"
+                }
+            else:
+                logger.error("Failed to update stats document during recount")
+                return {
+                    "tos_count": tos_count,
+                    "pp_count": pp_count,
+                    "total_count": total_count,
+                    "last_updated": None,
+                    "success": False,
+                    "message": "Failed to update stats document"
+                }
+        except Exception as e:
+            logger.error(f"Error during forced stats recount: {str(e)}")
+            return {
+                "tos_count": 0,
+                "pp_count": 0,
+                "total_count": 0,
+                "last_updated": None,
+                "success": False,
+                "message": f"Error during recount: {str(e)}"
+            }
+    
     async def increment_document_count(self, document_type: str) -> bool:
         """Increment the count for a specific document type."""
         if not self.collection:
