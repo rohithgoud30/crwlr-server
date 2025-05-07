@@ -54,12 +54,14 @@ class CrawlPrivacyResponse(BaseModel):
 
 class ReanalyzeTosRequest(BaseModel):
     document_id: str
+    url: Optional[str] = None  # Optional new URL to use for extraction
     
 class ReanalyzeTosResponse(CrawlTosResponse):
     pass
     
 class ReanalyzePrivacyRequest(BaseModel):
     document_id: str
+    url: Optional[str] = None  # Optional new URL to use for extraction
     
 class ReanalyzePrivacyResponse(CrawlPrivacyResponse):
     pass 

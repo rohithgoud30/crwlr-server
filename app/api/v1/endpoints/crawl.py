@@ -1703,12 +1703,12 @@ async def reanalyze_tos(request: ReanalyzeTosRequest) -> ReanalyzeTosResponse:
     
     This endpoint:
     1. Retrieves the existing document using the provided ID
-    2. Extracts text from the stored URL (doesn't search for new URLs)
+    2. Extracts text from the provided URL or the stored URL if not provided
     3. Performs text analysis (summaries, word frequencies, text mining)
     4. Updates the document with the new analysis
     
     Args:
-        request: Contains the document_id to reanalyze
+        request: Contains the document_id to reanalyze and optional new URL
         
     Returns:
         Response with reanalysis results and status
@@ -1736,28 +1736,44 @@ async def reanalyze_tos(request: ReanalyzeTosRequest) -> ReanalyzeTosResponse:
             response.message = f"Document with ID {request.document_id} is not a Terms of Service document"
             return response
         
-        # Get the retrieved URL from the document
-        retrieved_url = document.get('retrieved_url')
-        if not retrieved_url:
-            response.message = "Document doesn't have a retrieved URL"
+        # Get the original and retrieved URLs from the document
+        original_url = document.get('url', '')
+        stored_retrieved_url = document.get('retrieved_url')
+        
+        # Set the response URL to the original document URL
+        response.url = original_url
+        
+        # Determine which URL to use for extraction
+        if request.url:
+            # Use the provided URL
+            extraction_url = request.url
+            logger.info(f"Using provided URL for extraction: {extraction_url}")
+            response.tos_url = extraction_url
+        elif stored_retrieved_url:
+            # Use the stored retrieved URL
+            extraction_url = stored_retrieved_url
+            logger.info(f"Using stored URL for extraction: {extraction_url}")
+            response.tos_url = extraction_url
+        else:
+            response.message = "Document doesn't have a retrieved URL and no new URL was provided"
             return response
         
-        original_url = document.get('url', '')
-        response.url = original_url
-        response.tos_url = retrieved_url
-        
-        # Extract text from the retrieved URL
-        logger.info(f"Extracting text from stored URL: {retrieved_url}")
+        # Extract text from the URL
+        logger.info(f"Extracting text from URL: {extraction_url}")
         try:
-            text_result = await extract_text_from_url(retrieved_url, 'tos')
+            text_result = await extract_text_from_url(extraction_url, 'tos')
             
             if not text_result:
-                response.message = f"Failed to extract text from URL: {retrieved_url}"
+                response.message = f"Failed to extract text from URL: {extraction_url}"
                 return response
             
-            extracted_text, actual_url = text_result
+            extracted_text, extraction_error = text_result
+            
+            # If there was an error but we still got some text, log it
+            if extraction_error:
+                logger.warning(f"Extraction warning: {extraction_error}")
         except Exception as extract_err:
-            logger.error(f"Error extracting text from URL {retrieved_url}: {str(extract_err)}")
+            logger.error(f"Error extracting text from URL {extraction_url}: {str(extract_err)}")
             response.message = f"Error extracting text: {str(extract_err)}"
             return response
         
@@ -1768,7 +1784,7 @@ async def reanalyze_tos(request: ReanalyzeTosRequest) -> ReanalyzeTosResponse:
         
         # Perform parallel analysis
         logger.info("Starting analysis of extracted text")
-        analysis = await perform_parallel_analysis(retrieved_url, extracted_text, 'tos')
+        analysis = await perform_parallel_analysis(extraction_url, extracted_text, 'tos')
         
         # Set company info
         company_name = document.get('company_name', '')
@@ -1820,6 +1836,10 @@ async def reanalyze_tos(request: ReanalyzeTosRequest) -> ReanalyzeTosResponse:
             "word_frequencies": serializable_word_freqs,
             "text_mining_metrics": serializable_text_mining
         }
+        
+        # If a new URL was provided, update the retrieved_url in the document
+        if request.url:
+            update_data["retrieved_url"] = request.url
         
         if all_analyses_successful:
             # Update the document with new analysis
@@ -1880,12 +1900,12 @@ async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResp
     
     This endpoint:
     1. Retrieves the existing document using the provided ID
-    2. Extracts text from the stored URL (doesn't search for new URLs)
+    2. Extracts text from the provided URL or the stored URL if not provided
     3. Performs text analysis (summaries, word frequencies, text mining)
     4. Updates the document with the new analysis
     
     Args:
-        request: Contains the document_id to reanalyze
+        request: Contains the document_id to reanalyze and optional new URL
         
     Returns:
         Response with reanalysis results and status
@@ -1913,28 +1933,44 @@ async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResp
             response.message = f"Document with ID {request.document_id} is not a Privacy Policy document"
             return response
         
-        # Get the retrieved URL from the document
-        retrieved_url = document.get('retrieved_url')
-        if not retrieved_url:
-            response.message = "Document doesn't have a retrieved URL"
+        # Get the original and retrieved URLs from the document
+        original_url = document.get('url', '')
+        stored_retrieved_url = document.get('retrieved_url')
+        
+        # Set the response URL to the original document URL
+        response.url = original_url
+        
+        # Determine which URL to use for extraction
+        if request.url:
+            # Use the provided URL
+            extraction_url = request.url
+            logger.info(f"Using provided URL for extraction: {extraction_url}")
+            response.pp_url = extraction_url
+        elif stored_retrieved_url:
+            # Use the stored retrieved URL
+            extraction_url = stored_retrieved_url
+            logger.info(f"Using stored URL for extraction: {extraction_url}")
+            response.pp_url = extraction_url
+        else:
+            response.message = "Document doesn't have a retrieved URL and no new URL was provided"
             return response
         
-        original_url = document.get('url', '')
-        response.url = original_url
-        response.pp_url = retrieved_url
-        
-        # Extract text from the retrieved URL
-        logger.info(f"Extracting text from stored URL: {retrieved_url}")
+        # Extract text from the URL
+        logger.info(f"Extracting text from URL: {extraction_url}")
         try:
-            text_result = await extract_text_from_url(retrieved_url, 'pp')
+            text_result = await extract_text_from_url(extraction_url, 'pp')
             
             if not text_result:
-                response.message = f"Failed to extract text from URL: {retrieved_url}"
+                response.message = f"Failed to extract text from URL: {extraction_url}"
                 return response
             
-            extracted_text, actual_url = text_result
+            extracted_text, extraction_error = text_result
+            
+            # If there was an error but we still got some text, log it
+            if extraction_error:
+                logger.warning(f"Extraction warning: {extraction_error}")
         except Exception as extract_err:
-            logger.error(f"Error extracting text from URL {retrieved_url}: {str(extract_err)}")
+            logger.error(f"Error extracting text from URL {extraction_url}: {str(extract_err)}")
             response.message = f"Error extracting text: {str(extract_err)}"
             return response
         
@@ -1945,7 +1981,7 @@ async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResp
         
         # Perform parallel analysis
         logger.info("Starting analysis of extracted text")
-        analysis = await perform_parallel_analysis(retrieved_url, extracted_text, 'pp')
+        analysis = await perform_parallel_analysis(extraction_url, extracted_text, 'pp')
         
         # Set company info
         company_name = document.get('company_name', '')
@@ -1997,6 +2033,10 @@ async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResp
             "word_frequencies": serializable_word_freqs,
             "text_mining_metrics": serializable_text_mining
         }
+        
+        # If a new URL was provided, update the retrieved_url in the document
+        if request.url:
+            update_data["retrieved_url"] = request.url
         
         if all_analyses_successful:
             # Update the document with new analysis
