@@ -271,32 +271,14 @@ class DocumentCRUD(FirebaseCRUDBase):
             # Delete the document
             doc_ref.delete()
             logger.info(f"Document {id} deleted successfully")
-            
-            # Invalidate the cache after deletion
-            self._document_counts_cache = None
-            self._cache_timestamp = None
-            
             return True
         except Exception as e:
             logger.error(f"Error deleting document {id}: {str(e)}")
             return False
-            
-    # Add cache variables with short expiry time
-    _document_counts_cache = None
-    _cache_timestamp = None
-    _cache_expiry_seconds = 60  # Cache expires after 60 seconds for near real-time updates
     
     async def get_document_counts(self) -> Dict[str, int]:
-        """Get counts of documents by type with short-lived caching."""
+        """Get counts of documents by type."""
         try:
-            # Check if we have a valid cache
-            current_time = datetime.now()
-            if (self._document_counts_cache is not None and 
-                self._cache_timestamp is not None and
-                (current_time - self._cache_timestamp).total_seconds() < self._cache_expiry_seconds):
-                # Use cached value for very fast responses
-                return self._document_counts_cache.copy()
-                
             # First check if Firebase is available
             if not self.collection:
                 logger.error("Firebase not initialized - returning default document counts")
@@ -319,16 +301,11 @@ class DocumentCRUD(FirebaseCRUDBase):
             # Total count
             total_count = tos_count + pp_count
             
-            # Create and cache result
-            result = {
+            return {
                 "tos_count": tos_count,
                 "pp_count": pp_count,
                 "total_count": total_count
             }
-            self._document_counts_cache = result.copy()
-            self._cache_timestamp = current_time
-            
-            return result
         except Exception as e:
             logger.error(f"Error getting document counts: {str(e)}")
             # Return default counts when an error occurs
@@ -337,12 +314,7 @@ class DocumentCRUD(FirebaseCRUDBase):
                 "pp_count": 0,
                 "total_count": 0
             }
-            
-    async def invalidate_counts_cache(self):
-        """Force invalidate the document counts cache."""
-        self._document_counts_cache = None
-        self._cache_timestamp = None
-    
+
     async def update_document_analysis(self, id: str, analysis_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Update document analysis data (summaries, metrics, word frequencies).
@@ -433,9 +405,6 @@ class DocumentCRUD(FirebaseCRUDBase):
     async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Create a new document."""
         result = await super().create(data)
-        # Invalidate cache when a new document is created
-        self._document_counts_cache = None
-        self._cache_timestamp = None
         return result
 
 # Create a global instance for reuse
