@@ -32,8 +32,29 @@ def find_available_port(start_port=8080, max_attempts=10):
     logger.warning(f"Could not find available port after {max_attempts} attempts. Using {start_port} anyway.")
     return start_port
 
+def initialize_services():
+    """Initialize required services before starting the app"""
+    try:
+        # Initialize Algolia
+        from app.core.algolia import init_algolia
+        algolia_client = init_algolia()
+        if algolia_client:
+            logger.info("Algolia service initialized successfully")
+        else:
+            logger.warning("Failed to initialize Algolia. Search functionality may be limited.")
+            
+        # Initialize other services as needed
+        # ...
+        
+    except Exception as e:
+        logger.error(f"Error initializing services: {e}")
+        logger.warning("Application will start, but some features may not work correctly")
+
 if __name__ == "__main__":
     try:
+        # Initialize services
+        initialize_services()
+        
         desired_port = int(os.environ.get("PORT", 8080))
         port = find_available_port(desired_port)
         

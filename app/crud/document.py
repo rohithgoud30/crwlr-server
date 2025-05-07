@@ -5,7 +5,7 @@ from app.core.database import db
 from datetime import datetime
 from google.cloud import firestore
 from app.crud.stats import stats_crud
-from app.core.algolia import index_document, search_documents as algolia_search
+from app.core.algolia import save_document_to_algolia, search_documents as algolia_search, delete_document as algolia_delete_document, batch_save_documents
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ class DocumentCRUD(FirebaseCRUDBase):
                 
                 # Also update the document in Algolia
                 try:
-                    await index_document(result)
+                    save_document_to_algolia(id, result)
                 except Exception as algolia_err:
                     logger.warning(f"Failed to update Algolia after incrementing views: {algolia_err}")
                 
@@ -133,40 +133,25 @@ class DocumentCRUD(FirebaseCRUDBase):
             # Try Algolia search first
             algolia_results = None
             try:
-                # Convert pagination parameters for Algolia
-                algolia_page = page - 1  # Algolia uses 0-indexed pagination
-                
-                # Create filters if document_type is specified
-                filters = f"document_type:{document_type}" if document_type else None
-                
                 # Attempt Algolia search
-                algolia_results = await algolia_search(
+                algolia_results = algolia_search(
                     query=query,
-                    document_type=document_type,
-                    filters=filters
+                    doc_type=document_type,
+                    limit=page * per_page  # Get enough results for pagination
                 )
                 
                 # Check if Algolia search was successful
-                if algolia_results and "hits" in algolia_results:
+                if algolia_results:
                     logger.info(f"Algolia search successful for query: {query}")
                     
-                    # Extract results from Algolia's response format
-                    total = algolia_results.get("nbHits", 0)
+                    # Calculate pagination parameters
+                    total = len(algolia_results)
                     total_pages = (total + per_page - 1) // per_page if total > 0 else 0
                     
-                    # Convert Algolia hits to our format
-                    hits = algolia_results.get("hits", [])
-                    items = []
-                    for hit in hits:
-                        # Algolia hits have objectID that maps to our document ID
-                        item = hit.copy()
-                        item["id"] = hit.get("objectID", "")
-                        items.append(item)
-                    
-                    # Apply pagination manually since we're getting all results from Algolia
+                    # Apply pagination manually
                     start_idx = (page - 1) * per_page
-                    end_idx = min(start_idx + per_page, len(items))
-                    items_page = items[start_idx:end_idx] if start_idx < len(items) else []
+                    end_idx = min(start_idx + per_page, len(algolia_results))
+                    items_page = algolia_results[start_idx:end_idx] if start_idx < len(algolia_results) else []
                     
                     return {
                         "items": items_page,
@@ -337,32 +322,35 @@ class DocumentCRUD(FirebaseCRUDBase):
             return []
             
     async def delete_document(self, id: str) -> bool:
-        """Delete a document by ID and update stats."""
+        """Delete a document by ID."""
         if not self.collection:
-            logger.error("Firebase database not initialized")
             return False
             
         try:
-            doc_id = str(id)
-            doc_ref = self.collection.document(doc_id)
+            # Get the document first to check document_type
+            doc_ref = self.collection.document(str(id))
+            doc_snapshot = doc_ref.get()
             
-            # Check if document exists and get its type
-            doc = doc_ref.get()
-            if not doc.exists:
+            if not doc_snapshot.exists:
                 logger.warning(f"Document {id} not found - cannot delete")
                 return False
-            
-            # Get document type for stats update
-            doc_data = doc.to_dict()
-            document_type = doc_data.get("document_type")
                 
-            # Delete the document
+            doc_data = doc_snapshot.to_dict()
+            document_type = doc_data.get("document_type", "unknown")
+            
+            # Delete from Firestore
             doc_ref.delete()
-            logger.info(f"Document {id} deleted successfully")
+            logger.info(f"Deleted document {id} from Firestore")
             
             # Update stats
-            if document_type:
-                await stats_crud.decrement_document_count(document_type)
+            await stats_crud.update_counts()
+            
+            # Also delete from Algolia
+            try:
+                algolia_delete_document(id, document_type)
+                logger.info(f"Deleted document {id} from Algolia")
+            except Exception as algolia_err:
+                logger.warning(f"Failed to delete document {id} from Algolia: {algolia_err}")
             
             return True
         except Exception as e:
@@ -374,44 +362,50 @@ class DocumentCRUD(FirebaseCRUDBase):
         return await stats_crud.get_document_counts()
 
     async def update_document_analysis(self, id: str, analysis_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Update document analysis data."""
-        if not self.collection or not id:
-            logger.error("Cannot update document analysis: missing collection or ID")
+        """
+        Update only the analysis-related fields of a document.
+        
+        Args:
+            id: Document ID
+            analysis_data: Dictionary containing analysis fields to update
+            
+        Returns:
+            Updated document or None if failed
+        """
+        if not self.collection:
             return None
             
         try:
             # Get document reference
             doc_ref = self.collection.document(str(id))
             
-            # Get current document to preserve fields not included in update
-            doc = doc_ref.get()
-            if not doc.exists:
+            # Check if document exists
+            doc_snapshot = doc_ref.get()
+            if not doc_snapshot.exists:
                 logger.warning(f"Document {id} not found - cannot update analysis")
                 return None
                 
-            # Update the document with the new analysis data
-            doc_ref.update({
-                **analysis_data,
-                'updated_at': datetime.now()
-            })
+            # Add updated_at timestamp
+            analysis_data["updated_at"] = datetime.now()
             
-            # Get the updated document to return
+            # Update the document
+            doc_ref.update(analysis_data)
+            
+            # Get the updated document
             updated_doc = doc_ref.get()
             result = updated_doc.to_dict()
-            result['id'] = updated_doc.id
+            result["id"] = updated_doc.id
             
-            # Update stats collection
-            await stats_crud.update_last_updated()
+            logger.info(f"Updated analysis for document {id}")
             
-            # Also update the document in Algolia
+            # Also update in Algolia
             try:
-                await index_document(result)
+                save_document_to_algolia(id, result)
+                logger.info(f"Updated document {id} in Algolia")
             except Exception as algolia_err:
-                logger.warning(f"Failed to update Algolia after updating document analysis: {algolia_err}")
+                logger.warning(f"Failed to update document {id} in Algolia: {algolia_err}")
             
-            logger.info(f"Successfully updated analysis for document {id}")
             return result
-            
         except Exception as e:
             logger.error(f"Error updating document analysis for {id}: {str(e)}")
             return None
@@ -462,49 +456,43 @@ class DocumentCRUD(FirebaseCRUDBase):
             return None
 
     async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Create a new document."""
+        """
+        Create a new document.
+        
+        Args:
+            data: Document data
+            
+        Returns:
+            Created document with ID or None if failed
+        """
         if not self.collection:
-            logger.error("Cannot create document: missing collection")
             return None
             
         try:
-            # Validate that required fields are present
-            required_fields = ['url', 'document_type']
-            for field in required_fields:
-                if field not in data or not data[field]:
-                    logger.error(f"Cannot create document: missing required field '{field}'")
-                    return None
-            
-            # Set created_at and updated_at
-            now = datetime.now()
-            data['created_at'] = now
-            data['updated_at'] = now
-            
-            # Add the document
+            # Create a new document with auto-generated ID
             doc_ref = self.collection.document()
+            
+            # Set the data
             doc_ref.set(data)
             
             # Get the created document
             created_doc = doc_ref.get()
-            if created_doc.exists:
-                result = created_doc.to_dict()
-                result['id'] = created_doc.id
-                
-                # Update stats collection
-                await stats_crud.update_last_updated()
-                
-                # Also index the document in Algolia
-                try:
-                    await index_document(result)
-                except Exception as algolia_err:
-                    logger.warning(f"Failed to index new document in Algolia: {algolia_err}")
-                
-                logger.info(f"Successfully created document with ID {created_doc.id}")
-                return result
-            else:
-                logger.error("Document creation failed - document does not exist after creation")
-                return None
-                
+            result = created_doc.to_dict()
+            result["id"] = created_doc.id
+            
+            logger.info(f"Created document with ID: {created_doc.id}")
+            
+            # Update statistics counts
+            await stats_crud.update_counts()
+            
+            # Also add to Algolia
+            try:
+                save_document_to_algolia(created_doc.id, result)
+                logger.info(f"Added document {created_doc.id} to Algolia")
+            except Exception as algolia_err:
+                logger.warning(f"Failed to add document {created_doc.id} to Algolia: {algolia_err}")
+            
+            return result
         except Exception as e:
             logger.error(f"Error creating document: {str(e)}")
             return None

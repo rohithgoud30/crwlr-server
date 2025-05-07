@@ -5,75 +5,238 @@ from algoliasearch.search.client import SearchClient, SearchClientAsync
 from algoliasearch.search.models import IndexSettings
 from app.core.config import settings
 from datetime import datetime
+from algoliasearch.search_client import SearchClient
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class AlgoliaConfig:
-    """Algolia configuration wrapper class."""
-    
-    ALGOLIA_APP_ID: Optional[str] = None
-    ALGOLIA_API_KEY: Optional[str] = None
-    ALGOLIA_INDEX_NAME_TOS: str = "tos_documents"
-    ALGOLIA_INDEX_NAME_PP: str = "pp_documents"
-    
-    @classmethod
-    def initialize(cls):
-        """Initialize Algolia settings from environment variables."""
-        # Try to get credentials from environment variables
-        cls.ALGOLIA_APP_ID = os.environ.get("ALGOLIA_APP_ID") or settings.ALGOLIA_APP_ID
-        cls.ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY") or settings.ALGOLIA_API_KEY
-        
-        if not cls.ALGOLIA_APP_ID or not cls.ALGOLIA_API_KEY:
-            logger.warning("Algolia credentials not set. Algolia search will not be available.")
-            return False
-        
-        logger.info(f"Algolia credentials loaded. App ID: {cls.ALGOLIA_APP_ID[:5]}...")
-        return True
-    
-    @classmethod
-    def get_client(cls) -> Optional[SearchClient]:
-        """Get Algolia search client."""
-        if not cls.ALGOLIA_APP_ID or not cls.ALGOLIA_API_KEY:
-            if not cls.initialize():
-                return None
-        
-        try:
-            client = SearchClient(cls.ALGOLIA_APP_ID, cls.ALGOLIA_API_KEY)
-            return client
-        except Exception as e:
-            logger.error(f"Error creating Algolia client: {e}")
-            return None
-    
-    @classmethod
-    async def get_async_client(cls) -> Optional[SearchClientAsync]:
-        """Get Algolia async search client."""
-        if not cls.ALGOLIA_APP_ID or not cls.ALGOLIA_API_KEY:
-            if not cls.initialize():
-                return None
-        
-        try:
-            client = SearchClientAsync(cls.ALGOLIA_APP_ID, cls.ALGOLIA_API_KEY)
-            return client
-        except Exception as e:
-            logger.error(f"Error creating Algolia async client: {e}")
-            return None
-    
-    @classmethod
-    def get_index_name(cls, document_type: str) -> str:
-        """Get the appropriate index name based on document type."""
-        if document_type.lower() == "tos":
-            return cls.ALGOLIA_INDEX_NAME_TOS
-        elif document_type.lower() == "pp":
-            return cls.ALGOLIA_INDEX_NAME_PP
-        else:
-            logger.warning(f"Unknown document type: {document_type}. Using TOS index as fallback.")
-            return cls.ALGOLIA_INDEX_NAME_TOS
+# Initialize Algolia client
+algolia_client = None
+tos_index = None
+pp_index = None
 
-# Initialize Algolia settings
-algolia_config = AlgoliaConfig()
-algolia_config.initialize()
+def init_algolia():
+    """Initialize Algolia client and indices"""
+    global algolia_client, tos_index, pp_index
+    
+    try:
+        app_id = os.getenv("ALGOLIA_APP_ID")
+        api_key = os.getenv("ALGOLIA_API_KEY")
+        
+        if not app_id or not api_key:
+            logger.warning("Algolia credentials not found in environment variables.")
+            return None
+            
+        algolia_client = SearchClient.create(app_id, api_key)
+        
+        # Initialize indices
+        tos_index = algolia_client.init_index('tos_documents')
+        pp_index = algolia_client.init_index('pp_documents')
+        
+        # Configure index settings for better search
+        tos_index.set_settings({
+            'searchableAttributes': [
+                'company_name',
+                'one_sentence_summary',
+                'hundred_word_summary',
+                'unordered(raw_text)'
+            ],
+            'attributesForFaceting': ['company_name', 'document_type'],
+            'customRanking': ['desc(views)']
+        })
+        
+        pp_index.set_settings({
+            'searchableAttributes': [
+                'company_name',
+                'one_sentence_summary',
+                'hundred_word_summary',
+                'unordered(raw_text)'
+            ],
+            'attributesForFaceting': ['company_name', 'document_type'],
+            'customRanking': ['desc(views)']
+        })
+        
+        logger.info("Algolia client and indices initialized successfully")
+        return algolia_client
+    except Exception as e:
+        logger.error(f"Error initializing Algolia client: {e}")
+        return None
+
+def save_document_to_algolia(document_id: str, document_data: Dict[str, Any]) -> bool:
+    """
+    Save a document to Algolia.
+    
+    Args:
+        document_id: The document ID (will be used as objectID in Algolia)
+        document_data: Document data to be indexed
+        
+    Returns:
+        Boolean indicating success/failure
+    """
+    try:
+        # Make sure client is initialized
+        if not algolia_client:
+            init_algolia()
+            if not algolia_client:
+                return False
+                
+        # Determine which index to use
+        doc_type = document_data.get('document_type', '').lower()
+        index = tos_index if doc_type == 'tos' else pp_index if doc_type == 'pp' else None
+        
+        if not index:
+            logger.error(f"Unknown document type: {doc_type}")
+            return False
+            
+        # Set the objectID to match our document ID
+        document_data['objectID'] = document_id
+        
+        # Limit raw_text to avoid hitting Algolia record size limits (10KB)
+        if 'raw_text' in document_data and document_data['raw_text']:
+            # Truncate to ~5KB (approx 5000 chars)
+            document_data['raw_text'] = document_data['raw_text'][:5000]
+        
+        # Save to Algolia
+        index.save_object(document_data)
+        logger.info(f"Document {document_id} saved to Algolia index")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving document to Algolia: {e}")
+        return False
+
+def batch_save_documents(documents: List[Dict[str, Any]], doc_type: str) -> bool:
+    """
+    Save multiple documents to Algolia in a batch operation.
+    
+    Args:
+        documents: List of document data to be indexed
+        doc_type: Document type ('tos' or 'pp')
+        
+    Returns:
+        Boolean indicating success/failure
+    """
+    try:
+        # Make sure client is initialized
+        if not algolia_client:
+            init_algolia()
+            if not algolia_client:
+                return False
+                
+        # Determine which index to use
+        index = tos_index if doc_type.lower() == 'tos' else pp_index if doc_type.lower() == 'pp' else None
+        
+        if not index:
+            logger.error(f"Unknown document type: {doc_type}")
+            return False
+            
+        # Prepare documents for Algolia
+        algolia_objects = []
+        for doc in documents:
+            # Make a copy of the document to avoid modifying the original
+            algolia_doc = doc.copy()
+            
+            # Ensure each document has an objectID
+            if 'id' in doc and 'objectID' not in algolia_doc:
+                algolia_doc['objectID'] = doc['id']
+                
+            # Limit raw_text to avoid hitting record size limits
+            if 'raw_text' in algolia_doc and algolia_doc['raw_text']:
+                algolia_doc['raw_text'] = algolia_doc['raw_text'][:5000]
+                
+            algolia_objects.append(algolia_doc)
+            
+        # Save to Algolia
+        index.save_objects(algolia_objects)
+        logger.info(f"Batch of {len(algolia_objects)} documents saved to Algolia {doc_type} index")
+        return True
+    except Exception as e:
+        logger.error(f"Error batch saving documents to Algolia: {e}")
+        return False
+
+def search_documents(query: str, doc_type: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Search for documents in Algolia.
+    
+    Args:
+        query: Search query string
+        doc_type: Optional document type filter ('tos' or 'pp')
+        limit: Maximum number of results to return
+        
+    Returns:
+        List of matching document data
+    """
+    try:
+        # Make sure client is initialized
+        if not algolia_client:
+            init_algolia()
+            if not algolia_client:
+                return []
+                
+        # If document type is specified, search only that index
+        if doc_type:
+            index = tos_index if doc_type.lower() == 'tos' else pp_index if doc_type.lower() == 'pp' else None
+            
+            if not index:
+                logger.error(f"Unknown document type: {doc_type}")
+                return []
+                
+            results = index.search(query, {
+                'hitsPerPage': limit
+            })
+            
+            return results['hits']
+        else:
+            # Search both indices and combine results
+            tos_results = tos_index.search(query, {
+                'hitsPerPage': limit // 2  # Split limit between both indices
+            })
+            
+            pp_results = pp_index.search(query, {
+                'hitsPerPage': limit // 2
+            })
+            
+            # Combine and return results
+            return tos_results['hits'] + pp_results['hits']
+    except Exception as e:
+        logger.error(f"Error searching documents in Algolia: {e}")
+        return []
+
+def delete_document(document_id: str, doc_type: str) -> bool:
+    """
+    Delete a document from Algolia.
+    
+    Args:
+        document_id: The document ID to delete
+        doc_type: Document type ('tos' or 'pp')
+        
+    Returns:
+        Boolean indicating success/failure
+    """
+    try:
+        # Make sure client is initialized
+        if not algolia_client:
+            init_algolia()
+            if not algolia_client:
+                return False
+                
+        # Determine which index to use
+        index = tos_index if doc_type.lower() == 'tos' else pp_index if doc_type.lower() == 'pp' else None
+        
+        if not index:
+            logger.error(f"Unknown document type: {doc_type}")
+            return False
+            
+        # Delete from Algolia
+        index.delete_object(document_id)
+        logger.info(f"Document {document_id} deleted from Algolia")
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting document from Algolia: {e}")
+        return False
+
+# Initialize Algolia at module load
+init_algolia()
 
 async def prepare_document_for_algolia(document: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -118,7 +281,7 @@ async def index_document(document: Dict[str, Any]) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    client = await algolia_config.get_async_client()
+    client = await algolia_client
     if not client:
         logger.error("Failed to create Algolia client. Document not indexed.")
         return False
@@ -128,17 +291,19 @@ async def index_document(document: Dict[str, Any]) -> bool:
         algolia_doc = await prepare_document_for_algolia(document)
         
         # Get the appropriate index
-        index_name = algolia_config.get_index_name(document.get("document_type", "tos"))
+        doc_type = document.get("document_type", "tos").lower()
+        index = tos_index if doc_type == "tos" else pp_index if doc_type == "pp" else None
+        
+        if not index:
+            logger.error(f"Unknown document type: {doc_type}")
+            return False
         
         # Index the document
-        response = await client.save_object(
-            index_name=index_name,
-            body=algolia_doc
-        )
+        response = await index.save_object(algolia_doc)
         
         # Wait for the indexing task to complete
         await client.wait_for_task(
-            index_name=index_name,
+            index_name=index.index_name,
             task_id=response.task_id
         )
         
@@ -161,7 +326,7 @@ async def search_documents(query: str, document_type: str = None, filters: str =
     Returns:
         Search results
     """
-    client = await algolia_config.get_async_client()
+    client = await algolia_client
     if not client:
         logger.error("Failed to create Algolia client. Search not performed.")
         return {"hits": [], "nbHits": 0}
@@ -171,17 +336,23 @@ async def search_documents(query: str, document_type: str = None, filters: str =
         indices = []
         if document_type:
             # Search only the specified document type
-            indices.append(algolia_config.get_index_name(document_type))
+            doc_type = document_type.lower()
+            index = tos_index if doc_type == "tos" else pp_index if doc_type == "pp" else None
+            if index:
+                indices.append(index)
+            else:
+                logger.warning(f"Unknown document type: {document_type}. Using TOS index as fallback.")
+                indices.append(tos_index)
         else:
             # Search both document types
-            indices.append(algolia_config.get_index_name("tos"))
-            indices.append(algolia_config.get_index_name("pp"))
+            indices.append(tos_index)
+            indices.append(pp_index)
         
         # Prepare search requests
         requests = []
-        for index_name in indices:
+        for index in indices:
             request = {
-                "indexName": index_name,
+                "indexName": index.index_name,
                 "query": query,
                 "hitsPerPage": 20,
             }
@@ -213,7 +384,7 @@ async def configure_indices() -> bool:
     Returns:
         True if successful, False otherwise
     """
-    client = await algolia_config.get_async_client()
+    client = await algolia_client
     if not client:
         logger.error("Failed to create Algolia client. Indices not configured.")
         return False
@@ -251,16 +422,10 @@ async def configure_indices() -> bool:
         )
         
         # Apply settings to TOS index
-        await client.update_index_settings(
-            index_name=algolia_config.ALGOLIA_INDEX_NAME_TOS,
-            settings=index_settings.to_dict()
-        )
+        await tos_index.set_settings(index_settings.to_dict())
         
         # Apply settings to PP index
-        await client.update_index_settings(
-            index_name=algolia_config.ALGOLIA_INDEX_NAME_PP,
-            settings=index_settings.to_dict()
-        )
+        await pp_index.set_settings(index_settings.to_dict())
         
         logger.info("Successfully configured Algolia indices")
         return True
