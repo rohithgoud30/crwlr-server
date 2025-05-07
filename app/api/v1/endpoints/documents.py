@@ -80,6 +80,7 @@ class DocumentCountResponse(BaseModel):
     tos_count: int
     pp_count: int
     total_count: int
+    last_updated: Optional[datetime] = None
 
 
 @router.get("/documents/stats", response_model=DocumentCountResponse)
@@ -93,13 +94,19 @@ async def get_document_counts(
     - **tos_count**: Total number of Terms of Service documents
     - **pp_count**: Total number of Privacy Policy documents
     - **total_count**: Total number of all documents
+    - **last_updated**: When the stats were last updated
     """
     try:
         counts = await document_crud.get_document_counts()
+        
+        # Convert last_updated if it exists
+        last_updated = counts.get("last_updated")
+        
         return {
             "tos_count": counts.get("tos_count", 0),
             "pp_count": counts.get("pp_count", 0),
-            "total_count": counts.get("total_count", 0)
+            "total_count": counts.get("total_count", 0),
+            "last_updated": last_updated
         }
     except Exception as e:
         logger.error(f"Error getting document counts: {str(e)}")
@@ -107,7 +114,8 @@ async def get_document_counts(
         return {
             "tos_count": 0,
             "pp_count": 0,
-            "total_count": 0
+            "total_count": 0,
+            "last_updated": None
         }
 
 
