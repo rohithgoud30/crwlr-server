@@ -1480,59 +1480,82 @@ def get_word_frequencies(text: str, max_words: int = 20):
 
 def extract_text_mining_metrics(text: str):
     """
-    Extract text mining metrics from the text.
+    Extract text mining metrics from the given text.
     
     Args:
-        text: The text to analyze.
+        text: The text to analyze
         
     Returns:
-        Dictionary of text mining metrics.
+        TextMiningResults instance with the extracted metrics
     """
     try:
-        # Split text into words, sentences, paragraphs
-        words = text.split()
-        sentences = text.split('.')
-        paragraphs = text.split('\n\n')
+        # Fall back to basic text analysis if the text is empty
+        if not text or len(text.strip()) == 0:
+            return TextMiningResults(
+                word_count=0, 
+                avg_word_length=0.00, 
+                sentence_count=0, 
+                avg_sentence_length=0.00,
+                readability_score=0.00,
+                readability_interpretation="Not applicable - No text to analyze",
+                unique_word_ratio=0.00,
+                capital_letter_freq=0.00,
+                punctuation_density=0.00,
+                question_frequency=0.00,
+                paragraph_count=0,
+                common_word_percentage=0.00
+            )
         
-        # Count number of words, sentences, paragraphs
+        # Simple text mining metrics
+        words = re.findall(r'\b\w+\b', text.lower())
         word_count = len(words)
-        sentence_count = len(sentences)
-        paragraph_count = len(paragraphs)
         
-        # Average word length
+        unique_words = set(words)
+        unique_word_ratio = (len(unique_words) / word_count) * 100 if word_count else 0
+        
         avg_word_length = sum(len(word) for word in words) / word_count if word_count else 0
         
-        # Average sentence length
+        sentences = re.split(r'[.!?]+(?=\s+|$)', text)
+        sentences = [s for s in sentences if s.strip()]
+        sentence_count = len(sentences)
+        
         avg_sentence_length = word_count / sentence_count if sentence_count else 0
         
-        # Calculate readability score (simple approximation of Flesch-Kincaid)
-        readability_score = 206.835 - (1.015 * avg_sentence_length) - (84.6 * avg_word_length / 5)
+        # Readability metrics - simplified Flesch Reading Ease
+        syllable_count = sum(count_syllables(word) for word in words)
+        syllables_per_word = syllable_count / word_count if word_count else 0
+        
+        # Calculate readability using simplified Flesch Reading Ease formula
+        readability_score = 206.835 - (1.015 * avg_sentence_length) - (84.6 * syllables_per_word)
+        
+        # Clamp to reasonable range
         readability_score = max(0, min(100, readability_score))
         
         # Interpret readability score
         if readability_score >= 90:
-            interpretation = "Very Easy"
+            interpretation = "Very Easy: 5th-grade level"
         elif readability_score >= 80:
-            interpretation = "Easy"
+            interpretation = "Easy: 6th-grade level"
         elif readability_score >= 70:
-            interpretation = "Fairly Easy"
+            interpretation = "Fairly Easy: 7th-grade level"
         elif readability_score >= 60:
-            interpretation = "Standard"
+            interpretation = "Standard: 8th-9th grade level"
         elif readability_score >= 50:
-            interpretation = "Fairly Difficult"
+            interpretation = "Fairly Difficult: 10th-12th grade level"
         elif readability_score >= 30:
-            interpretation = "Difficult"
+            interpretation = "Difficult: College level"
         else:
-            interpretation = "Very Difficult"
+            interpretation = "Very Difficult: College graduate level"
         
-        # Unique word ratio
-        unique_words = set(words)
-        unique_word_ratio = len(unique_words) / word_count if word_count else 0
+        # Count paragraphs by splitting on double newlines
+        paragraphs = re.split(r'\n\s*\n', text)
+        paragraphs = [p for p in paragraphs if p.strip()]
+        paragraph_count = len(paragraphs)
         
-        # Other metrics
-        capital_letter_freq = sum(1 for char in text if char.isupper()) / len(text) if text else 0
-        punctuation_freq = sum(1 for char in text if char in '.,;:!?()[]{}"\'-') / len(text) if text else 0
-        question_freq = text.count('?') / sentence_count if sentence_count else 0
+        # Calculate additional metrics
+        capital_letter_freq = sum(1 for word in re.findall(r'\b\w+\b', text) if word and word[0].isupper()) / word_count * 100 if word_count else 0
+        punctuation_freq = sum(1 for char in text if char in '.,;:!?()[]{}"\'-') / len(text) * 100 if text else 0
+        question_freq = text.count('?') / sentence_count * 100 if sentence_count else 0
         
         # Common word percentage (new field required by TextMiningResults)
         common_words = ['the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they', 'we', 'say', 'her', 'she', 'or', 'an', 'will', 'my', 'one', 'all', 'would', 'there', 'their', 'what', 'so', 'up', 'out', 'if', 'about', 'who', 'get', 'which', 'go', 'me', 'when']
@@ -1542,33 +1565,33 @@ def extract_text_mining_metrics(text: str):
         # Return metrics as a TextMiningResults object
         return TextMiningResults(
             word_count=word_count,
-            avg_word_length=avg_word_length,
+            avg_word_length=round(avg_word_length, 2),
             sentence_count=sentence_count,
-            avg_sentence_length=avg_sentence_length,
-            readability_score=readability_score,
+            avg_sentence_length=round(avg_sentence_length, 2),
+            readability_score=round(readability_score, 2),
             readability_interpretation=interpretation,
-            unique_word_ratio=unique_word_ratio,
-            capital_letter_freq=capital_letter_freq,
-            punctuation_density=punctuation_freq,
-            question_frequency=question_freq,
+            unique_word_ratio=round(unique_word_ratio, 2),
+            capital_letter_freq=round(capital_letter_freq, 2),
+            punctuation_density=round(punctuation_freq, 2),
+            question_frequency=round(question_freq, 2),
             paragraph_count=paragraph_count,
-            common_word_percentage=common_word_percentage  # Added required field
+            common_word_percentage=round(common_word_percentage, 2)
         )
     except Exception as e:
         logger.error(f"Error extracting text mining metrics: {str(e)}")
         return TextMiningResults(
             word_count=0,
-            avg_word_length=0,
+            avg_word_length=0.00,
             sentence_count=0,
-            avg_sentence_length=0,
-            readability_score=0,
+            avg_sentence_length=0.00,
+            readability_score=0.00,
             readability_interpretation="Error in analysis",
-            unique_word_ratio=0,
-            capital_letter_freq=0,
-            punctuation_density=0,
-            question_frequency=0,
+            unique_word_ratio=0.00,
+            capital_letter_freq=0.00,
+            punctuation_density=0.00,
+            question_frequency=0.00,
             paragraph_count=0,
-            common_word_percentage=0  # Added required field with default value
+            common_word_percentage=0.00
         )
 
 def safe_model_dump(model):

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import Dict, List, Optional, Literal
 
 from app.models.extract import ExtractResponse
@@ -21,6 +21,18 @@ class TextMiningResults(BaseModel):
     question_frequency: float  # Percentage of sentences that are questions (0-100)
     paragraph_count: int  # Total number of paragraphs
     common_word_percentage: float  # Percentage of common words (0-100)
+
+    @validator('avg_word_length', 'avg_sentence_length', 'readability_score', 
+               'unique_word_ratio', 'capital_letter_freq', 'punctuation_density', 
+               'question_frequency', 'common_word_percentage')
+    def round_to_two_decimal_places(cls, v):
+        """Round all float values to exactly 2 decimal places"""
+        return round(v, 2)
+
+    class Config:
+        json_encoders = {
+            float: lambda v: f"{v:.2f}"
+        }
 
 class TextMiningResponse(BaseModel):
     url: str  # The actual document URL

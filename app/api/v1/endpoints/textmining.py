@@ -5,6 +5,7 @@ from collections import Counter
 import textstat
 import nltk
 import ssl
+from typing import Dict, List, Any, Optional
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -60,18 +61,79 @@ from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMin
 
 router = APIRouter()
 
+# Ensure NLTK resources are downloaded
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    logger.info("Downloading required NLTK resources")
+    nltk.download('punkt')
+    nltk.download('stopwords')
+    logger.info("Successfully downloaded NLTK resources")
+
+# Get English stopwords
+try:
+    STOPWORDS = set(stopwords.words('english'))
+except LookupError:
+    # Fallback if stopwords not available
+    logger.warning("NLTK stopwords not available, using a minimal set")
+    STOPWORDS = set(['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 'your', 
+                   'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', 
+                   'her', 'hers', 'herself', 'it', 'its', 'itself', 'they', 'them', 'their', 
+                   'theirs', 'themselves', 'what', 'which', 'who', 'whom', 'this', 'that', 
+                   'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 
+                   'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'a', 'an', 
+                   'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of', 
+                   'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 
+                   'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 
+                   'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 
+                   'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 
+                   'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 
+                   'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very'])
+
+def format_metrics(metrics: TextMiningResults) -> TextMiningResults:
+    """
+    Format all float values in TextMiningResults to have exactly 2 decimal places.
+    This ensures consistent display of metrics.
+    
+    Args:
+        metrics: The original TextMiningResults object
+        
+    Returns:
+        A new TextMiningResults object with formatted values
+    """
+    # Create a dictionary of the metrics
+    metrics_dict = metrics.dict()
+    
+    # Format all float values to 2 decimal places
+    for key, value in metrics_dict.items():
+        if isinstance(value, float):
+            metrics_dict[key] = round(value, 2)
+    
+    # Return a new TextMiningResults object with the formatted values
+    return TextMiningResults(**metrics_dict)
+
 @router.post("/textmining", response_model=TextMiningResponse)
 async def analyze_text(request: TextMiningRequest) -> TextMiningResponse:
     """
-    Performs comprehensive text mining analysis on the provided text.
-    Returns various text metrics.
+    Analyze the text of a document using text mining techniques.
     
-    The input can be either direct text or an ExtractResponse from the extract endpoint.
+    Returns text statistics including:
+    - Word count
+    - Average word length
+    - Sentence count
+    - Average sentence length
+    - Readability score
+    - Readability interpretation
+    - Unique word ratio
+    - Capital letter frequency
+    - Punctuation density
+    - Question frequency
+    - Common word percentage
     """
     try:
-        # Determine if this is an ExtractResponse object or direct text input
-        text = request.text
-        base_url = ""
+        text = request.text or ""
+        base_url = request.url or ""
         document_type = request.document_type or "tos"
         
         # Handle input from extract endpoint
@@ -92,17 +154,17 @@ async def analyze_text(request: TextMiningRequest) -> TextMiningResponse:
                 document_type=document_type,
                 text_mining=TextMiningResults(
                     word_count=0,
-                    avg_word_length=0,
+                    avg_word_length=0.00,  # Ensure 2 decimal places
                     sentence_count=0,
-                    avg_sentence_length=0,
-                    readability_score=0,  # 0%
+                    avg_sentence_length=0.00,  # Ensure 2 decimal places
+                    readability_score=0.00,  # Ensure 2 decimal places
                     readability_interpretation="Not applicable - No text to analyze",
-                    unique_word_ratio=0,  # 0%
-                    capital_letter_freq=0,  # 0%
-                    punctuation_density=0,  # 0%
-                    question_frequency=0,  # 0%
+                    unique_word_ratio=0.00,  # Ensure 2 decimal places
+                    capital_letter_freq=0.00,  # Ensure 2 decimal places
+                    punctuation_density=0.00,  # Ensure 2 decimal places
+                    question_frequency=0.00,  # Ensure 2 decimal places
                     paragraph_count=0,
-                    common_word_percentage=0  # 0%
+                    common_word_percentage=0.00  # Ensure 2 decimal places
                 ),
                 success=False,
                 message="Empty text provided"
@@ -111,10 +173,13 @@ async def analyze_text(request: TextMiningRequest) -> TextMiningResponse:
         # Text mining analysis
         text_mining_results = perform_text_mining(text)
         
+        # Format the metrics to ensure 2 decimal places
+        formatted_results = format_metrics(text_mining_results)
+        
         return TextMiningResponse(
             url=base_url,
             document_type=document_type,
-            text_mining=text_mining_results,
+            text_mining=formatted_results,
             success=True,
             message="Text mining analysis completed successfully"
         )
@@ -126,17 +191,17 @@ async def analyze_text(request: TextMiningRequest) -> TextMiningResponse:
             document_type=request.document_type or "tos",
             text_mining=TextMiningResults(
                 word_count=0,
-                avg_word_length=0,
+                avg_word_length=0.00,  # Ensure 2 decimal places
                 sentence_count=0,
-                avg_sentence_length=0,
-                readability_score=0,  # 0%
+                avg_sentence_length=0.00,  # Ensure 2 decimal places
+                readability_score=0.00,  # Ensure 2 decimal places
                 readability_interpretation="Not applicable - Analysis failed",
-                unique_word_ratio=0,  # 0%
-                capital_letter_freq=0,  # 0%
-                punctuation_density=0,  # 0%
-                question_frequency=0,  # 0%
+                unique_word_ratio=0.00,  # Ensure 2 decimal places
+                capital_letter_freq=0.00,  # Ensure 2 decimal places
+                punctuation_density=0.00,  # Ensure 2 decimal places
+                question_frequency=0.00,  # Ensure 2 decimal places
                 paragraph_count=0,
-                common_word_percentage=0  # 0%
+                common_word_percentage=0.00  # Ensure 2 decimal places
             ),
             success=False,
             message=f"Error in text mining analysis: {str(e)}"
