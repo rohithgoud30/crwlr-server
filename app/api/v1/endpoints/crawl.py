@@ -116,6 +116,14 @@ async def save_document_to_db(
     logger.info(f"Incoming text_mining type: {type(tm_data)}, content snippet: {str(tm_data)[:500]}")
 
     try:
+        # Check if document already exists by URL and document type
+        from app.crud.document import document_crud
+        
+        existing_doc = await document_crud.get_by_url_and_type(original_url, document_type)
+        if not existing_doc:
+            # Also check by retrieved URL as fallback
+            existing_doc = await document_crud.get_by_retrieved_url(retrieved_url, document_type)
+        
         # Use company_name and logo_url from analysis if available
         company_name = analysis.get('company_name', None)
         logo_url = analysis.get('logo_url', None)
@@ -179,7 +187,7 @@ async def save_document_to_db(
                 serializable_text_mining = {"error": "Could not convert text mining metrics"}
                 logger.warning(f"Could not convert text mining metrics to dict: {type(analysis['text_mining'])}")
         
-        # Create document data for Firestore
+        # Create document data for database
         document_data = {
             "url": original_url,
             "document_type": document_type,
@@ -191,19 +199,41 @@ async def save_document_to_db(
             "hundred_word_summary": analysis.get('hundred_word_summary', ''),
             "word_frequencies": serializable_word_freqs,
             "text_mining_metrics": serializable_text_mining,
-            "views": 0,
-            "created_at": datetime.now(),
             "updated_at": datetime.now()
         }
         
-        # Add document to Firestore using the create_document helper
-        document_id = create_document(document_data)
-        
-        if not document_id:
-            logger.error("Failed to create document in Firestore")
-            raise Exception("Failed to create document in Firestore")
+        # If the document already exists, update it instead of creating a new one
+        document_id = None
+        if existing_doc:
+            # Document exists, update it (keeping the view count and created_at intact)
+            document_id = existing_doc.get('id')
+            logger.info(f"Updating existing document with ID: {document_id}")
             
-        logger.info(f"Document saved to Firestore with ID: {document_id}")
+            # Don't update views or created_at
+            document_data.pop('views', None)
+            document_data.pop('created_at', None)
+            
+            # Update the document using DocumentCRUD
+            update_result = await document_crud.update_document_analysis(document_id, document_data)
+            if not update_result:
+                logger.error(f"Failed to update existing document with ID: {document_id}")
+                raise Exception(f"Failed to update document with ID: {document_id}")
+        else:
+            # Document doesn't exist, create a new one
+            logger.info("Creating new document")
+            # Add additional fields needed for new documents
+            document_data["views"] = 0
+            document_data["created_at"] = datetime.now()
+            
+            # Create the document
+            created_doc = await document_crud.create(document_data)
+            if not created_doc:
+                logger.error("Failed to create document in Firestore")
+                raise Exception("Failed to create document in Firestore")
+            
+            document_id = created_doc.get('id')
+            
+        logger.info(f"Document {'updated' if existing_doc else 'saved'} in Firestore with ID: {document_id}")
         
         # If user_id is provided, create a submission record
         if user_id:
@@ -223,6 +253,10 @@ async def save_document_to_db(
                 logger.info(f"Submission record created for user {user_id} and document {document_id}")
             else:
                 logger.error("Could not access submissions collection")
+        
+        # Update the last_updated timestamp in stats collection
+        from app.crud.stats import stats_crud
+        await stats_crud.update_last_updated()
         
         return document_id
     except Exception as e:
