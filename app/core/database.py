@@ -150,7 +150,8 @@ def create_document(document_data):
             logger.error("Documents collection not available")
             return None
             
-        # Create a new document with auto-generated ID
+        # Create a new document with auto-generated Firebase ID
+        # This generates IDs in the format like "00FJECPjC2Tu0wTedRuF"
         new_doc_ref = docs_collection.document()
         new_doc_ref.set(document_data)
         logger.info(f"Document created successfully with ID: {new_doc_ref.id}")
