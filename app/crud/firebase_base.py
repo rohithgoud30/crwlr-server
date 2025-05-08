@@ -91,13 +91,17 @@ class FirebaseCRUDBase:
             return {}
             
         try:
-            # If no ID provided, generate one
+            # Use Firebase auto-generated ID instead of UUID
             if 'id' not in obj_in:
-                doc_id = str(uuid4())
+                # Create document reference with auto-generated ID
+                doc_ref = self.collection.document()
+                doc_id = doc_ref.id
             else:
-                doc_id = str(obj_in.pop('id'))  # Extract and convert ID to string
+                # If ID is provided, use it
+                doc_id = str(obj_in.pop('id'))
+                doc_ref = self.collection.document(doc_id)
                 
-            doc_ref = self.collection.document(doc_id)
+            # Set document data    
             doc_ref.set(obj_in)
             
             # Return the created document with its ID
