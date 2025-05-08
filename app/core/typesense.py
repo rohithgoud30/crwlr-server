@@ -52,11 +52,7 @@ documents_schema = {
         {'name': 'company_name', 'type': 'string', 'optional': True},
         {'name': 'content', 'type': 'string', 'optional': True},
         {'name': 'summary', 'type': 'string', 'optional': True},
-<<<<<<< HEAD
         {'name': 'views', 'type': 'int32'},
-=======
-        {'name': 'views', 'type': 'int32', 'optional': True},
->>>>>>> 1b5d93d (Fix(typesense): add hardcoded fallback for Typesense credentials)
         {'name': 'logo_url', 'type': 'string', 'optional': True},
         {'name': 'updated_at', 'type': 'int64', 'optional': True}  # Store as Unix timestamp
     ],

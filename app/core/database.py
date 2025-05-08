@@ -252,7 +252,9 @@ def init_firebase():
     try:
         global db, fs
         
-        app = initialize_firebase_app()
+        from firebase_admin import initialize_app, firestore, storage
+        
+        app = initialize_app()
         if app:
             db = firestore.client()
             fs = storage.bucket()
