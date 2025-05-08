@@ -49,12 +49,12 @@ documents_schema = {
         {'name': 'id', 'type': 'string'},
         {'name': 'url', 'type': 'string'},
         {'name': 'document_type', 'type': 'string', 'facet': True},
-        {'name': 'company_name', 'type': 'string', 'optional': True},
+        {'name': 'company_name', 'type': 'string', 'sort': True, 'optional': True},
         {'name': 'content', 'type': 'string', 'optional': True},
         {'name': 'summary', 'type': 'string', 'optional': True},
         {'name': 'views', 'type': 'int32'},
         {'name': 'logo_url', 'type': 'string', 'optional': True},
-        {'name': 'updated_at', 'type': 'int64', 'optional': True}  # Store as Unix timestamp
+        {'name': 'updated_at', 'type': 'int64', 'sort': True, 'optional': True}  # Store as Unix timestamp
     ],
     'default_sorting_field': 'views'
 }
@@ -80,6 +80,27 @@ def init_typesense():
             if collection['name'] == TYPESENSE_COLLECTION_NAME:
                 collection_exists = True
                 break
+        
+        if collection_exists:
+            try:
+                # Try to use the collection with a simple search
+                test_search = client.collections[TYPESENSE_COLLECTION_NAME].documents.search({
+                    'q': '*',
+                    'query_by': 'company_name',
+                    'per_page': 1
+                })
+                logger.info(f"Typesense collection {TYPESENSE_COLLECTION_NAME} exists and is working")
+            except Exception as e:
+                # If search fails, the schema might be wrong - try to recreate
+                logger.warning(f"Typesense collection exists but search failed: {str(e)}")
+                logger.warning(f"Attempting to drop and recreate collection: {TYPESENSE_COLLECTION_NAME}")
+                
+                try:
+                    client.collections[TYPESENSE_COLLECTION_NAME].delete()
+                    logger.info(f"Deleted existing collection: {TYPESENSE_COLLECTION_NAME}")
+                    collection_exists = False
+                except Exception as del_e:
+                    logger.error(f"Error deleting collection: {str(del_e)}")
         
         if not collection_exists:
             client.collections.create(documents_schema)
