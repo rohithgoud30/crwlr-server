@@ -25,6 +25,7 @@ Create a `.env` file with the following configuration:
 ```
 # API Keys
 API_KEY=your_api_key_here
+GEMINI_API_KEY=your_gemini_api_key
 
 # Environment setting
 PROJECT_ID=your_project_id
@@ -174,6 +175,172 @@ Once running, access the API documentation at:
 
 - http://localhost:8080/docs (local)
 - https://your-cloud-run-url/docs (deployed)
+
+## API Endpoints
+
+Below is a detailed list of available API endpoints, including HTTP method, path, headers, request and response formats, and examples.
+
+### 1. Search Documents
+
+- **Method:** POST
+- **Path:** `/api/v1/documents/search`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "search_text": "example", // Text to search in company_name and url
+    "document_type": "tos", // Optional filter: "tos" or "pp"
+    "page": 1, // Page number (>=1)
+    "per_page": 6, // Items per page (1–100)
+    "sort_by": "relevance", // One of: relevance, views, company_name, updated_at
+    "sort_order": "desc" // "asc" or "desc"
+  }
+  ```
+- **Response:** `DocumentSearchResponse`
+  ```json
+  {
+    "items": [
+      {
+        "id": "abc123",
+        "url": "example.com",
+        "document_type": "tos",
+        "company_name": "Example Corp",
+        "logo_url": "https://...",
+        "views": 42,
+        "updated_at": "2025-05-08T12:34:56"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "per_page": 6,
+    "total_pages": 1,
+    "has_next": false,
+    "has_prev": false
+  }
+  ```
+
+### 2. Get Document Counts
+
+- **Method:** GET
+- **Path:** `/api/v1/documents/stats`
+- **Headers:** `X-API-Key: {API_KEY}`
+- **Response:** `DocumentCountResponse`
+  ```json
+  {
+    "tos_count": 10,
+    "pp_count": 15,
+    "total_count": 25,
+    "last_updated": "2025-05-08T12:00:00"
+  }
+  ```
+
+### 3. Get Document by ID
+
+- **Method:** GET
+- **Path:** `/api/v1/documents/{document_id}`
+- **Headers:** `X-API-Key: {API_KEY}`
+- **Path Parameters:**
+  - `document_id` (string): ID of the document
+- **Response:** `Document` model
+  ```json
+  {
+    "id": "abc123",
+    "url": "example.com",
+    "document_type": "tos",
+    "company_name": "Example Corp",
+    "logo_url": "https://...",
+    "views": 43,                   // Incremented automatically
+    "created_at": "2025-05-07T10:00:00",
+    "updated_at": "2025-05-08T12:35:00",
+    "raw_text": "...",
+    "one_sentence_summary": "...",
+    "hundred_word_summary": "...",
+    "word_frequencies": [...],
+    "text_mining_metrics": {...}
+  }
+  ```
+
+### 4. Delete Document
+
+- **Method:** DELETE
+- **Path:** `/api/v1/documents/{document_id}`
+- **Headers:** `X-API-Key: {API_KEY}`
+- **Response:**
+  ```json
+  { "success": true, "message": "Document deleted successfully" }
+  ```
+
+### 5. Update Company Name
+
+- **Method:** PATCH
+- **Path:** `/api/v1/documents/{document_id}/company-name`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  { "company_name": "New Name" }
+  ```
+- **Response:** Updated `Document` model (same format as GET Document by ID)
+
+### 6. Force Recount Stats
+
+- **Method:** POST
+- **Path:** `/api/v1/recount-stats`
+- **Headers:** `X-API-Key: {API_KEY}`
+- **Response:**
+  ```json
+  {
+    "success": true,
+    "message": "Stats recounted successfully",
+    "counts": {
+      "tos_count": 10,
+      "pp_count": 15,
+      "total_count": 25
+    },
+    "last_updated": "2025-05-08T12:00:00",
+    "timestamp": "2025-05-08T12:01:00"
+  }
+  ```
+
+### 7. Sync All Documents to Typesense
+
+- **Method:** POST
+- **Path:** `/api/v1/documents/sync-typesense`
+- **Headers:** `X-API-Key: {API_KEY}`
+- **Response:**
+  ```json
+  {
+    "success": true,
+    "message": "Synchronized 25 documents to Typesense",
+    "indexed": 25,
+    "failed": 0,
+    "total": 25,
+    "timestamp": "2025-05-08T12:02:00"
+  }
+  ```
+
+## Building and Running Locally
+
+### Docker Build
+
+Build a Docker image for the server:
+
+```bash
+docker build -t crwlr-server .
+```
+
+### Docker Run
+
+Run the container, mapping port 8080 and loading environment variables:
+
+```bash
+docker run --env-file .env -p 8080:8080 crwlr-server
+```
+
+The API will be available at `http://localhost:8080`.
 
 ---
 
