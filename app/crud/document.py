@@ -75,8 +75,6 @@ class DocumentCRUD(FirebaseCRUDBase):
                 'url': document.get('url', ''),
                 'document_type': document.get('document_type', ''),
                 'company_name': document.get('company_name', ''),
-                'content': document.get('content', ''),
-                'summary': document.get('summary', ''),
                 'views': document.get('views', 0),
                 'logo_url': document.get('logo_url', ''),
                 'updated_at': typesense_updated_at
@@ -156,7 +154,7 @@ class DocumentCRUD(FirebaseCRUDBase):
         document_type: Optional[str] = None,
         page: int = 1,
         per_page: int = 10,
-        sort_by: Optional[str] = "updated_at",
+        sort_by: Optional[str] = "relevance",
         sort_order: Optional[str] = "desc"
     ) -> Dict[str, Any]:
         """
@@ -168,7 +166,7 @@ class DocumentCRUD(FirebaseCRUDBase):
             document_type: Optional filter by document_type (e.g. 'tos' or 'pp')
             page: Page number for pagination (1-indexed)
             per_page: Number of results per page
-            sort_by: Field to sort by (e.g., "updated_at", "views", "company_name", "url")
+            sort_by: Field to sort by (e.g., "relevance", "updated_at", "views", "company_name", "url")
             sort_order: Sort direction ("asc" or "desc")
         
         Returns:
@@ -181,9 +179,12 @@ class DocumentCRUD(FirebaseCRUDBase):
                 # Build search parameters for Typesense
                 search_parameters = {
                     'q': query,
-                    'query_by': 'company_name,url,content,summary',
+                    'query_by': 'company_name,url',  # Only search in company_name and url
+                    'query_by_weights': '2,1',  # Prioritize company_name matches
                     'page': page,
                     'per_page': per_page,
+                    'prefix': True,  # Enable prefix searching (e.g., "goog" will match "google")
+                    'infix': 'always',  # Enable infix searching for substrings (e.g., "oog" will match "google")
                 }
                 
                 # Add filter by document_type if provided
@@ -192,16 +193,18 @@ class DocumentCRUD(FirebaseCRUDBase):
                 
                 # Handle sorting - ensure we only sort by fields that are marked as sortable
                 # In our schema, views (default), company_name, and updated_at are sortable
-                sortable_fields = ["views", "company_name", "updated_at"]
-                if sort_by and sort_by in sortable_fields:
-                    if sort_order.lower() == "desc":
-                        search_parameters['sort_by'] = f"{sort_by}:desc"
+                # For "relevance" sorting, we don't set sort_by so Typesense uses its built-in relevance ranking
+                if sort_by and sort_by != "relevance":
+                    sortable_fields = ["views", "company_name", "updated_at"]
+                    if sort_by in sortable_fields:
+                        if sort_order.lower() == "desc":
+                            search_parameters['sort_by'] = f"{sort_by}:desc"
+                        else:
+                            search_parameters['sort_by'] = f"{sort_by}:asc"
                     else:
-                        search_parameters['sort_by'] = f"{sort_by}:asc"
-                else:
-                    # Default to sorting by views if the requested field isn't sortable
-                    logger.warning(f"Requested sort field '{sort_by}' is not sortable. Using default sort by views.")
-                    search_parameters['sort_by'] = "views:desc" if sort_order.lower() == "desc" else "views:asc"
+                        # Default to sorting by views if the requested field isn't sortable
+                        logger.warning(f"Requested sort field '{sort_by}' is not sortable. Using default sort by views.")
+                        search_parameters['sort_by'] = "views:desc" if sort_order.lower() == "desc" else "views:asc"
                 
                 # Execute search
                 search_results = client.collections[TYPESENSE_COLLECTION_NAME].documents.search(search_parameters)
@@ -240,7 +243,7 @@ class DocumentCRUD(FirebaseCRUDBase):
         document_type: Optional[str] = None,
         page: int = 1,
         per_page: int = 10,
-        sort_by: Optional[str] = "updated_at",
+        sort_by: Optional[str] = "relevance",
         sort_order: Optional[str] = "desc"
     ) -> Dict[str, Any]:
         """
@@ -251,7 +254,7 @@ class DocumentCRUD(FirebaseCRUDBase):
             document_type: Optional filter by document_type (e.g. 'tos' or 'pp')
             page: Page number for pagination (1-indexed)
             per_page: Number of results per page
-            sort_by: Field to sort by
+            sort_by: Field to sort by (e.g., "relevance", "updated_at", "views", "company_name")
             sort_order: Sort direction ("asc" or "desc")
         
         Returns:
@@ -285,29 +288,57 @@ class DocumentCRUD(FirebaseCRUDBase):
                 
                 # Match if query is found in either company name or URL
                 if query_lower in company_name or query_lower in url:
+                    # For manual search with relevance sorting, calculate a relevance score
+                    # based on where and how well the query matches
+                    relevance_score = 0
+                    
+                    # Higher score for exact matches
+                    if company_name == query_lower:
+                        relevance_score += 100
+                    elif url == query_lower:
+                        relevance_score += 80
+                    
+                    # Higher score for prefix matches
+                    if company_name.startswith(query_lower):
+                        relevance_score += 50
+                    elif url.startswith(query_lower):
+                        relevance_score += 40
+                    
+                    # Base score for substring matches
+                    if query_lower in company_name:
+                        relevance_score += 30
+                    if query_lower in url:
+                        relevance_score += 20
+                    
+                    # Store relevance score in the document
+                    doc['_relevance_score'] = relevance_score
                     matching_docs.append(doc)
 
             # Client-side sorting after filtering
             if sort_by:
-                # Handle missing keys or None values gracefully for sorting
-                def get_sort_key(item):
-                    val = item.get(sort_by)
-                    if val is None:
-                        if sort_by == "views": return 0 # Treat None views as 0 for sorting
-                        # For other fields, decide a consistent way to handle None
-                        # For string fields, an empty string is fine. For dates, a very old/new date.
-                        return "" if isinstance(item.get(sort_by, ""), str) else (datetime.min if isinstance(item.get(sort_by, datetime.min), datetime) else 0)
-                    if sort_by == "updated_at" and isinstance(val, str):
-                        try:
-                            return datetime.fromisoformat(val.replace("Z", "+00:00"))
-                        except ValueError: # If parsing fails, return a default sortable value
-                           return datetime.min
-                    return val
+                if sort_by == "relevance":
+                    # Sort by our calculated relevance score
+                    matching_docs.sort(key=lambda item: item.get('_relevance_score', 0), reverse=True)
+                else:
+                    # Handle missing keys or None values gracefully for sorting
+                    def get_sort_key(item):
+                        val = item.get(sort_by)
+                        if val is None:
+                            if sort_by == "views": return 0 # Treat None views as 0 for sorting
+                            # For other fields, decide a consistent way to handle None
+                            # For string fields, an empty string is fine. For dates, a very old/new date.
+                            return "" if isinstance(item.get(sort_by, ""), str) else (datetime.min if isinstance(item.get(sort_by, datetime.min), datetime) else 0)
+                        if sort_by == "updated_at" and isinstance(val, str):
+                            try:
+                                return datetime.fromisoformat(val.replace("Z", "+00:00"))
+                            except ValueError: # If parsing fails, return a default sortable value
+                               return datetime.min
+                        return val
 
-                try:
-                    matching_docs.sort(key=get_sort_key, reverse=(sort_order.lower() == "desc"))
-                except TypeError as te:
-                    logger.error(f"TypeError during sorting by {sort_by}: {te}. Documents might not be sorted correctly.")
+                    try:
+                        matching_docs.sort(key=get_sort_key, reverse=(sort_order.lower() == "desc"))
+                    except TypeError as te:
+                        logger.error(f"TypeError during sorting by {sort_by}: {te}. Documents might not be sorted correctly.")
             
             # Calculate pagination
             total = len(matching_docs)

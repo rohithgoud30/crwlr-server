@@ -47,11 +47,9 @@ documents_schema = {
     'name': TYPESENSE_COLLECTION_NAME,
     'fields': [
         {'name': 'id', 'type': 'string'},
-        {'name': 'url', 'type': 'string'},
+        {'name': 'url', 'type': 'string', 'infix': True},
         {'name': 'document_type', 'type': 'string', 'facet': True},
-        {'name': 'company_name', 'type': 'string', 'sort': True, 'optional': True},
-        {'name': 'content', 'type': 'string', 'optional': True},
-        {'name': 'summary', 'type': 'string', 'optional': True},
+        {'name': 'company_name', 'type': 'string', 'sort': True, 'infix': True, 'optional': True},
         {'name': 'views', 'type': 'int32'},
         {'name': 'logo_url', 'type': 'string', 'optional': True},
         {'name': 'updated_at', 'type': 'int64', 'sort': True, 'optional': True}  # Store as Unix timestamp
