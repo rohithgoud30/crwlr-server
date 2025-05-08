@@ -361,46 +361,4 @@ async def sync_documents_to_typesense(
             "failed": 0,
             "total": 0,
             "timestamp": datetime.now().isoformat()
-        }
-
-
-@router.post("/documents/clean-typesense", response_model=Dict[str, Any])
-async def clean_typesense_collection(
-    api_key: str = Depends(get_api_key)
-):
-    """
-    Clean Typesense collection by completely dropping and recreating it.
-    This is the most reliable way to completely reset the search index.
-    
-    Use with extreme caution - this operation cannot be undone! 
-    After cleaning, you will need to re-sync documents using the sync endpoint.
-    
-    Returns:
-    - **success**: Whether the clean operation was successful
-    - **message**: Status message
-    - **deleted**: Approximate number of documents deleted
-    - **timestamp**: When the operation was performed
-    """
-    try:
-        logger.info("Starting Typesense collection cleaning (drop and recreate)")
-        result = await document_crud.clean_typesense_collection()
-        
-        if result["success"]:
-            logger.info(f"Typesense collection cleaned successfully: ~{result['deleted']} documents removed")
-        else:
-            logger.error(f"Typesense collection cleaning failed: {result['message']}")
-            
-        return {
-            "success": result["success"],
-            "message": result["message"],
-            "deleted": result["deleted"],
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error cleaning Typesense collection: {str(e)}")
-        return {
-            "success": False,
-            "message": f"Error during cleaning: {str(e)}",
-            "deleted": 0,
-            "timestamp": datetime.now().isoformat()
         } 
