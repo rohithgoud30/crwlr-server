@@ -59,10 +59,6 @@ pip install black isort mypy
 echo "Installing the package in development mode..."
 pip install -e .
 
-# Install PostgreSQL client (useful for database tools)
-echo "Installing PostgreSQL client..."
-conda install -c conda-forge postgresql -y
-
 echo "======================================================"
 echo "  CRWLR Conda Environment Setup Complete!"
 echo "======================================================"
