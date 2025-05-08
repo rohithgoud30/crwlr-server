@@ -66,8 +66,8 @@ async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type:
     text_mining = extract_text_mining_metrics(extracted_text)
     
     # Generate summaries
-    one_sentence_summary = await generate_one_sentence_summary(extracted_text, doc_url)
-    hundred_word_summary = await generate_hundred_word_summary(extracted_text, doc_url)
+    one_sentence_summary = await generate_one_sentence_summary(extracted_text, doc_url, doc_type)
+    hundred_word_summary = await generate_hundred_word_summary(extracted_text, doc_url, doc_type)
     
     # Combine results into a single dictionary
     results = {
@@ -1377,18 +1377,19 @@ async def extract_text_from_url(url: str, document_type: str) -> Optional[Tuple[
     logger.warning(f"Failed to extract content from {url}")
     return ("", "Failed to extract content from URL")
 
-async def generate_one_sentence_summary(text: str, url: str = None) -> str:
+async def generate_one_sentence_summary(text: str, url: str = None, document_type: str = "tos") -> str:
     """
     Generate a one-sentence summary of the provided text.
     
     Args:
         text: The text to summarize
         url: Optional URL for context
+        document_type: Type of document ("tos" or "pp")
         
     Returns:
         A one-sentence summary of the text
     """
-    logger.info("Generating one-sentence summary")
+    logger.info(f"Generating one-sentence summary for {document_type}")
     
     if not text or len(text.strip()) < 100:
         logger.warning("Text is too short for summarization")
@@ -1398,7 +1399,7 @@ async def generate_one_sentence_summary(text: str, url: str = None) -> str:
         # Create a summary request
         summary_request = SummaryRequest(
             text=text,
-            document_type="tos",  # Default document type
+            document_type=document_type,  # Use the provided document type
             url=url  # Pass the URL if available
         )
         
@@ -1420,18 +1421,19 @@ async def generate_one_sentence_summary(text: str, url: str = None) -> str:
         logger.error(f"Exception during one-sentence summary generation: {str(e)}")
         return f"Error generating summary: {str(e)}"
 
-async def generate_hundred_word_summary(text: str, url: str = None) -> str:
+async def generate_hundred_word_summary(text: str, url: str = None, document_type: str = "tos") -> str:
     """
     Generate a hundred-word summary of the provided text.
     
     Args:
         text: The text to summarize
         url: Optional URL for context
+        document_type: Type of document ("tos" or "pp")
         
     Returns:
         A hundred-word summary of the text
     """
-    logger.info("Generating hundred-word summary")
+    logger.info(f"Generating hundred-word summary for {document_type}")
     
     if not text or len(text.strip()) < 200:
         logger.warning("Text is too short for summarization")
@@ -1441,7 +1443,7 @@ async def generate_hundred_word_summary(text: str, url: str = None) -> str:
         # Create a summary request
         summary_request = SummaryRequest(
             text=text,
-            document_type="tos",  # Default document type
+            document_type=document_type,  # Use the provided document type
             url=url  # Pass the URL if available
         )
         
