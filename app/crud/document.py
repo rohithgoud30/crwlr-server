@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 from google.cloud import firestore
 from app.crud.stats import stats_crud
-from app.core.typesense import get_typesense_client, TYPESENSE_COLLECTION_NAME
+from app.core.typesense import get_typesense_client, TYPESENSE_COLLECTION_NAME, documents_schema
 
 # Setup logging
 logger = logging.getLogger(__name__)
