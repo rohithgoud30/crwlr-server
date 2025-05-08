@@ -190,24 +190,18 @@ class DocumentCRUD(FirebaseCRUDBase):
                 if document_type:
                     search_parameters['filter_by'] = f"document_type:={document_type}"
                 
-                # Handle sorting
-                if sort_by:
-                    if sort_by == "company_name":
-                        # For text fields, use text match relevance as default sort
-                        if sort_order.lower() == "desc":
-                            search_parameters['sort_by'] = "company_name:desc"
-                        else:
-                            search_parameters['sort_by'] = "company_name:asc"
-                    elif sort_by == "updated_at":
-                        if sort_order.lower() == "desc":
-                            search_parameters['sort_by'] = "updated_at:desc"
-                        else:
-                            search_parameters['sort_by'] = "updated_at:asc"
-                    elif sort_by == "views":
-                        if sort_order.lower() == "desc":
-                            search_parameters['sort_by'] = "views:desc"
-                        else:
-                            search_parameters['sort_by'] = "views:asc"
+                # Handle sorting - ensure we only sort by fields that are marked as sortable
+                # In our schema, views (default), company_name, and updated_at are sortable
+                sortable_fields = ["views", "company_name", "updated_at"]
+                if sort_by and sort_by in sortable_fields:
+                    if sort_order.lower() == "desc":
+                        search_parameters['sort_by'] = f"{sort_by}:desc"
+                    else:
+                        search_parameters['sort_by'] = f"{sort_by}:asc"
+                else:
+                    # Default to sorting by views if the requested field isn't sortable
+                    logger.warning(f"Requested sort field '{sort_by}' is not sortable. Using default sort by views.")
+                    search_parameters['sort_by'] = "views:desc" if sort_order.lower() == "desc" else "views:asc"
                 
                 # Execute search
                 search_results = client.collections[TYPESENSE_COLLECTION_NAME].documents.search(search_parameters)

@@ -71,40 +71,56 @@ def init_typesense():
     
     try:
         client = typesense.Client(typesense_config)
+        create_new_collection = True
         
-        # Check if collection exists, if not create it
-        collections = client.collections.retrieve()
-        collection_exists = False
+        try:
+            # Check if collection exists
+            collections = client.collections.retrieve()
+            for collection in collections:
+                if collection['name'] == TYPESENSE_COLLECTION_NAME:
+                    logger.info(f"Found existing Typesense collection: {TYPESENSE_COLLECTION_NAME}")
+                    
+                    try:
+                        # Try a simple search to verify the collection is working
+                        test_search = client.collections[TYPESENSE_COLLECTION_NAME].documents.search({
+                            'q': '*',
+                            'query_by': 'company_name',
+                            'per_page': 1
+                        })
+                        logger.info(f"Typesense collection {TYPESENSE_COLLECTION_NAME} exists and is working")
+                        create_new_collection = False
+                    except Exception as search_err:
+                        logger.warning(f"Collection exists but search failed: {str(search_err)}")
+                        logger.warning("Will drop and recreate collection")
+                        
+                        try:
+                            client.collections[TYPESENSE_COLLECTION_NAME].delete()
+                            logger.info(f"Successfully deleted collection: {TYPESENSE_COLLECTION_NAME}")
+                        except Exception as del_err:
+                            logger.error(f"Error deleting collection: {str(del_err)}")
+                            # Continue anyway, as we'll try to recreate it
+                    break
+        except Exception as coll_err:
+            logger.warning(f"Error retrieving collections: {str(coll_err)}")
+            # Continue to attempt creating a new collection
         
-        for collection in collections:
-            if collection['name'] == TYPESENSE_COLLECTION_NAME:
-                collection_exists = True
-                break
-        
-        if collection_exists:
+        # Create new collection if needed
+        if create_new_collection:
             try:
-                # Try to use the collection with a simple search
-                test_search = client.collections[TYPESENSE_COLLECTION_NAME].documents.search({
-                    'q': '*',
-                    'query_by': 'company_name',
-                    'per_page': 1
-                })
-                logger.info(f"Typesense collection {TYPESENSE_COLLECTION_NAME} exists and is working")
-            except Exception as e:
-                # If search fails, the schema might be wrong - try to recreate
-                logger.warning(f"Typesense collection exists but search failed: {str(e)}")
-                logger.warning(f"Attempting to drop and recreate collection: {TYPESENSE_COLLECTION_NAME}")
-                
+                # First try to delete if it exists (in case we couldn't check properly)
                 try:
                     client.collections[TYPESENSE_COLLECTION_NAME].delete()
-                    logger.info(f"Deleted existing collection: {TYPESENSE_COLLECTION_NAME}")
-                    collection_exists = False
-                except Exception as del_e:
-                    logger.error(f"Error deleting collection: {str(del_e)}")
-        
-        if not collection_exists:
-            client.collections.create(documents_schema)
-            logger.info(f"Created Typesense collection: {TYPESENSE_COLLECTION_NAME}")
+                    logger.info(f"Deleted existing collection before recreation: {TYPESENSE_COLLECTION_NAME}")
+                except:
+                    # Ignore errors here - the collection might not exist
+                    pass
+                
+                # Now create a fresh collection
+                client.collections.create(documents_schema)
+                logger.info(f"Created new Typesense collection: {TYPESENSE_COLLECTION_NAME}")
+            except Exception as create_err:
+                logger.error(f"Error creating collection: {str(create_err)}")
+                return None
         
         logger.info("Typesense client initialized successfully")
         return client
