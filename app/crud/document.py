@@ -3,8 +3,10 @@ import logging
 from app.crud.firebase_base import FirebaseCRUDBase
 from app.core.database import db
 from datetime import datetime
+import time
 from google.cloud import firestore
 from app.crud.stats import stats_crud
+from app.core.typesense import get_typesense_client, TYPESENSE_COLLECTION_NAME
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -51,6 +53,57 @@ class DocumentCRUD(FirebaseCRUDBase):
         except Exception as e:
             logger.error(f"Error getting document by retrieved URL and type: {str(e)}")
             return None
+
+    async def _index_in_typesense(self, document: Dict[str, Any]) -> bool:
+        """Index or update a document in Typesense."""
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available. Skipping indexing.")
+            return False
+        
+        try:
+            # Prepare document for Typesense
+            # Convert updated_at to unix timestamp if it's a datetime
+            updated_at = document.get('updated_at')
+            if isinstance(updated_at, datetime):
+                typesense_updated_at = int(time.mktime(updated_at.timetuple()))
+            else:
+                typesense_updated_at = int(time.time())  # Current time as fallback
+            
+            typesense_doc = {
+                'id': document['id'],
+                'url': document.get('url', ''),
+                'document_type': document.get('document_type', ''),
+                'company_name': document.get('company_name', ''),
+                'content': document.get('content', ''),
+                'summary': document.get('summary', ''),
+                'views': document.get('views', 0),
+                'logo_url': document.get('logo_url', ''),
+                'updated_at': typesense_updated_at
+            }
+            
+            # Upsert document in Typesense
+            client.collections[TYPESENSE_COLLECTION_NAME].documents.upsert(typesense_doc)
+            logger.info(f"Document {document['id']} indexed in Typesense")
+            return True
+        except Exception as e:
+            logger.error(f"Error indexing document in Typesense: {str(e)}")
+            return False
+
+    async def _delete_from_typesense(self, id: str) -> bool:
+        """Delete a document from Typesense index."""
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available. Skipping index deletion.")
+            return False
+        
+        try:
+            client.collections[TYPESENSE_COLLECTION_NAME].documents[id].delete()
+            logger.info(f"Document {id} deleted from Typesense index")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting document from Typesense: {str(e)}")
+            return False
     
     async def increment_views(self, id: str) -> Optional[Dict[str, Any]]:
         """Increment the view count for a document."""
@@ -86,6 +139,8 @@ class DocumentCRUD(FirebaseCRUDBase):
             result = increment_in_transaction(transaction, doc_ref)
             if result:
                 logger.info(f"Incremented views for document {id}")
+                # Update document in Typesense
+                await self._index_in_typesense(result)
                 return result
             else:
                 logger.warning(f"Document {id} not found - could not increment views")
@@ -105,14 +160,104 @@ class DocumentCRUD(FirebaseCRUDBase):
         sort_order: Optional[str] = "desc"
     ) -> Dict[str, Any]:
         """
-        Search for documents based on company name or URL only.
+        Search for documents using Typesense full-text search.
+        Falls back to Firebase manual search if Typesense is not available.
         
         Args:
-            query: The search query to look for (will search only in company_name and url)
+            query: The search query to look for
             document_type: Optional filter by document_type (e.g. 'tos' or 'pp')
             page: Page number for pagination (1-indexed)
             per_page: Number of results per page
             sort_by: Field to sort by (e.g., "updated_at", "views", "company_name", "url")
+            sort_order: Sort direction ("asc" or "desc")
+        
+        Returns:
+            A dictionary containing search results and pagination information
+        """
+        client = get_typesense_client()
+        
+        if client:
+            try:
+                # Build search parameters for Typesense
+                search_parameters = {
+                    'q': query,
+                    'query_by': 'company_name,url,content,summary',
+                    'page': page,
+                    'per_page': per_page,
+                }
+                
+                # Add filter by document_type if provided
+                if document_type:
+                    search_parameters['filter_by'] = f"document_type:={document_type}"
+                
+                # Handle sorting
+                if sort_by:
+                    if sort_by == "company_name":
+                        # For text fields, use text match relevance as default sort
+                        if sort_order.lower() == "desc":
+                            search_parameters['sort_by'] = "company_name:desc"
+                        else:
+                            search_parameters['sort_by'] = "company_name:asc"
+                    elif sort_by == "updated_at":
+                        if sort_order.lower() == "desc":
+                            search_parameters['sort_by'] = "updated_at:desc"
+                        else:
+                            search_parameters['sort_by'] = "updated_at:asc"
+                    elif sort_by == "views":
+                        if sort_order.lower() == "desc":
+                            search_parameters['sort_by'] = "views:desc"
+                        else:
+                            search_parameters['sort_by'] = "views:asc"
+                
+                # Execute search
+                search_results = client.collections[TYPESENSE_COLLECTION_NAME].documents.search(search_parameters)
+                
+                # Process results
+                items = []
+                for hit in search_results['hits']:
+                    document = hit['document']
+                    # Convert timestamp back to datetime string format if needed
+                    if 'updated_at' in document and isinstance(document['updated_at'], int):
+                        document['updated_at'] = datetime.fromtimestamp(document['updated_at'])
+                    items.append(document)
+                
+                return {
+                    "items": items,
+                    "total": search_results['found'],
+                    "page": page,
+                    "per_page": per_page,
+                    "total_pages": (search_results['found'] + per_page - 1) // per_page if search_results['found'] > 0 else 0,
+                    "has_next": page < ((search_results['found'] + per_page - 1) // per_page),
+                    "has_prev": page > 1
+                }
+                
+            except Exception as e:
+                logger.error(f"Error searching with Typesense: {str(e)}. Falling back to manual search.")
+                # Fall back to manual search
+                return await self._manual_search_documents(query, document_type, page, per_page, sort_by, sort_order)
+        else:
+            logger.warning("Typesense client not available. Using manual search.")
+            # Fallback to manual search
+            return await self._manual_search_documents(query, document_type, page, per_page, sort_by, sort_order)
+    
+    async def _manual_search_documents(
+        self,
+        query: str,
+        document_type: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 10,
+        sort_by: Optional[str] = "updated_at",
+        sort_order: Optional[str] = "desc"
+    ) -> Dict[str, Any]:
+        """
+        Manual search for documents (fallback if Typesense is not available).
+        
+        Args:
+            query: The search query to look for (will search in company_name and url)
+            document_type: Optional filter by document_type (e.g. 'tos' or 'pp')
+            page: Page number for pagination (1-indexed)
+            per_page: Number of results per page
+            sort_by: Field to sort by
             sort_order: Sort direction ("asc" or "desc")
         
         Returns:
@@ -277,6 +422,9 @@ class DocumentCRUD(FirebaseCRUDBase):
             doc_ref.delete()
             logger.info(f"Document {id} deleted successfully")
             
+            # Remove from Typesense index
+            await self._delete_from_typesense(id)
+            
             # Update stats
             if document_type:
                 await stats_crud.decrement_document_count(document_type)
@@ -326,6 +474,9 @@ class DocumentCRUD(FirebaseCRUDBase):
             updated_data = updated_doc.to_dict()
             updated_data['id'] = updated_doc.id
             
+            # Update in Typesense
+            await self._index_in_typesense(updated_data)
+            
             logger.info(f"Successfully updated analysis for document {id}")
             return updated_data
         except Exception as e:
@@ -371,6 +522,9 @@ class DocumentCRUD(FirebaseCRUDBase):
             updated_data = updated_doc.to_dict()
             updated_data['id'] = updated_doc.id
             
+            # Update in Typesense
+            await self._index_in_typesense(updated_data)
+            
             logger.info(f"Successfully updated company name for document {id}")
             return updated_data
         except Exception as e:
@@ -378,14 +532,83 @@ class DocumentCRUD(FirebaseCRUDBase):
             return None
 
     async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Create a new document and update stats."""
+        """Create a new document, update stats, and index in Typesense."""
         result = await super().create(data)
         
         # Update stats if document was created successfully
         if result and "document_type" in data:
             await stats_crud.increment_document_count(data["document_type"])
+        
+        # Index in Typesense
+        if result:
+            await self._index_in_typesense(result)
             
         return result
+
+    async def sync_all_documents_to_typesense(self) -> Dict[str, Any]:
+        """
+        Synchronize all documents from Firebase to Typesense.
+        Useful for initial setup or recovery.
+        
+        Returns:
+            Dictionary with sync statistics
+        """
+        if not self.collection:
+            logger.error("Firebase database not initialized")
+            return {
+                "success": False,
+                "message": "Firebase database not initialized",
+                "indexed": 0,
+                "failed": 0,
+                "total": 0
+            }
+        
+        client = get_typesense_client()
+        if not client:
+            return {
+                "success": False, 
+                "message": "Typesense client not available",
+                "indexed": 0,
+                "failed": 0,
+                "total": 0
+            }
+        
+        try:
+            # Get all documents from Firebase
+            docs = list(self.collection.stream())
+            
+            total = len(docs)
+            indexed = 0
+            failed = 0
+            
+            # Process each document
+            for doc in docs:
+                doc_data = doc.to_dict()
+                doc_data['id'] = doc.id
+                
+                # Index in Typesense
+                success = await self._index_in_typesense(doc_data)
+                if success:
+                    indexed += 1
+                else:
+                    failed += 1
+            
+            return {
+                "success": True,
+                "message": f"Synchronized {indexed} documents to Typesense",
+                "indexed": indexed,
+                "failed": failed,
+                "total": total
+            }
+        except Exception as e:
+            logger.error(f"Error synchronizing documents to Typesense: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error: {str(e)}",
+                "indexed": 0,
+                "failed": 0,
+                "total": 0
+            }
 
 # Create a global instance for reuse
 document_crud = DocumentCRUD() 

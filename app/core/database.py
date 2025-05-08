@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from app.core.config import settings
 from app.core.firebase import db, initialize_firebase
+from app.core.typesense import init_typesense
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -245,3 +246,22 @@ try:
 except Exception as e:
     logger.warning(f"Error ensuring collections exist: {str(e)}")
     logger.warning("Collections will be created on first access")
+
+# Initialize Firebase for the overall app
+def init_firebase():
+    try:
+        global db, fs
+        
+        app = initialize_firebase_app()
+        if app:
+            db = firestore.client()
+            fs = storage.bucket()
+            
+            # Initialize Typesense for search
+            init_typesense()
+            
+            return True
+        return False
+    except Exception as e:
+        print(f"Error initializing Firebase: {e}")
+        return False
