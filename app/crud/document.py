@@ -544,6 +544,8 @@ class DocumentCRUD(FirebaseCRUDBase):
         Synchronize all documents from Firebase to Typesense.
         Useful for initial setup or recovery.
         
+        This uses upsert to avoid duplicates if sync is run multiple times.
+        
         Returns:
             Dictionary with sync statistics
         """
@@ -575,17 +577,23 @@ class DocumentCRUD(FirebaseCRUDBase):
             indexed = 0
             failed = 0
             
+            logger.info(f"Starting to sync {total} documents to Typesense")
+            
             # Process each document
             for doc in docs:
                 doc_data = doc.to_dict()
                 doc_data['id'] = doc.id
                 
-                # Index in Typesense
+                # Index in Typesense - this uses upsert so it will update existing docs
                 success = await self._index_in_typesense(doc_data)
                 if success:
                     indexed += 1
+                    if indexed % 50 == 0:
+                        logger.info(f"Progress: {indexed}/{total} documents indexed")
                 else:
                     failed += 1
+            
+            logger.info(f"Sync complete: {indexed}/{total} documents indexed, {failed} failed")
             
             return {
                 "success": True,
