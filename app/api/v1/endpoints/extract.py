@@ -723,12 +723,17 @@ async def extract_standard_html(
 
         soup = BeautifulSoup(html_content, "html.parser")
         
-        # Improved text extraction logic
-        logger.info("Applying enhanced content extraction with BeautifulSoup")
-        
         # Check for bot verification page first
         if detect_bot_verification_page(soup):
             raise Exception("Bot verification page detected - cannot extract content")
+        
+        # Try multiple extraction methods and use the best one
+        
+        # Method 1: Maximum content extraction - prioritize getting EVERYTHING 
+        max_content_text = extract_maximum_content(soup)
+        
+        # Method 2: Improved text extraction logic from existing method
+        logger.info("Applying enhanced content extraction with BeautifulSoup")
         
         # Remove non-content elements
         for tag in soup.select('script, style, nav, footer, header, noscript, iframe, aside, [class*="cookie"], [class*="banner"], [id*="banner"], [class*="popup"], [id*="popup"]'):
@@ -786,29 +791,53 @@ async def extract_standard_html(
             text_parts = [main_content.get_text(separator=' ', strip=True)]
         
         # Join with newlines between paragraphs for better readability
-        text = '\n'.join(text_parts)
+        structured_text = '\n'.join(text_parts)
         
         # Final cleanup - remove excessive whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
+        structured_text = re.sub(r'\s+', ' ', structured_text).strip()
         
         # Add reasonable paragraph breaks
-        text = re.sub(r'([.!?])\s+', r'\1\n', text)
+        structured_text = re.sub(r'([.!?])\s+', r'\1\n', structured_text)
         
         # Remove any remaining non-printable characters
-        text = re.sub(r'[^\x20-\x7E\x0A\x0D\u00A0-\u00FF\u0100-\u017F]', '', text)
+        structured_text = re.sub(r'[^\x20-\x7E\x0A\x0D\u00A0-\u00FF\u0100-\u017F]', '', structured_text)
+        
+        # Method 3: Just get all text from the body as a fallback
+        all_body_text = ""
+        if soup.body:
+            all_body_text = soup.body.get_text(separator=' ', strip=True)
+            all_body_text = re.sub(r'\s+', ' ', all_body_text).strip()
+        
+        # Choose the best extraction result (by length)
+        content_candidates = [
+            (max_content_text, "maximum_content"),
+            (structured_text, "structured_content"),
+            (all_body_text, "body_text")
+        ]
+        
+        # Sort by content length (descending)
+        content_candidates.sort(key=lambda x: len(x[0]) if x[0] else 0, reverse=True)
+        
+        # Log extraction results
+        for text, method in content_candidates:
+            logger.info(f"Extraction method {method} produced {len(text) if text else 0} characters")
+        
+        # Use the longest content that meets minimum requirements
+        text = content_candidates[0][0]
+        method = content_candidates[0][1]
         
         if len(text) < MIN_CONTENT_LENGTH:
             raise Exception("Insufficient content")
 
         logger.info(
-            f"Successfully extracted {len(text)} characters from {url} using standard method"
+            f"Successfully extracted {len(text)} characters from {url} using standard method ({method})"
         )
         return ExtractResponse(
             url=ret_url,
             document_type=doc_type,
             text=text,
             success=True,
-            message="standard",
+            message=f"standard_{method}",
             method_used="standard",
         )
     except Exception as e:
@@ -885,75 +914,56 @@ async def extract_with_playwright(
     url: str, doc_type: str, ret_url: str
 ) -> ExtractResponse:
     """Extract content using Playwright with improved waiting and interaction."""
-    # ---> ADDED: Log entry into this function
-    logger.info(f"Entering extract_with_playwright for {url}")
-    logging.getLogger().handlers[0].flush()
-
-    if not auth_manager.startup_complete: # Check if startup finished
-        logger.error(
-            "Playwright startup never completed or failed. Cannot extract."
-        )
-        # Log the specific startup failure if it exists
-        if auth_manager.startup_failure:
-             logger.error(f"Startup failure reason: {auth_manager.startup_failure}")
-        raise Exception("Playwright browser not initialized or startup failed")
-    
-    if not auth_manager.context:
-        logger.warning(
-            "Playwright context not initialized - browser might not be started"
-        )
-        raise Exception("Playwright browser not initialized")
-
     page = None
     try:
+        logger.info(f"Starting Playwright extraction for URL: {url}")
+        
+        # Ensure the browser is initialized
+        if not auth_manager.startup_complete or not auth_manager.context:
+            logger.error("Playwright browser not initialized, cannot extract content")
+            raise Exception("Playwright browser not available")
+        
+        # Get a browser page
         page = await auth_manager.get_page()
-        logger.info(f"Navigating to {url} with Playwright")
-
-        # Use a longer timeout for initial page load
-        await page.goto(
-            url, wait_until="domcontentloaded", timeout=STANDARD_TIMEOUT * 1000
-        )
-
-        # Wait for network to be idle (helps with JS-loaded content)
+        
+        # Improved navigation options with extended timeout for complex pages
+        logger.info(f"Navigating to URL with Playwright: {url}")
         try:
-            await page.wait_for_load_state("networkidle", timeout=5000)
-            logger.info("Network is idle")
-        except Exception as e:
-            logger.warning(f"Network idle timeout: {str(e)}")
-
-        # Scroll to ensure lazy-loaded content appears
-        await page.evaluate(
-            """
-        () => {
-                const scrollToBottom = () => {
-                    window.scrollTo(0, document.body.scrollHeight);
-                };
-                
-                const scrollToTop = () => {
-                    window.scrollTo(0, 0);
-                };
-                
-                // Scroll down in increments
-                const totalScrolls = 5;
-                for(let i = 0; i < totalScrolls; i++) {
-                    setTimeout(() => {
-                        const scrollPos = (document.body.scrollHeight / totalScrolls) * i;
-                        window.scrollTo(0, scrollPos);
-                    }, i * 300);
-                }
-                
-                // Final scroll to bottom and back to top
-                setTimeout(() => {
-                    scrollToBottom();
-                    setTimeout(scrollToTop, 300);
-                }, totalScrolls * 300);
-        }
-        """
-        )
-
-        # Wait for any animations to finish
-        await asyncio.sleep(2)
-
+            await page.goto(
+                url, 
+                wait_until="networkidle", 
+                timeout=90000  # 90 seconds timeout for slow-loading pages
+            )
+        except Exception as nav_err:
+            # If networkidle fails, try with domcontentloaded which is less strict
+            logger.warning(f"Navigation with networkidle failed: {nav_err}, trying with domcontentloaded")
+            await page.goto(
+                url, 
+                wait_until="domcontentloaded", 
+                timeout=45000
+            )
+        
+        # Wait a bit longer for any remaining content to load
+        await asyncio.sleep(3)
+        
+        # Enhanced wait for content to stabilize - wait for core content elements
+        try:
+            # Wait for common content containers
+            for selector in [
+                "main", "article", "#content", ".content", "#main", ".main",
+                "[class*='terms']", "[class*='privacy']", "[class*='policy']",
+                "div > p", "div > h1", "div > h2"
+            ]:
+                try:
+                    # Only wait 1s per selector to avoid long delays
+                    await page.wait_for_selector(selector, timeout=1000)
+                    logger.info(f"Found content selector: {selector}")
+                    break
+                except:
+                    continue
+        except Exception as wait_err:
+            logger.warning(f"Wait for content elements timed out: {wait_err}")
+        
         # Try to click "Accept" or "I Agree" buttons if present (common on legal pages)
         for selector in [
             'button:has-text("Accept")',
@@ -962,6 +972,10 @@ async def extract_with_playwright(
             'button:has-text("Continue")',
             'a:has-text("Accept")',
             'a:has-text("I Agree")',
+            '[class*="accept"]:visible',
+            '[class*="agree"]:visible',
+            '[id*="accept"]:visible',
+            '[id*="agree"]:visible',
         ]:
             try:
                 if await page.locator(selector).count() > 0:
@@ -970,17 +984,140 @@ async def extract_with_playwright(
                     await asyncio.sleep(1)  # Wait for any post-click changes
             except Exception as accept_error:
                 logger.debug(f"Error clicking {selector}: {str(accept_error)}")
+        
+        # NEW: Intelligent scrolling to reveal dynamically loaded content
+        # This greatly improves extraction for lazy-loaded content
+        try:
+            logger.info("Performing intelligent scroll to reveal all content")
+            # Initial scroll to bottom to trigger any lazy loading
+            await page.evaluate("""
+                window.scrollTo({
+                    top: document.body.scrollHeight,
+                    behavior: 'smooth'
+                });
+            """)
+            await asyncio.sleep(1.5)  # Wait for any lazy content to load
+            
+            # Scroll back to top
+            await page.evaluate("window.scrollTo(0, 0);")
+            await asyncio.sleep(0.5)
+            
+            # More thorough scrolling - scroll down in chunks
+            height = await page.evaluate("document.body.scrollHeight")
+            view_port_height = await page.evaluate("window.innerHeight")
+            
+            if height > view_port_height:
+                steps = min(10, max(3, int(height / view_port_height)))  # At least 3, at most 10 steps
+                logger.info(f"Scrolling page in {steps} steps to reveal all content")
+                
+                for i in range(steps):
+                    position = int((i + 1) * height / steps)
+                    await page.evaluate(f"window.scrollTo(0, {position})")
+                    await asyncio.sleep(0.5)  # Brief pause at each scroll position
+            
+            # Final pause after scrolling to ensure all content is loaded
+            await asyncio.sleep(2)
+        except Exception as scroll_err:
+            logger.warning(f"Error during intelligent scrolling: {str(scroll_err)}")
 
-        # Get content
+        # Get content - enhanced with multiple extraction methods
         html = await page.content()
-        logger.debug(f"Playwright raw content start (first 500 chars) for {url}: {html[:500]}") # Log Playwright content start
+        logger.debug(f"Playwright raw content start (first 500 chars) for {url}: {html[:500]}")
         soup = BeautifulSoup(html, "html.parser")
-        text = extract_content_from_soup(soup)
-
+        
+        # NEW: Enhanced content extraction with multiple methods
+        # Try several extraction methods and use the most comprehensive result
+        
+        # Method 0: New maximum content extraction - prioritize getting EVERYTHING
+        extracted_text_0 = extract_maximum_content(soup)
+        
+        # Method 1: Our standard extract_content_from_soup function 
+        extracted_text_1 = extract_content_from_soup(soup)
+        
+        # Method 2: Specialized content extraction for legal pages
+        extracted_text_2 = ""
+        try:
+            # Find the most likely container for privacy/terms content
+            legal_selectors = [
+                "[class*='privacy']", "[class*='policy']", "[class*='terms']",
+                "[id*='privacy']", "[id*='policy']", "[id*='terms']",
+                "main", "article", ".content", "#content", "#main"
+            ]
+            
+            legal_content = None
+            for selector in legal_selectors:
+                elements = soup.select(selector)
+                if elements and len(elements[0].get_text(strip=True)) > 200:
+                    legal_content = elements[0]
+                    logger.info(f"Found legal content container with selector: {selector}")
+                    break
+            
+            if legal_content:
+                # Extract all paragraph and heading text from this container
+                text_elements = []
+                for elem in legal_content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li']):
+                    elem_text = elem.get_text(strip=True)
+                    if elem_text:
+                        text_elements.append(elem_text)
+                
+                extracted_text_2 = "\n".join(text_elements)
+            else:
+                logger.warning("No specialized legal content container found")
+        except Exception as ext_err:
+            logger.warning(f"Error in specialized extraction: {str(ext_err)}")
+        
+        # Method 3: Direct JavaScript evaluation to get text content
+        extracted_text_3 = ""
+        try:
+            # Get text content using JavaScript's innerText - enhanced to get ALL text
+            extracted_text_3 = await page.evaluate("""
+                function getVisibleText() {
+                    // Don't bother finding a specific container, get ALL content
+                    const excludeSelectors = 'script, style, noscript';
+                    const excludedElements = document.querySelectorAll(excludeSelectors);
+                    
+                    // Hide script and style elements to avoid their text
+                    for (let el of excludedElements) {
+                        el.style.display = 'none';
+                    }
+                    
+                    // Get the entire body text
+                    const text = document.body.innerText;
+                    
+                    // Restore visibility
+                    for (let el of excludedElements) {
+                        el.style.display = '';
+                    }
+                    
+                    return text;
+                }
+                return getVisibleText();
+            """)
+        except Exception as js_err:
+            logger.warning(f"Error in JS evaluation extraction: {str(js_err)}")
+        
+        # Choose the best extraction result (longest content that meets minimum length)
+        content_candidates = [
+            (extracted_text_0, "maximum_content_extraction"),  # Prioritize this method first
+            (extracted_text_3, "javascript_evaluation"),       # Then JS evaluation
+            (extracted_text_1, "extract_content_from_soup"),   # Then standard extraction
+            (extracted_text_2, "specialized_legal_extraction") # Then specialized extraction
+        ]
+        
+        # Sort by content length (descending)
+        content_candidates.sort(key=lambda x: len(x[0]) if x[0] else 0, reverse=True)
+        
+        # Log extraction results
+        for text, method in content_candidates:
+            logger.info(f"Extraction method {method} produced {len(text) if text else 0} characters")
+        
+        # Use the longest content if it meets minimum requirements
+        text = content_candidates[0][0] if content_candidates[0][0] else ""
+        extraction_method = content_candidates[0][1]
+        
+        # Double check for sufficient content
         if len(text) >= MIN_CONTENT_LENGTH:
-            logger.info(
-                f"Successfully extracted {len(text)} characters using Playwright"
-            )
+            logger.info(f"Successfully extracted {len(text)} characters using Playwright ({extraction_method})")
             return ExtractResponse(
                 url=ret_url,
                 document_type=doc_type,
@@ -1263,3 +1400,26 @@ async def extract_content(url: str, document_type: str = None) -> tuple:
         # If extraction failed, return empty text but still return the URL to avoid errors
         logger.error(f"Failed to extract content from {url}")
         return "", url
+
+def extract_maximum_content(soup: BeautifulSoup) -> str:
+    """
+    Extract maximum possible content from a page, ignoring HTML structure.
+    This approach prioritizes quantity over quality of content.
+    """
+    logger.info("Using maximum content extraction approach")
+    
+    # Remove only the most problematic elements
+    for tag in soup(['script', 'style', 'noscript']):
+        tag.decompose()
+    
+    # Get all text from the entire page, preserving whitespace
+    all_text = soup.get_text(separator=' ', strip=True)
+    
+    # Basic cleanup - normalize whitespace while preserving paragraphs
+    all_text = re.sub(r'\s+', ' ', all_text)
+    
+    # Add paragraph breaks at sentence endings for readability
+    all_text = re.sub(r'([.!?])\s', r'\1\n', all_text)
+    
+    logger.info(f"Maximum content extraction yielded {len(all_text)} characters")
+    return all_text
