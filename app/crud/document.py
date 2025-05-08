@@ -614,8 +614,8 @@ class DocumentCRUD(FirebaseCRUDBase):
 
     async def clean_typesense_collection(self) -> Dict[str, Any]:
         """
-        Clean/delete all documents from Typesense collection without dropping the collection.
-        This preserves the schema but removes all documents.
+        Clean Typesense collection by dropping and recreating it.
+        This is the most reliable way to completely clean the collection.
         
         Returns:
             Dictionary with operation status
@@ -629,41 +629,52 @@ class DocumentCRUD(FirebaseCRUDBase):
             }
         
         try:
-            # First count the documents
-            count_result = client.collections[TYPESENSE_COLLECTION_NAME].documents.search({
-                'q': '*',
-                'query_by': 'company_name',
-                'per_page': 0
-            })
+            logger.info("Starting forced cleanup of Typesense collection")
             
-            total_documents = count_result.get('found', 0)
-            logger.info(f"Cleaning Typesense collection with {total_documents} documents")
+            # Count existing documents first
+            try:
+                count_result = client.collections[TYPESENSE_COLLECTION_NAME].documents.search({
+                    'q': '*',
+                    'query_by': 'company_name',
+                    'per_page': 0
+                })
+                total_documents = count_result.get('found', 0)
+                logger.info(f"Collection has {total_documents} documents before cleanup")
+            except Exception as count_err:
+                logger.warning(f"Could not count documents: {str(count_err)}")
+                total_documents = -1  # Unknown count
             
-            if total_documents == 0:
+            # Force delete and recreate approach
+            try:
+                # Delete the collection entirely
+                client.collections[TYPESENSE_COLLECTION_NAME].delete()
+                logger.info(f"Successfully deleted collection: {TYPESENSE_COLLECTION_NAME}")
+            except Exception as del_err:
+                logger.warning(f"Error deleting collection (might not exist): {str(del_err)}")
+                # Continue anyway to create it
+            
+            # Create a fresh collection with the defined schema
+            try:
+                client.collections.create(documents_schema)
+                logger.info(f"Successfully recreated collection: {TYPESENSE_COLLECTION_NAME}")
+            except Exception as create_err:
+                logger.error(f"Error creating collection: {str(create_err)}")
                 return {
-                    "success": True,
-                    "message": "No documents to clean - collection is already empty",
+                    "success": False,
+                    "message": f"Error recreating collection: {str(create_err)}",
                     "deleted": 0
                 }
             
-            # Execute the delete operation with a wildcard query
-            delete_result = client.collections[TYPESENSE_COLLECTION_NAME].documents.delete({
-                'filter_by': ''  # Empty filter means delete all documents
-            })
-            
-            deleted_count = delete_result.get('num_deleted', 0)
-            logger.info(f"Successfully cleaned Typesense collection. Deleted {deleted_count} documents.")
-            
             return {
                 "success": True,
-                "message": f"Successfully deleted {deleted_count} documents from Typesense",
-                "deleted": deleted_count
+                "message": f"Successfully cleaned Typesense collection by dropping and recreating it. Removed approximately {total_documents if total_documents >= 0 else 'unknown number of'} documents.",
+                "deleted": total_documents if total_documents >= 0 else 0
             }
         except Exception as e:
             logger.error(f"Error cleaning Typesense collection: {str(e)}")
             return {
                 "success": False,
-                "message": f"Error: {str(e)}",
+                "message": f"Error during cleanup: {str(e)}",
                 "deleted": 0
             }
 

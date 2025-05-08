@@ -369,22 +369,24 @@ async def clean_typesense_collection(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Remove all documents from Typesense collection without dropping the collection.
-    This preserves the schema but deletes all documents.
+    Clean Typesense collection by completely dropping and recreating it.
+    This is the most reliable way to completely reset the search index.
     
-    Use with caution - this operation cannot be undone!
+    Use with extreme caution - this operation cannot be undone! 
+    After cleaning, you will need to re-sync documents using the sync endpoint.
     
     Returns:
     - **success**: Whether the clean operation was successful
     - **message**: Status message
-    - **deleted**: Number of documents deleted
+    - **deleted**: Approximate number of documents deleted
+    - **timestamp**: When the operation was performed
     """
     try:
-        logger.info("Starting Typesense collection cleaning")
+        logger.info("Starting Typesense collection cleaning (drop and recreate)")
         result = await document_crud.clean_typesense_collection()
         
         if result["success"]:
-            logger.info(f"Typesense collection cleaned successfully: {result['deleted']} documents deleted")
+            logger.info(f"Typesense collection cleaned successfully: ~{result['deleted']} documents removed")
         else:
             logger.error(f"Typesense collection cleaning failed: {result['message']}")
             
