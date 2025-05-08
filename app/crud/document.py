@@ -612,5 +612,60 @@ class DocumentCRUD(FirebaseCRUDBase):
                 "total": 0
             }
 
+    async def clean_typesense_collection(self) -> Dict[str, Any]:
+        """
+        Clean/delete all documents from Typesense collection without dropping the collection.
+        This preserves the schema but removes all documents.
+        
+        Returns:
+            Dictionary with operation status
+        """
+        client = get_typesense_client()
+        if not client:
+            return {
+                "success": False, 
+                "message": "Typesense client not available",
+                "deleted": 0
+            }
+        
+        try:
+            # First count the documents
+            count_result = client.collections[TYPESENSE_COLLECTION_NAME].documents.search({
+                'q': '*',
+                'query_by': 'company_name',
+                'per_page': 0
+            })
+            
+            total_documents = count_result.get('found', 0)
+            logger.info(f"Cleaning Typesense collection with {total_documents} documents")
+            
+            if total_documents == 0:
+                return {
+                    "success": True,
+                    "message": "No documents to clean - collection is already empty",
+                    "deleted": 0
+                }
+            
+            # Execute the delete operation with a wildcard query
+            delete_result = client.collections[TYPESENSE_COLLECTION_NAME].documents.delete({
+                'filter_by': ''  # Empty filter means delete all documents
+            })
+            
+            deleted_count = delete_result.get('num_deleted', 0)
+            logger.info(f"Successfully cleaned Typesense collection. Deleted {deleted_count} documents.")
+            
+            return {
+                "success": True,
+                "message": f"Successfully deleted {deleted_count} documents from Typesense",
+                "deleted": deleted_count
+            }
+        except Exception as e:
+            logger.error(f"Error cleaning Typesense collection: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error: {str(e)}",
+                "deleted": 0
+            }
+
 # Create a global instance for reuse
 document_crud = DocumentCRUD() 

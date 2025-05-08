@@ -361,4 +361,44 @@ async def sync_documents_to_typesense(
             "failed": 0,
             "total": 0,
             "timestamp": datetime.now().isoformat()
+        }
+
+
+@router.post("/documents/clean-typesense", response_model=Dict[str, Any])
+async def clean_typesense_collection(
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Remove all documents from Typesense collection without dropping the collection.
+    This preserves the schema but deletes all documents.
+    
+    Use with caution - this operation cannot be undone!
+    
+    Returns:
+    - **success**: Whether the clean operation was successful
+    - **message**: Status message
+    - **deleted**: Number of documents deleted
+    """
+    try:
+        logger.info("Starting Typesense collection cleaning")
+        result = await document_crud.clean_typesense_collection()
+        
+        if result["success"]:
+            logger.info(f"Typesense collection cleaned successfully: {result['deleted']} documents deleted")
+        else:
+            logger.error(f"Typesense collection cleaning failed: {result['message']}")
+            
+        return {
+            "success": result["success"],
+            "message": result["message"],
+            "deleted": result["deleted"],
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error cleaning Typesense collection: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error during cleaning: {str(e)}",
+            "deleted": 0,
+            "timestamp": datetime.now().isoformat()
         } 
