@@ -115,6 +115,7 @@ class DocumentCRUD(FirebaseCRUDBase):
         """
         Search for documents based on provided query.
         
+        Focuses on matching company name and URL fields.
         Attempts to use Algolia first for faster search.
         Falls back to Firebase if Algolia is not available.
         
@@ -130,10 +131,11 @@ class DocumentCRUD(FirebaseCRUDBase):
             A dictionary containing search results and pagination information
         """
         try:
-            # Try Algolia search first
+            # Try Algolia search first with restricted searchable attributes
             algolia_results = None
             try:
-                # Attempt Algolia search
+                # Attempt Algolia search - Algolia searchable attributes are already configured
+                # to prioritize company_name and url in app/core/algolia.py
                 algolia_results = algolia_search(
                     query=query,
                     doc_type=document_type,
@@ -188,19 +190,16 @@ class DocumentCRUD(FirebaseCRUDBase):
                 doc = doc_snapshot.to_dict()
                 doc['id'] = doc_snapshot.id # Ensure ID is part of the dict
                 
-                # Search in multiple fields including summaries for better results
+                # FOCUS ONLY ON COMPANY NAME AND URL FIELDS
+                # Search only in company name and URL fields, ignoring other fields
                 company_name = str(doc.get("company_name", "")).lower()
                 url = str(doc.get("url", "")).lower()
                 retrieved_url = str(doc.get("retrieved_url", "")).lower()
-                one_sentence_summary = str(doc.get("one_sentence_summary", "")).lower()
-                hundred_word_summary = str(doc.get("hundred_word_summary", "")).lower()
                 
-                # Match if query is found in any of these fields
+                # Match if query is found in company name or URLs
                 if (query_lower in company_name or 
                     query_lower in url or 
-                    query_lower in retrieved_url or
-                    query_lower in one_sentence_summary or
-                    query_lower in hundred_word_summary):
+                    query_lower in retrieved_url):
                     matching_docs.append(doc)
 
             # Client-side sorting after filtering

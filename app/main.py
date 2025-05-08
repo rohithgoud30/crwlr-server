@@ -82,6 +82,11 @@ def get_branch_name():
 branch_name = get_branch_name()
 app_title = f"{settings.PROJECT_NAME} ({branch_name})"
 
+# Fix for Pydantic errors with Self type
+from pydantic.json_schema import models_json_schema
+# Set arbitrary_types_allowed=True to fix Self type errors
+models_json_schema.arbitrary_types_allowed = True
+
 # Create the FastAPI app
 app = FastAPI(
     title=app_title,
@@ -102,6 +107,10 @@ async def startup_event():
     global environment_valid, firebase_initialized, playwright_initialized
     
     logger.info("Application startup: Beginning initialization sequence...")
+    
+    # Fix for Pydantic errors with Self type
+    from pydantic import config
+    config.ConfigDict.update_forward_refs(arbitrary_types_allowed=True)
     
     # STEP 1: Validate environment variables first
     logger.info("STEP 1: Validating environment variables...")

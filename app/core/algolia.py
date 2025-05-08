@@ -34,202 +34,249 @@ def init_algolia():
         tos_index = algolia_client.init_index('tos_documents')
         pp_index = algolia_client.init_index('pp_documents')
         
-        # Configure index settings for better search
-        tos_index.set_settings({
+        # Configure index settings to focus on company name and URL fields
+        search_settings = {
             'searchableAttributes': [
-                'company_name',
-                'one_sentence_summary',
-                'hundred_word_summary',
-                'unordered(raw_text)'
+                'company_name',  # First priority 
+                'url',           # Second priority
+                'retrieved_url'  # Third priority
             ],
             'attributesForFaceting': ['company_name', 'document_type'],
-            'customRanking': ['desc(views)']
-        })
-        
-        pp_index.set_settings({
-            'searchableAttributes': [
+            'customRanking': ['desc(views)'],
+            'attributesToRetrieve': [
+                'objectID',
                 'company_name',
+                'url',
+                'retrieved_url',
+                'logo_url',
+                'document_type',
+                'views',
+                'created_at',
+                'updated_at',
                 'one_sentence_summary',
-                'hundred_word_summary',
-                'unordered(raw_text)'
-            ],
-            'attributesForFaceting': ['company_name', 'document_type'],
-            'customRanking': ['desc(views)']
-        })
+                'hundred_word_summary'
+            ]
+        }
         
-        logger.info("Algolia client and indices initialized successfully")
+        # Apply same settings to both indices
+        tos_index.set_settings(search_settings)
+        pp_index.set_settings(search_settings)
+        
+        logger.info("Algolia client and indices initialized with focus on company name and URL fields")
         return algolia_client
     except Exception as e:
         logger.error(f"Error initializing Algolia client: {e}")
         return None
 
-def save_document_to_algolia(document_id: str, document_data: Dict[str, Any]) -> bool:
+def save_document_to_algolia(doc_id: str, document: Dict[str, Any]) -> bool:
     """
-    Save a document to Algolia.
+    Save a document to the appropriate Algolia index.
     
     Args:
-        document_id: The document ID (will be used as objectID in Algolia)
-        document_data: Document data to be indexed
+        doc_id: Document ID
+        document: Document data
         
     Returns:
-        Boolean indicating success/failure
+        True if successful, False otherwise
     """
+    global tos_index, pp_index
+    
     try:
-        # Make sure client is initialized
-        if not algolia_client:
-            init_algolia()
-            if not algolia_client:
+        if not tos_index or not pp_index:
+            if not init_algolia():
+                logger.warning("Cannot save to Algolia - client not initialized")
                 return False
-                
-        # Determine which index to use
-        doc_type = document_data.get('document_type', '').lower()
-        index = tos_index if doc_type == 'tos' else pp_index if doc_type == 'pp' else None
         
-        if not index:
-            logger.error(f"Unknown document type: {doc_type}")
+        # Prepare document for Algolia
+        doc_type = document.get('document_type', '').lower()
+        
+        # Choose the right index
+        index = None
+        if doc_type == 'tos':
+            index = tos_index
+        elif doc_type == 'pp':
+            index = pp_index
+        else:
+            logger.warning(f"Unknown document type '{doc_type}' - cannot save to Algolia")
             return False
             
-        # Set the objectID to match our document ID
-        document_data['objectID'] = document_id
+        # Prepare the document (Algolia requires objectID)
+        algolia_doc = document.copy()
+        algolia_doc['objectID'] = doc_id
         
-        # Limit raw_text to avoid hitting Algolia record size limits (10KB)
-        if 'raw_text' in document_data and document_data['raw_text']:
-            # Truncate to ~5KB (approx 5000 chars)
-            document_data['raw_text'] = document_data['raw_text'][:5000]
+        # Convert datetime objects to ISO strings for Algolia
+        for field in ['created_at', 'updated_at']:
+            if field in algolia_doc and isinstance(algolia_doc[field], datetime):
+                algolia_doc[field] = algolia_doc[field].isoformat()
         
         # Save to Algolia
-        index.save_object(document_data)
-        logger.info(f"Document {document_id} saved to Algolia index")
+        index.save_object(algolia_doc)
+        logger.info(f"Document {doc_id} saved to Algolia index {index.name}")
         return True
     except Exception as e:
         logger.error(f"Error saving document to Algolia: {e}")
         return False
 
-def batch_save_documents(documents: List[Dict[str, Any]], doc_type: str) -> bool:
+def batch_save_documents(documents: List[Dict[str, Any]]) -> Dict[str, int]:
     """
-    Save multiple documents to Algolia in a batch operation.
+    Save multiple documents to Algolia in batch mode.
     
     Args:
-        documents: List of document data to be indexed
-        doc_type: Document type ('tos' or 'pp')
+        documents: List of documents with their IDs
         
     Returns:
-        Boolean indicating success/failure
+        Dictionary with count of successful/failed operations
     """
-    try:
-        # Make sure client is initialized
-        if not algolia_client:
-            init_algolia()
-            if not algolia_client:
-                return False
-                
-        # Determine which index to use
-        index = tos_index if doc_type.lower() == 'tos' else pp_index if doc_type.lower() == 'pp' else None
+    global tos_index, pp_index
+    
+    if not tos_index or not pp_index:
+        if not init_algolia():
+            logger.warning("Cannot batch save to Algolia - client not initialized")
+            return {"success": 0, "failed": len(documents)}
+    
+    # Separate documents by type
+    tos_docs = []
+    pp_docs = []
+    unknown_count = 0
+    
+    for doc in documents:
+        doc_id = doc.get('id')
+        doc_type = doc.get('document_type', '').lower()
         
-        if not index:
-            logger.error(f"Unknown document type: {doc_type}")
-            return False
+        if not doc_id:
+            unknown_count += 1
+            continue
             
-        # Prepare documents for Algolia
-        algolia_objects = []
-        for doc in documents:
-            # Make a copy of the document to avoid modifying the original
-            algolia_doc = doc.copy()
-            
-            # Ensure each document has an objectID
-            if 'id' in doc and 'objectID' not in algolia_doc:
-                algolia_doc['objectID'] = doc['id']
-                
-            # Limit raw_text to avoid hitting record size limits
-            if 'raw_text' in algolia_doc and algolia_doc['raw_text']:
-                algolia_doc['raw_text'] = algolia_doc['raw_text'][:5000]
-                
-            algolia_objects.append(algolia_doc)
-            
-        # Save to Algolia
-        index.save_objects(algolia_objects)
-        logger.info(f"Batch of {len(algolia_objects)} documents saved to Algolia {doc_type} index")
-        return True
+        # Prepare for Algolia (needs objectID)
+        algolia_doc = doc.copy()
+        algolia_doc['objectID'] = doc_id
+        
+        # Convert datetime objects to ISO strings
+        for field in ['created_at', 'updated_at']:
+            if field in algolia_doc and isinstance(algolia_doc[field], datetime):
+                algolia_doc[field] = algolia_doc[field].isoformat()
+        
+        # Add to appropriate batch
+        if doc_type == 'tos':
+            tos_docs.append(algolia_doc)
+        elif doc_type == 'pp':
+            pp_docs.append(algolia_doc)
+        else:
+            unknown_count += 1
+    
+    # Track results
+    results = {
+        "success": 0,
+        "failed": unknown_count  # Start with unknown types as failed
+    }
+    
+    # Send batches to Algolia
+    try:
+        if tos_docs:
+            tos_index.save_objects(tos_docs)
+            results["success"] += len(tos_docs)
+            logger.info(f"Batch saved {len(tos_docs)} TOS documents to Algolia")
     except Exception as e:
-        logger.error(f"Error batch saving documents to Algolia: {e}")
-        return False
+        logger.error(f"Error batch saving TOS documents to Algolia: {e}")
+        results["failed"] += len(tos_docs)
+    
+    try:
+        if pp_docs:
+            pp_index.save_objects(pp_docs)
+            results["success"] += len(pp_docs)
+            logger.info(f"Batch saved {len(pp_docs)} PP documents to Algolia")
+    except Exception as e:
+        logger.error(f"Error batch saving PP documents to Algolia: {e}")
+        results["failed"] += len(pp_docs)
+    
+    return results
 
-def search_documents(query: str, doc_type: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+def search_documents(query: str, doc_type: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
     """
     Search for documents in Algolia.
     
+    Focuses the search on company name and URL fields.
+    
     Args:
-        query: Search query string
-        doc_type: Optional document type filter ('tos' or 'pp')
+        query: Search query
+        doc_type: Optional document type to filter by
         limit: Maximum number of results to return
         
     Returns:
-        List of matching document data
+        List of matching documents
     """
+    global tos_index, pp_index
+    
     try:
-        # Make sure client is initialized
-        if not algolia_client:
-            init_algolia()
-            if not algolia_client:
+        if not tos_index or not pp_index:
+            if not init_algolia():
+                logger.warning("Cannot search Algolia - client not initialized")
                 return []
-                
-        # If document type is specified, search only that index
-        if doc_type:
-            index = tos_index if doc_type.lower() == 'tos' else pp_index if doc_type.lower() == 'pp' else None
+        
+        # Determine which indices to search
+        indices = []
+        if not doc_type or doc_type.lower() == 'tos':
+            indices.append(tos_index)
+        if not doc_type or doc_type.lower() == 'pp':
+            indices.append(pp_index)
             
-            if not index:
-                logger.error(f"Unknown document type: {doc_type}")
-                return []
-                
-            results = index.search(query, {
-                'hitsPerPage': limit
-            })
+        if not indices:
+            logger.warning(f"Unknown document type '{doc_type}' - cannot search Algolia")
+            return []
             
-            return results['hits']
-        else:
-            # Search both indices and combine results
-            tos_results = tos_index.search(query, {
-                'hitsPerPage': limit // 2  # Split limit between both indices
-            })
+        # Search parameters focusing on company name and URL
+        params = {
+            'hitsPerPage': limit,
+            'restrictSearchableAttributes': ['company_name', 'url', 'retrieved_url']
+        }
+        
+        # Collect results from all indices
+        all_results = []
+        for index in indices:
+            search_result = index.search(query, params)
+            all_results.extend(search_result['hits'])
             
-            pp_results = pp_index.search(query, {
-                'hitsPerPage': limit // 2
-            })
+        # Convert Algolia objectID to id for consistency
+        for item in all_results:
+            item['id'] = item.get('objectID')
             
-            # Combine and return results
-            return tos_results['hits'] + pp_results['hits']
+        return all_results
     except Exception as e:
-        logger.error(f"Error searching documents in Algolia: {e}")
+        logger.error(f"Error searching Algolia: {e}")
         return []
 
-def delete_document(document_id: str, doc_type: str) -> bool:
+def delete_document(doc_id: str, doc_type: str) -> bool:
     """
     Delete a document from Algolia.
     
     Args:
-        document_id: The document ID to delete
+        doc_id: Document ID
         doc_type: Document type ('tos' or 'pp')
         
     Returns:
-        Boolean indicating success/failure
+        True if successful, False otherwise
     """
+    global tos_index, pp_index
+    
     try:
-        # Make sure client is initialized
-        if not algolia_client:
-            init_algolia()
-            if not algolia_client:
+        if not tos_index or not pp_index:
+            if not init_algolia():
+                logger.warning("Cannot delete from Algolia - client not initialized")
                 return False
                 
-        # Determine which index to use
-        index = tos_index if doc_type.lower() == 'tos' else pp_index if doc_type.lower() == 'pp' else None
-        
-        if not index:
-            logger.error(f"Unknown document type: {doc_type}")
+        # Choose the right index
+        index = None
+        if doc_type.lower() == 'tos':
+            index = tos_index
+        elif doc_type.lower() == 'pp':
+            index = pp_index
+        else:
+            logger.warning(f"Unknown document type '{doc_type}' - cannot delete from Algolia")
             return False
             
         # Delete from Algolia
-        index.delete_object(document_id)
-        logger.info(f"Document {document_id} deleted from Algolia")
+        index.delete_object(doc_id)
+        logger.info(f"Document {doc_id} deleted from Algolia index {index.name}")
         return True
     except Exception as e:
         logger.error(f"Error deleting document from Algolia: {e}")

@@ -29,48 +29,70 @@ def find_available_port(start_port=8080, max_attempts=10):
         attempts += 1
     
     # If we can't find an available port, return the original
-    logger.warning(f"Could not find available port after {max_attempts} attempts. Using {start_port} anyway.")
+    logger.warning(f"Could not find available port after {max_attempts} attempts. Using {start_port}")
     return start_port
 
-def initialize_services():
-    """Initialize required services before starting the app"""
+def init_services():
+    """Initialize all required services"""
     try:
-        # Initialize Algolia
+        # Initialize Firebase (this is done in app/__init__.py)
+        from app.core.database import db
+        
+        # Initialize Algolia for search (if configured)
         from app.core.algolia import init_algolia
         algolia_client = init_algolia()
         if algolia_client:
-            logger.info("Algolia service initialized successfully")
+            logger.info("Algolia search service initialized successfully")
         else:
-            logger.warning("Failed to initialize Algolia. Search functionality may be limited.")
-            
-        # Initialize other services as needed
-        # ...
+            logger.warning("Algolia search service not initialized - some search features may be limited")
         
+        return True
     except Exception as e:
-        logger.error(f"Error initializing services: {e}")
-        logger.warning("Application will start, but some features may not work correctly")
+        logger.error(f"Error initializing services: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
 
 if __name__ == "__main__":
-    try:
-        # Initialize services
-        initialize_services()
+    # Add current directory to path
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    
+    # Initialize services
+    services_ok = init_services()
+    if not services_ok:
+        logger.warning("Application will start, but some features may not work correctly")
+    
+    # Find an available port
+    port = int(os.environ.get("PORT", "8080"))
+    
+    logger.info(f"Starting server on port {port}")
+    
+    # Configure Pydantic to allow arbitrary types
+    import pydantic
+    pydantic.config.ConfigDict.update_forward_refs(arbitrary_types_allowed=True) 
+    
+    # Override configuration if running locally
+    if os.environ.get("ENVIRONMENT") != "production":
+        # For local development, use a fresh port if the default is in use
+        if is_port_in_use(port):
+            port = find_available_port(port)
+            logger.info(f"Port {os.environ.get('PORT', '8080')} is in use, using port {port} instead")
         
-        desired_port = int(os.environ.get("PORT", 8080))
-        port = find_available_port(desired_port)
-        
-        if port != desired_port:
-            logger.warning(f"Port {desired_port} is in use. Using port {port} instead.")
-        
-        logger.info(f"Starting server on port {port}")
-        
+        # Run with auto-reload for development
+        uvicorn.run(
+            "app.main:app",
+            host="0.0.0.0",
+            port=port,
+            reload=True,
+            reload_dirs=["app"],
+            log_level="info"
+        )
+    else:
+        # Production settings
         uvicorn.run(
             "app.main:app",
             host="0.0.0.0",
             port=port,
             reload=False,
-            workers=1,
+            log_level="info"
         )
-    except Exception as e:
-        logger.error(f"Error starting server: {str(e)}")
-        logger.error(f"Traceback:", exc_info=True)
-        sys.exit(1)
