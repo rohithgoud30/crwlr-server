@@ -591,7 +591,9 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             not analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") and
             not analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") and
             not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
-            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:")
+            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:") and
+            not analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") and
+            not analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")
         )
         
         if all_analyses_successful:
@@ -642,6 +644,10 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                     analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
                     logger.warning(f"Document NOT saved to database due to summary generation failure. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
                     response.message = "Document analysis incomplete: Summary generation failed. Document not saved."
+                elif (analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") or
+                      analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")):
+                    logger.warning(f"Document NOT saved to database because text is too short for summarization. Text length: {len(extracted_text)}")
+                    response.message = "Document not saved: Text is too short for meaningful analysis. A minimum of 200 characters is required."
                 else:
                     response.message = "Partial success: some analyses completed, returning available data but not saved."
             else:
@@ -968,7 +974,9 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             not analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") and
             not analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") and
             not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
-            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:")
+            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:") and
+            not analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") and
+            not analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")
         )
         
         if all_analyses_successful:
@@ -1018,6 +1026,12 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                     analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
                     logger.warning(f"Summary generation failed when reanalyzing document {request.document_id}. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
                     response.message = "Document analysis incomplete: Summary generation failed. Document not updated."
+                elif (analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") or
+                      analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")):
+                    logger.warning(f"Document NOT saved to database because text is too short for summarization. Text length: {len(extracted_text)}")
+                    response.message = "Document not updated: Text is too short for meaningful analysis. A minimum of 200 characters is required."
+                else:
+                    response.message = "Partial success: some analyses completed, returning available data but not saved."
             else:
                 response.success = False
                 response.message = "Failed to analyze content properly, no useful data available."
@@ -1652,10 +1666,12 @@ async def reanalyze_tos(request: ReanalyzeTosRequest) -> ReanalyzeTosResponse:
         all_analyses_successful = (
             analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
             analysis.get('word_frequencies') and analysis.get('text_mining') and
-            analysis.get('one_sentence_summary') != "Summary generation returned empty result" and
-            analysis.get('hundred_word_summary') != "Summary generation returned empty result" and
+            not analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") and
+            not analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") and
             not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
-            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:")
+            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:") and
+            not analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") and
+            not analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")
         )
         
         # Prepare serialized data for Firestore
@@ -1741,6 +1757,10 @@ async def reanalyze_tos(request: ReanalyzeTosRequest) -> ReanalyzeTosResponse:
                 analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
                 logger.warning(f"Summary generation failed when reanalyzing document {request.document_id}. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
                 response.message = "Document analysis incomplete: Summary generation failed. Document not updated."
+            elif (analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") or
+                  analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")):
+                logger.warning(f"Document NOT saved to database because text is too short for summarization. Text length: {len(extracted_text)}")
+                response.message = "Document not updated: Text is too short for meaningful analysis. A minimum of 200 characters is required."
     
     except Exception as e:
         logger.error(f"Error reanalyzing ToS document: {e}", exc_info=True)
@@ -1849,10 +1869,12 @@ async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResp
         all_analyses_successful = (
             analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
             analysis.get('word_frequencies') and analysis.get('text_mining') and
-            analysis.get('one_sentence_summary') != "Summary generation returned empty result" and
-            analysis.get('hundred_word_summary') != "Summary generation returned empty result" and
+            not analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") and
+            not analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") and
             not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
-            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:")
+            not analysis.get('hundred_word_summary', "").startswith("Error generating summary:") and
+            not analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") and
+            not analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")
         )
         
         # Prepare serialized data for Firestore
@@ -1938,6 +1960,10 @@ async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResp
                 analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
                 logger.warning(f"Summary generation failed when reanalyzing document {request.document_id}. One-sentence: '{analysis.get('one_sentence_summary', '')[:100]}...', Hundred-word: '{analysis.get('hundred_word_summary', '')[:100]}...'")
                 response.message = "Document analysis incomplete: Summary generation failed. Document not updated."
+            elif (analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") or
+                  analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")):
+                logger.warning(f"Document NOT saved to database because text is too short for summarization. Text length: {len(extracted_text)}")
+                response.message = "Document not updated: Text is too short for meaningful analysis. A minimum of 200 characters is required."
     
     except Exception as e:
         logger.error(f"Error reanalyzing Privacy Policy document: {e}", exc_info=True)
