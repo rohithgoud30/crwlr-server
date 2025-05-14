@@ -2355,6 +2355,7 @@ async def process_submission(submission_id: str, request: URLSubmissionRequest):
 async def get_submission(
     submission_id: str,
     user_email: str = Query(..., description="User's email to validate ownership"),
+    role: Optional[str] = Query(None, description="User role - 'admin' gives additional permissions"),
     api_key: str = Depends(get_api_key)
 ):
     """
@@ -2362,6 +2363,7 @@ async def get_submission(
     
     - **submission_id**: ID of the submission to retrieve
     - **user_email**: User's email to validate submission ownership
+    - **role**: Optional. If set to 'admin', allows viewing any submission without permission checks
     
     Returns:
     - Submission details including ID, status, and document_id if available
@@ -2384,8 +2386,12 @@ async def get_submission(
                 updated_at=datetime.now()
             )
         
+        # If role is admin, allow access to any submission without checking email
+        is_admin = role == "admin"
+        
         # Verify that the submission belongs to the user using email directly (no user collection needed)
-        if submission.get('user_email') != user_email:
+        # Skip this check for admins
+        if not is_admin and submission.get('user_email') != user_email:
             return URLSubmissionResponse(
                 id=submission_id,
                 url="",

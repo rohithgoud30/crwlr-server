@@ -124,13 +124,16 @@ async def get_document_counts(
 @router.get("/documents/{document_id}", response_model=Document)
 async def get_document(
     document_id: str = Path(...),  # Changed from UUID to str
+    role: Optional[str] = Query(None, description="User role - 'admin' skips view count increment"),
     api_key: str = Depends(get_api_key)
 ):
     """
     Get a specific document by ID and increment its view counter.
+    If role is 'admin', the view counter is not incremented.
     Returns the full document details.
     
     - **document_id**: ID of the document to retrieve
+    - **role**: Optional. If set to 'admin', view count will not be incremented
     """
     try:
         # Get the document
@@ -154,33 +157,42 @@ async def get_document(
             except json.JSONDecodeError:
                 document['text_mining_metrics'] = {}
         
-        try:
-            # Increment the view counter
-            updated_document = await document_crud.increment_views(document_id)
-            if not updated_document:
-                # If increment_views fails, just return the original document
-                print("View increment failed, using original document")
+        # Check if user is admin - only increment views for non-admins
+        is_admin = role == "admin"
+        
+        if not is_admin:
+            try:
+                # Increment the view counter
+                updated_document = await document_crud.increment_views(document_id)
+                if not updated_document:
+                    # If increment_views fails, just return the original document
+                    print("View increment failed, using original document")
+                    return Document(**document)
+                
+                # Parse JSON fields for updated document if needed
+                if updated_document.get('word_frequencies') and isinstance(updated_document['word_frequencies'], str):
+                    try:
+                        updated_document['word_frequencies'] = json.loads(updated_document['word_frequencies'])
+                    except json.JSONDecodeError:
+                        updated_document['word_frequencies'] = []
+                        
+                if updated_document.get('text_mining_metrics') and isinstance(updated_document['text_mining_metrics'], str):
+                    try:
+                        updated_document['text_mining_metrics'] = json.loads(updated_document['text_mining_metrics'])
+                    except json.JSONDecodeError:
+                        updated_document['text_mining_metrics'] = {}
+                
+                # Return the updated document
+                return Document(**updated_document)
+            except Exception as view_error:
+                print(f"Error incrementing view: {str(view_error)}")
+                # If there's an error incrementing views, still return the document
                 return Document(**document)
-            
-            # Parse JSON fields for updated document if needed
-            if updated_document.get('word_frequencies') and isinstance(updated_document['word_frequencies'], str):
-                try:
-                    updated_document['word_frequencies'] = json.loads(updated_document['word_frequencies'])
-                except json.JSONDecodeError:
-                    updated_document['word_frequencies'] = []
-                    
-            if updated_document.get('text_mining_metrics') and isinstance(updated_document['text_mining_metrics'], str):
-                try:
-                    updated_document['text_mining_metrics'] = json.loads(updated_document['text_mining_metrics'])
-                except json.JSONDecodeError:
-                    updated_document['text_mining_metrics'] = {}
-            
-            # Return the updated document
-            return Document(**updated_document)
-        except Exception as view_error:
-            print(f"Error incrementing view: {str(view_error)}")
-            # If there's an error incrementing views, still return the document
+        else:
+            # Admin user - don't increment view count
+            print(f"Admin user accessing document {document_id} - not incrementing views")
             return Document(**document)
+            
     except Exception as e:
         print(f"Error retrieving document: {str(e)}")
         import traceback
