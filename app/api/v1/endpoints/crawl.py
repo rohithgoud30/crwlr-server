@@ -3036,3 +3036,223 @@ async def sync_submissions_to_typesense(
             "failed": 0,
             "total": 0
         }
+
+@router.get("/admin/search-all-submissions", response_model=PaginatedSubmissionsResponse)
+async def admin_search_all_submissions(
+    query: str = Query("", description="Search query for URLs (empty to list all)"),
+    user_email: Optional[str] = Query(None, description="Optional: Filter by user email"),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(6, description="Items per page - allowed values: 6, 9, 12, 15"),
+    sort_order: str = Query("desc", description="Sort order - 'asc' for older to newest, 'desc' for newest to oldest"),
+    document_type: Optional[str] = Query(None, description="Filter by document type (tos or pp)"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    role: str = Query(..., description="User role - must be 'admin' to access this endpoint"),
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Admin-only endpoint to search ALL submissions across users.
+    
+    This endpoint allows administrators to search and browse submissions from all users.
+    The user must have the 'admin' role to access this endpoint.
+    
+    - **query**: Search query (searches in URLs, empty to list all)
+    - **user_email**: Optional filter by specific user email
+    - **page**: Page number (starts at 1)
+    - **size**: Number of items per page (allowed values: 6, 9, 12, 15)
+    - **sort_order**: Sort order - 'asc' for older to newest, 'desc' for newest to oldest (default: desc)
+    - **document_type**: Optional filter by document type (tos or pp)
+    - **status**: Optional filter by status
+    - **role**: User role - must be 'admin' to access this endpoint
+    
+    Returns:
+    - Paginated list of matching submissions from all users
+    """
+    # Verify admin role
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required to access this endpoint")
+    
+    # Validate size parameter
+    allowed_sizes = [6, 9, 12, 15]
+    if size not in allowed_sizes:
+        size = 6  # Default to 6 if invalid size provided
+    
+    # Validate sort_order
+    if sort_order not in ["asc", "desc"]:
+        sort_order = "desc"  # Default to newest first if invalid sort_order provided
+    
+    try:
+        # Get Typesense client
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available. Falling back to Firebase query.")
+            # Fallback to Firebase query with no user filtering
+            return await admin_list_all_submissions(
+                page=page,
+                size=size,
+                user_email=user_email,
+                sort_order=sort_order,
+                search_url=query,
+                document_type=document_type,
+                status=status,
+                api_key=api_key
+            )
+        
+        # Build search parameters for Typesense with no user filtering by default
+        search_parameters = {
+            'q': query if query else "*",  # Use * to match all when query is empty
+            'query_by': 'url',  # Search in the URL field
+            'page': page,
+            'per_page': size,
+            'prefix': True,     # Enable prefix searching
+            'infix': 'always'   # Enable infix searching for substrings
+        }
+        
+        # Add filter conditions
+        filter_conditions = []
+        
+        # Add user_email filter if provided
+        if user_email:
+            filter_conditions.append(f"user_email:={user_email}")
+        
+        # Add document_type filter if provided
+        if document_type:
+            filter_conditions.append(f"document_type:={document_type}")
+        
+        # Add status filter if provided
+        if status:
+            filter_conditions.append(f"status:={status}")
+        
+        # Combine filter conditions if any
+        if filter_conditions:
+            search_parameters['filter_by'] = " && ".join(filter_conditions)
+        
+        # Add sorting
+        sort_field = "created_at"  # Default sort field
+        search_parameters['sort_by'] = f"{sort_field}:{sort_order}"
+        
+        # Perform search
+        SUBMISSIONS_COLLECTION = "submissions"
+        search_results = client.collections[SUBMISSIONS_COLLECTION].documents.search(search_parameters)
+        
+        # Process results
+        submissions = []
+        for hit in search_results['hits']:
+            data = hit['document']
+            
+            # Convert timestamps back to datetime for the response model
+            created_at = datetime.fromtimestamp(data.get('created_at', 0))
+            updated_at = datetime.fromtimestamp(data.get('updated_at', 0))
+            
+            submissions.append(URLSubmissionResponse(
+                id=data['id'],
+                url=data.get('url', ''),
+                document_type=data.get('document_type', ''),
+                status=data.get('status', ''),
+                document_id=data.get('document_id'),
+                error_message=data.get('error_message'),
+                created_at=created_at,
+                updated_at=updated_at
+            ))
+        
+        # Get pagination info from results
+        total_count = search_results.get('found', len(submissions))
+        total_pages = (total_count + size - 1) // size if total_count > 0 else 1
+        
+        return PaginatedSubmissionsResponse(
+            items=submissions,
+            total=total_count,
+            page=page,
+            size=size,
+            pages=total_pages
+        )
+        
+    except Exception as e:
+        logger.error(f"Error searching all submissions: {str(e)}")
+        # Fall back to regular listing if search fails
+        logger.info("Falling back to Firebase query after Typesense search failure.")
+        return await admin_list_all_submissions(
+            page=page,
+            size=size,
+            user_email=user_email,
+            sort_order=sort_order,
+            search_url=query,
+            document_type=document_type,
+            status=status,
+            api_key=api_key
+        )
+
+async def admin_list_all_submissions(
+    page: int = 1,
+    size: int = 6,  # Changed from 10 to 6 to match main function
+    user_email: Optional[str] = None,
+    sort_order: str = "desc",
+    search_url: Optional[str] = None,
+    document_type: Optional[str] = None,
+    status: Optional[str] = None,
+    api_key: str = None
+):
+    """Helper function to list all submissions for admin with Firebase fallback"""
+    try:
+        # Start with base query - no user filtering
+        query = db.collection('submissions')
+        
+        # Apply filters if provided
+        if user_email:
+            query = query.where("user_email", "==", user_email)
+            
+        if document_type:
+            query = query.where("document_type", "==", document_type)
+            
+        if status:
+            query = query.where("status", "==", status)
+        
+        # Add search filter for URL if provided
+        if search_url:
+            # Convert to lowercase and add wildcard search
+            search_term = search_url.lower()
+            # Use firebase's range queries for prefix matching
+            query = query.where("requested_url", ">=", search_term)
+            query = query.where("requested_url", "<=", search_term + "\uf8ff")
+        
+        # Get total count with filters applied
+        total_query = query
+        total_count = len(list(total_query.stream()))
+        
+        # Calculate offset
+        offset = (page - 1) * size
+        
+        # Apply sorting
+        direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
+        query = query.order_by("created_at", direction=direction).offset(offset).limit(size)
+        submissions_docs = list(query.stream())
+        
+        # Format response
+        submissions = []
+        for doc in submissions_docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            
+            submissions.append(URLSubmissionResponse(
+                id=data['id'],
+                url=data.get('requested_url', ''),
+                document_type=data.get('document_type', ''),
+                status=data.get('status', ''),
+                document_id=data.get('document_id'),
+                error_message=data.get('error_message'),
+                created_at=data.get('created_at'),
+                updated_at=data.get('updated_at')
+            ))
+        
+        # Calculate total pages
+        total_pages = (total_count + size - 1) // size  # Ceiling division
+        
+        return PaginatedSubmissionsResponse(
+            items=submissions,
+            total=total_count,
+            page=page,
+            size=size,
+            pages=total_pages
+        )
+    except Exception as e:
+        logger.error(f"Error retrieving all submissions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve submissions: {str(e)}")
