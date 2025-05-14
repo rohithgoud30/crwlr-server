@@ -1,15 +1,16 @@
-from fastapi import APIRouter, Response, HTTPException, status, Depends, Header
+from fastapi import APIRouter, Response, HTTPException, status, Depends, Header, Query
 import logging
 import asyncio
 from urllib.parse import urlparse
 import requests
 import random
-from typing import Dict, Optional, Tuple, Any, Union
+from typing import Dict, Optional, Tuple, Any, Union, List
 import string
 import json
 import re
 import time
 from datetime import datetime
+from typing import Literal
 
 from app.api.v1.endpoints.tos import find_tos, ToSRequest
 from app.api.v1.endpoints.privacy import find_privacy_policy, PrivacyRequest
@@ -32,6 +33,7 @@ from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMin
 from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse, ReanalyzeTosRequest, ReanalyzeTosResponse, ReanalyzePrivacyRequest, ReanalyzePrivacyResponse
 from app.models.database import DocumentCreate, SubmissionCreate
 from app.models.company_info import CompanyInfoRequest
+from app.crud.submission import submission_crud
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -83,16 +85,26 @@ async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type:
     """
     logger.info(f"Starting parallel analysis for document type: {doc_type}")
     
-    # Run all of these analyses in parallel since they don't depend on each other
-    # and can take a few seconds each
+    # Create async wrapper functions for synchronous operations
+    async def get_word_frequencies_async():
+        return get_word_frequencies(extracted_text)
+        
+    async def extract_text_mining_metrics_async():
+        return extract_text_mining_metrics(extracted_text)
     
-    # Get word frequencies and text mining metrics directly
-    word_freqs = get_word_frequencies(extracted_text)
-    text_mining = extract_text_mining_metrics(extracted_text)
+    # Run all analyses in parallel using asyncio.gather
+    word_freqs_task = get_word_frequencies_async()
+    text_mining_task = extract_text_mining_metrics_async()
+    one_sentence_summary_task = generate_one_sentence_summary(extracted_text, doc_url, doc_type)
+    hundred_word_summary_task = generate_hundred_word_summary(extracted_text, doc_url, doc_type)
     
-    # Generate summaries
-    one_sentence_summary = await generate_one_sentence_summary(extracted_text, doc_url, doc_type)
-    hundred_word_summary = await generate_hundred_word_summary(extracted_text, doc_url, doc_type)
+    # Wait for all tasks to complete
+    word_freqs, text_mining, one_sentence_summary, hundred_word_summary = await asyncio.gather(
+        word_freqs_task,
+        text_mining_task,
+        one_sentence_summary_task,
+        hundred_word_summary_task
+    )
     
     # Combine results into a single dictionary
     results = {
@@ -1997,3 +2009,494 @@ async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResp
         response.message = f"Error reanalyzing document: {str(e)}"
     
     return response 
+
+class URLSubmissionRequest(BaseModel):
+    """Request model for URL submission."""
+    url: str
+    document_type: Literal["tos", "pp"]
+    alternate_url: Optional[str] = None  # User can provide specific ToS/PP URL if base URL fails
+
+class URLSubmissionResponse(BaseModel):
+    """Response model for URL submission."""
+    id: str  # Submission ID
+    url: str
+    document_type: Literal["tos", "pp"]
+    status: str  # "initialized", "processing", "analyzing", "success", "failed"
+    document_id: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+@router.post("/submissions", response_model=URLSubmissionResponse)
+async def submit_url(
+    request: URLSubmissionRequest,
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Submit a URL for crawling. This creates a submission record and initiates 
+    the crawling process asynchronously.
+    
+    The submission state is tracked through several stages:
+    - initialized: Submission created
+    - processing: Crawling in progress
+    - analyzing: Text analysis in progress
+    - success: Crawling completed successfully
+    - failed: Crawling failed
+    
+    If a submission with the same base URL has failed, new submissions are locked
+    unless an alternate URL is provided.
+    
+    - **url**: Base URL of the website
+    - **document_type**: Type of document to crawl ("tos" or "pp")
+    - **alternate_url**: Optional specific URL for the document (used if base URL crawl fails)
+    
+    Returns:
+    - Submission details including ID and status
+    """
+    url = request.url
+    document_type = request.document_type
+    
+    # Check if we already have a document for this URL and type
+    from app.crud.document import document_crud
+    existing_doc = await document_crud.get_by_url_and_type(url, document_type)
+    
+    if existing_doc:
+        # Document already exists, create a completed submission
+        submission = await submission_crud.create_submission(
+            user_id="anonymous",  # No user authentication in this example
+            document_id=existing_doc['id'],
+            requested_url=url,
+            document_type=document_type,
+            status="success"
+        )
+        
+        if submission:
+            return URLSubmissionResponse(
+                id=submission['id'],
+                url=url,
+                document_type=document_type,
+                status="success",
+                document_id=existing_doc['id'],
+                created_at=submission['created_at'],
+                updated_at=submission['updated_at']
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create submission record")
+    
+    # Check if there's a failed submission for this URL
+    try:
+        # Query for failed submissions with this URL
+        query = db.collection('submissions').where("requested_url", "==", url).where("status", "==", "failed").limit(1)
+        failed_submissions = list(query.stream())
+        
+        if failed_submissions and not request.alternate_url:
+            # There's a failed submission for this URL and no alternate URL provided
+            raise HTTPException(
+                status_code=400, 
+                detail="This URL has failed crawling before. Please provide an alternate_url for the document."
+            )
+    except Exception as e:
+        logger.error(f"Error checking failed submissions: {str(e)}")
+        # Continue with submission even if check fails
+    
+    # Create a new submission with initialized status
+    submission = await submission_crud.create_submission(
+        user_id="anonymous",  # No user authentication in this example
+        requested_url=url,
+        document_type=document_type,
+        status="initialized"
+    )
+    
+    if not submission:
+        raise HTTPException(status_code=500, detail="Failed to create submission record")
+    
+    # Start background task to process the submission
+    asyncio.create_task(process_submission(submission['id'], request))
+    
+    return URLSubmissionResponse(
+        id=submission['id'],
+        url=url,
+        document_type=document_type,
+        status="initialized",
+        created_at=submission['created_at'],
+        updated_at=submission['updated_at']
+    )
+
+async def process_submission(submission_id: str, request: URLSubmissionRequest):
+    """Process a submission in the background."""
+    logger.info(f"Processing submission {submission_id}")
+    
+    # Update submission to processing status
+    submission = await submission_crud.update_submission_status(
+        id=submission_id,
+        status="processing"
+    )
+    
+    if not submission:
+        logger.error(f"Failed to update submission {submission_id} to processing status")
+        return
+    
+    try:
+        # Determine which URL to use
+        url = request.url
+        document_type = request.document_type
+        
+        # If alternate URL is provided, use it instead of finding ToS/PP URL
+        extraction_url = request.alternate_url if request.alternate_url else url
+        
+        # Check if it's a retry (alternate URL was provided)
+        is_retry = bool(request.alternate_url)
+        
+        if is_retry:
+            logger.info(f"Processing direct URL submission for {submission_id} with URL: {extraction_url}")
+            
+            # Extract content from the URL directly
+            extraction_result = await extract_text_from_url(extraction_url, document_type)
+            
+            if not extraction_result:
+                logger.warning(f"Failed to extract content from {extraction_url}")
+                await submission_crud.update_submission_status(
+                    id=submission_id,
+                    status="failed",
+                    error_message="Failed to extract content from URL"
+                )
+                return
+                
+            extracted_text, extraction_error = extraction_result
+            
+            if not extracted_text:
+                logger.warning(f"Empty content extracted from {extraction_url}: {extraction_error}")
+                await submission_crud.update_submission_status(
+                    id=submission_id,
+                    status="failed",
+                    error_message=f"Failed to extract content: {extraction_error}"
+                )
+                return
+            
+            # Check for very short content which might indicate a bot verification page
+            if len(extracted_text.split()) < 100:
+                logger.warning(f"Extracted content from {extraction_url} is suspiciously short ({len(extracted_text.split())} words)")
+                if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser"]):
+                    logger.warning(f"Short extracted content appears to be a verification page: {extraction_url}")
+                    await submission_crud.update_submission_status(
+                        id=submission_id,
+                        status="failed",
+                        error_message="Bot verification page detected - unable to access actual content"
+                    )
+                    return
+            
+            # Extract company info
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+            company_name = extract_company_name_from_domain(domain)
+            logo_url = get_default_logo_url(url)
+            
+            try:
+                # Create a request for company info
+                request_info = CompanyInfoRequest(url=url)
+                company_info_response = await get_company_info(request_info)
+                
+                if company_info_response.success:
+                    company_name = company_info_response.company_name
+                    logo_url = company_info_response.logo_url
+                    logger.info(f"Successfully extracted company info: {company_name}, {logo_url}")
+            except Exception as e:
+                logger.warning(f"Error extracting company info: {e}")
+                # Continue with domain-based company name
+            
+            # Update submission to analyzing status
+            await submission_crud.update_submission_status(
+                id=submission_id,
+                status="analyzing"
+            )
+            
+            # Perform analysis
+            analysis = await perform_parallel_analysis(extraction_url, extracted_text, document_type)
+            
+            # Add company info to analysis results
+            analysis['company_name'] = company_name
+            analysis['logo_url'] = logo_url
+            
+            # Check if all analyses were successful
+            all_analyses_successful = (
+                analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
+                analysis.get('word_frequencies') and analysis.get('text_mining') and
+                not analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") and
+                not analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") and
+                not analysis.get('one_sentence_summary', "").startswith("Error generating summary:") and
+                not analysis.get('hundred_word_summary', "").startswith("Error generating summary:") and
+                not analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") and
+                not analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")
+            )
+            
+            if all_analyses_successful:
+                logger.info(f"All analyses successful for submission {submission_id}")
+                
+                try:
+                    # Prepare analysis data - match the structure used in crawl-tos and crawl-pp
+                    document_analysis = {
+                        "one_sentence_summary": analysis.get('one_sentence_summary', ''),
+                        "hundred_word_summary": analysis.get('hundred_word_summary', ''),
+                        "word_frequencies": analysis.get('word_frequencies', []),
+                        "text_mining": analysis.get('text_mining', {}),
+                        "company_name": company_name,
+                        "logo_url": logo_url
+                    }
+                    
+                    # Save document to database
+                    document_id = await save_document_to_db(
+                        original_url=url,
+                        retrieved_url=extraction_url,
+                        document_type=document_type,
+                        document_content=extracted_text,
+                        analysis=document_analysis
+                    )
+                    
+                    # Update submission to success
+                    await submission_crud.update_submission_status(
+                        id=submission_id,
+                        status="success",
+                        document_id=document_id
+                    )
+                except Exception as e:
+                    logger.error(f"Error saving document for submission {submission_id}: {e}")
+                    await submission_crud.update_submission_status(
+                        id=submission_id,
+                        status="failed",
+                        error_message=f"Error saving document: {str(e)}"
+                    )
+            else:
+                # If analyses failed, update submission status
+                logger.warning(f"Some analyses failed for submission {submission_id}")
+                has_useful_data = (
+                    (analysis.get('one_sentence_summary') or analysis.get('hundred_word_summary')) or
+                    analysis.get('word_frequencies') or
+                    analysis.get('text_mining')
+                )
+                
+                if has_useful_data:
+                    error_message = "Partial analysis completed but document not saved"
+                    
+                    # Check what specifically failed
+                    if (analysis.get('one_sentence_summary', "").startswith("Summary generation returned empty result") or 
+                        analysis.get('hundred_word_summary', "").startswith("Summary generation returned empty result") or
+                        analysis.get('one_sentence_summary', "").startswith("Error generating summary:") or
+                        analysis.get('hundred_word_summary', "").startswith("Error generating summary:")):
+                        error_message = "Summary generation failed"
+                    elif (analysis.get('one_sentence_summary', "").startswith("Text too short for summarization") or
+                          analysis.get('hundred_word_summary', "").startswith("Text too short for summarization")):
+                        error_message = "Text too short for summarization"
+                    
+                    await submission_crud.update_submission_status(
+                        id=submission_id,
+                        status="failed",
+                        error_message=error_message
+                    )
+                else:
+                    await submission_crud.update_submission_status(
+                        id=submission_id,
+                        status="failed",
+                        error_message="Failed to analyze content properly"
+                    )
+            
+            return
+        
+        # Standard submission flow (not a retry)
+        document_id = None
+        if document_type == "tos":
+            # Create ToS request
+            tos_request = CrawlTosRequest(url=url)
+            
+            # Call crawl-tos endpoint
+            response = await crawl_tos(tos_request)
+            
+            if response.success:
+                document_id = response.document_id
+                
+                # Update submission to success
+                await submission_crud.update_submission_status(
+                    id=submission_id,
+                    status="success",
+                    document_id=document_id
+                )
+            else:
+                # Update submission to failed
+                await submission_crud.update_submission_status(
+                    id=submission_id,
+                    status="failed",
+                    error_message=response.message
+                )
+        else:  # document_type == "pp"
+            # Create Privacy Policy request
+            pp_request = CrawlPrivacyRequest(url=url)
+            
+            # Call crawl-pp endpoint
+            response = await crawl_pp(pp_request)
+            
+            if response.success:
+                document_id = response.document_id
+                
+                # Update submission to success
+                await submission_crud.update_submission_status(
+                    id=submission_id,
+                    status="success",
+                    document_id=document_id
+                )
+            else:
+                # Update submission to failed
+                await submission_crud.update_submission_status(
+                    id=submission_id,
+                    status="failed",
+                    error_message=response.message
+                )
+    except Exception as e:
+        logger.error(f"Error processing submission {submission_id}: {str(e)}")
+        
+        # Update submission to failed
+        await submission_crud.update_submission_status(
+            id=submission_id,
+            status="failed",
+            error_message=str(e)
+        )
+
+@router.get("/submissions/{submission_id}", response_model=URLSubmissionResponse)
+async def get_submission(
+    submission_id: str,
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Get the status of a URL submission.
+    
+    - **submission_id**: ID of the submission to retrieve
+    
+    Returns:
+    - Submission details including ID, status, and document_id if available
+    """
+    submission = await submission_crud.get(submission_id)
+    
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    
+    return URLSubmissionResponse(
+        id=submission['id'],
+        url=submission['requested_url'],
+        document_type=submission['document_type'],
+        status=submission['status'],
+        document_id=submission.get('document_id'),
+        error_message=submission.get('error_message'),
+        created_at=submission['created_at'],
+        updated_at=submission['updated_at']
+    )
+
+@router.get("/submissions", response_model=List[URLSubmissionResponse])
+async def list_submissions(
+    limit: int = Query(10, ge=1, le=50),
+    api_key: str = Depends(get_api_key)
+):
+    """
+    List all submissions sorted by most recent first.
+    
+    - **limit**: Maximum number of submissions to return (default: 10, max: 50)
+    
+    Returns:
+    - List of submissions with their statuses
+    """
+    try:
+        # In a real application, you would filter by the authenticated user
+        # For simplicity, we're just retrieving the most recent submissions
+        
+        # Query the most recent submissions
+        query = db.collection('submissions').order_by("created_at", direction="desc").limit(limit)
+        submissions_docs = list(query.stream())
+        
+        # Format response
+        submissions = []
+        for doc in submissions_docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            
+            submissions.append(URLSubmissionResponse(
+                id=data['id'],
+                url=data['requested_url'],
+                document_type=data['document_type'],
+                status=data['status'],
+                document_id=data.get('document_id'),
+                error_message=data.get('error_message'),
+                created_at=data['created_at'],
+                updated_at=data['updated_at']
+            ))
+        
+        return submissions
+    except Exception as e:
+        logger.error(f"Error retrieving submissions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve submissions: {str(e)}")
+
+class RetrySubmissionRequest(BaseModel):
+    """Request model for retrying a failed submission."""
+    alternate_url: str
+
+@router.post("/submissions/{submission_id}/retry", response_model=URLSubmissionResponse)
+async def retry_submission(
+    submission_id: str,
+    request: RetrySubmissionRequest,
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Retry a failed submission with an alternate URL.
+    
+    This bypasses URL discovery and directly processes the provided URL.
+    The submission will go through these states:
+    - initialized
+    - processing
+    - analyzing
+    - success/failed
+    
+    - **submission_id**: ID of the failed submission to retry
+    - **alternate_url**: The direct URL to the document (ToS or Privacy Policy)
+    
+    Returns:
+    - Updated submission details
+    """
+    # Get the submission
+    submission = await submission_crud.get(submission_id)
+    
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    
+    # Check if the submission is in failed status
+    if submission['status'] != "failed":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Only failed submissions can be retried. Current status: {submission['status']}"
+        )
+    
+    # Update submission to initialized status
+    updated_submission = await submission_crud.update_submission_status(
+        id=submission_id,
+        status="initialized",
+        error_message=None  # Clear previous error message
+    )
+    
+    if not updated_submission:
+        raise HTTPException(status_code=500, detail="Failed to update submission")
+    
+    # Create a submission request with the alternate URL
+    retry_request = URLSubmissionRequest(
+        url=submission['requested_url'],
+        document_type=submission['document_type'],
+        alternate_url=request.alternate_url
+    )
+    
+    # Start background task to process the submission
+    asyncio.create_task(process_submission(submission_id, retry_request))
+    
+    return URLSubmissionResponse(
+        id=updated_submission['id'],
+        url=updated_submission['requested_url'],
+        document_type=updated_submission['document_type'],
+        status="initialized",
+        document_id=updated_submission.get('document_id'),
+        error_message=updated_submission.get('error_message'),
+        created_at=updated_submission['created_at'],
+        updated_at=updated_submission['updated_at']
+    )
