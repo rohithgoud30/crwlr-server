@@ -2366,25 +2366,79 @@ async def get_submission(
     Returns:
     - Submission details including ID, status, and document_id if available
     """
-    submission = await submission_crud.get(submission_id)
-    
-    if not submission:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    
-    # Verify that the submission belongs to the user using email directly (no user collection needed)
-    if submission.get('user_email') != user_email:
-        raise HTTPException(status_code=403, detail="You do not have permission to access this submission")
-    
-    return URLSubmissionResponse(
-        id=submission['id'],
-        url=submission['requested_url'],
-        document_type=submission['document_type'],
-        status=submission['status'],
-        document_id=submission.get('document_id'),
-        error_message=submission.get('error_message'),
-        created_at=submission['created_at'],
-        updated_at=submission['updated_at']
-    )
+    try:
+        submission = await submission_crud.get(submission_id)
+        
+        if not submission:
+            logger.info(f"Submission with ID {submission_id} not found")
+            # Instead of raising a 404 error, return a response with a clear message
+            # with empty/placeholder values
+            return URLSubmissionResponse(
+                id=submission_id,
+                url="",
+                document_type="tos",  # Default type
+                status="not_found",   # Special status to indicate not found
+                document_id=None,
+                error_message="No submission found with this ID",
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+        
+        # Verify that the submission belongs to the user using email directly (no user collection needed)
+        if submission.get('user_email') != user_email:
+            return URLSubmissionResponse(
+                id=submission_id,
+                url="",
+                document_type="tos",  # Default type 
+                status="access_denied",   # Special status to indicate permission issue
+                document_id=None,
+                error_message="You do not have permission to access this submission",
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+        
+        return URLSubmissionResponse(
+            id=submission['id'],
+            url=submission['requested_url'],
+            document_type=submission['document_type'],
+            status=submission['status'],
+            document_id=submission.get('document_id'),
+            error_message=submission.get('error_message'),
+            created_at=submission['created_at'],
+            updated_at=submission['updated_at']
+        )
+    except Exception as e:
+        logger.error(f"Error fetching submission {submission_id}: {str(e)}")
+        
+        error_message = f"Failed to fetch submission: {str(e)}"
+        error_status = "fetch_error"
+        
+        # Check for specific error types and provide clearer messages
+        try:
+            error_str = str(e).lower()
+            if "connection" in error_str or "network" in error_str:
+                error_message = "Database connection error"
+                error_status = "connection_error"
+            elif "timeout" in error_str:
+                error_message = "Database operation timed out"
+                error_status = "timeout_error"
+            elif "permission" in error_str:
+                error_message = "Permission denied accessing submission"
+                error_status = "permission_error"
+        except Exception as inner_e:
+            # If error analysis itself fails, just use the original error message
+            logger.warning(f"Error analyzing exception message: {str(inner_e)}")
+        
+        return URLSubmissionResponse(
+            id=submission_id,
+            url="",
+            document_type="tos",  # Default type 
+            status=error_status,  # Status indicating specific error
+            document_id=None,
+            error_message=error_message,
+            created_at=datetime.now(),
+            updated_at=datetime.now()
+        )
 
 class PaginatedSubmissionsResponse(BaseModel):
     """Response model for paginated submissions listing."""
@@ -2393,6 +2447,8 @@ class PaginatedSubmissionsResponse(BaseModel):
     page: int
     size: int
     pages: int
+    error_status: bool = False  # Flag to indicate if there was an error
+    error_message: Optional[str] = None  # Error message if any
 
 @router.get("/submissions", response_model=PaginatedSubmissionsResponse)
 async def list_submissions(
@@ -2466,7 +2522,21 @@ async def list_submissions(
             ))
         
         # Calculate total pages
-        total_pages = (total_count + size - 1) // size  # Ceiling division
+        total_pages = (total_count + size - 1) // size if total_count > 0 else 1  # Ensure at least 1 page even when empty
+        
+        # If no submissions found, instead of raising an error, return empty results with message
+        if len(submissions) == 0 and page == 1:
+            logger.info(f"No submissions found for user {user_email}")
+            # Return empty results with appropriate message
+            return PaginatedSubmissionsResponse(
+                items=[],
+                total=0,
+                page=page,
+                size=size,
+                pages=total_pages,
+                error_status=False,  # Not an error, just empty results
+                error_message="No submissions found"
+            )
         
         return PaginatedSubmissionsResponse(
             items=submissions,
@@ -2477,7 +2547,34 @@ async def list_submissions(
         )
     except Exception as e:
         logger.error(f"Error retrieving submissions: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve submissions: {str(e)}")
+        # Instead of raising an HTTPException, return a response with error status
+        error_message = f"Failed to retrieve submissions: {str(e)}"
+        
+        # Check for common error types and provide more specific messages
+        try:
+            error_str = str(e).lower()
+            if "permission denied" in error_str:
+                error_message = "Permission denied accessing submissions database"
+            elif "not found" in error_str:
+                error_message = "Submissions collection not found"
+            elif "timeout" in error_str:
+                error_message = "Database connection timed out"
+            elif "unavailable" in error_str or "connection" in error_str:
+                error_message = "Database service unavailable"
+        except Exception as inner_e:
+            # If error analysis itself fails, just use the original error message
+            logger.warning(f"Error analyzing exception message: {str(inner_e)}")
+        
+        # Return an empty result set with error status
+        return PaginatedSubmissionsResponse(
+            items=[],
+            total=0,
+            page=page,
+            size=size,
+            pages=1,
+            error_status=True,
+            error_message=error_message
+        )
 
 class RetrySubmissionRequest(BaseModel):
     """Request model for retrying a failed submission."""
@@ -2507,57 +2604,146 @@ async def retry_submission(
     Returns:
     - Updated submission details
     """
-    # Get the submission
-    submission = await submission_crud.get(submission_id)
-    
-    if not submission:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    
-    # Check if the submission is in failed status
-    if submission['status'] != "failed":
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Only failed submissions can be retried. Current status: {submission['status']}"
+    try:
+        # Get the submission
+        submission = await submission_crud.get(submission_id)
+        
+        if not submission:
+            logger.info(f"Submission with ID {submission_id} not found for retry")
+            # Instead of raising a 404 error, return a response with a clear message
+            return URLSubmissionResponse(
+                id=submission_id,
+                url=request.document_url,
+                document_type="tos",  # Default type
+                status="not_found",   # Special status to indicate not found
+                document_id=None,
+                error_message="No submission found with this ID for retry",
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+        
+        # Check if the submission is in failed status
+        if submission['status'] != "failed":
+            logger.info(f"Attempted to retry submission {submission_id} with status {submission['status']}")
+            return URLSubmissionResponse(
+                id=submission_id,
+                url=submission['requested_url'],
+                document_type=submission['document_type'],
+                status="invalid_retry",   # Special status to indicate invalid retry
+                document_id=submission.get('document_id'),
+                error_message=f"Only failed submissions can be retried. Current status: {submission['status']}",
+                created_at=submission['created_at'],
+                updated_at=submission['updated_at']
+            )
+        
+        # Verify submission has the required fields
+        if 'requested_url' not in submission or 'document_type' not in submission:
+            logger.warning(f"Submission {submission_id} missing required fields for retry")
+            return URLSubmissionResponse(
+                id=submission_id,
+                url=request.document_url,
+                document_type=submission.get('document_type', 'tos'),
+                status="invalid_submission",
+                document_id=None,
+                error_message="Submission record is missing required fields (URL or document type)",
+                created_at=submission['created_at'],
+                updated_at=submission['updated_at']
+            )
+        
+        # Update submission to initialized status
+        updated_submission = await submission_crud.update_submission_status(
+            id=submission_id,
+            status="initialized",
+            error_message=None  # Clear previous error message
         )
-    
-    # Verify submission has the required fields
-    if 'requested_url' not in submission or 'document_type' not in submission:
-        raise HTTPException(
-            status_code=400,
-            detail="Submission record is missing required fields (URL or document type)"
+        
+        if not updated_submission:
+            logger.error(f"Failed to update submission {submission_id} status for retry")
+            return URLSubmissionResponse(
+                id=submission_id,
+                url=submission['requested_url'],
+                document_type=submission['document_type'],
+                status="update_failed",
+                document_id=submission.get('document_id'),
+                error_message="Failed to update submission for retry",
+                created_at=submission['created_at'],
+                updated_at=datetime.now()
+            )
+        
+        # Create a submission request with the document URL and data from the original submission
+        retry_request = URLSubmissionRequest(
+            url=submission['requested_url'],
+            document_type=submission['document_type'],
+            document_url=request.document_url,
+            user_email=request.user_email
         )
-    
-    # Update submission to initialized status
-    updated_submission = await submission_crud.update_submission_status(
-        id=submission_id,
-        status="initialized",
-        error_message=None  # Clear previous error message
-    )
-    
-    if not updated_submission:
-        raise HTTPException(status_code=500, detail="Failed to update submission")
-    
-    # Create a submission request with the document URL and data from the original submission
-    retry_request = URLSubmissionRequest(
-        url=submission['requested_url'],
-        document_type=submission['document_type'],
-        document_url=request.document_url,
-        user_email=request.user_email
-    )
-    
-    # Start background task to process the submission
-    asyncio.create_task(process_submission(submission_id, retry_request))
-    
-    return URLSubmissionResponse(
-        id=updated_submission['id'],
-        url=updated_submission['requested_url'],
-        document_type=updated_submission['document_type'],
-        status="initialized",
-        document_id=updated_submission.get('document_id'),
-        error_message=updated_submission.get('error_message'),
-        created_at=updated_submission['created_at'],
-        updated_at=updated_submission['updated_at']
-    )
+        
+        # Start background task to process the submission
+        try:
+            asyncio.create_task(process_submission(submission_id, retry_request))
+        except Exception as task_e:
+            logger.error(f"Error starting retry task for submission {submission_id}: {str(task_e)}")
+            # Update submission back to failed status if process task couldn't be started
+            await submission_crud.update_submission_status(
+                id=submission_id,
+                status="failed",
+                error_message=f"Failed to start retry task: {str(task_e)}"
+            )
+            
+            # Return informative error
+            return URLSubmissionResponse(
+                id=submission_id,
+                url=submission['requested_url'],
+                document_type=submission['document_type'],
+                status="retry_failed",
+                document_id=submission.get('document_id'),
+                error_message=f"Failed to start retry processing: {str(task_e)}",
+                created_at=submission['created_at'],
+                updated_at=datetime.now()
+            )
+        
+        return URLSubmissionResponse(
+            id=updated_submission['id'],
+            url=updated_submission['requested_url'],
+            document_type=updated_submission['document_type'],
+            status="initialized",
+            document_id=updated_submission.get('document_id'),
+            error_message=updated_submission.get('error_message'),
+            created_at=updated_submission['created_at'],
+            updated_at=updated_submission['updated_at']
+        )
+    except Exception as e:
+        logger.error(f"Error processing retry for submission {submission_id}: {str(e)}")
+        
+        error_message = f"Failed to process retry: {str(e)}"
+        error_status = "retry_error"
+        
+        # Check for specific error types and provide clearer messages
+        try:
+            error_str = str(e).lower()
+            if "connection" in error_str or "network" in error_str:
+                error_message = "Database connection error while processing retry"
+                error_status = "connection_error"
+            elif "timeout" in error_str:
+                error_message = "Operation timed out while processing retry"
+                error_status = "timeout_error"
+            elif "permission" in error_str:
+                error_message = "Permission denied while processing retry"
+                error_status = "permission_error"
+        except Exception as inner_e:
+            # If error analysis itself fails, just use the original error message
+            logger.warning(f"Error analyzing exception message: {str(inner_e)}")
+        
+        return URLSubmissionResponse(
+            id=submission_id,
+            url=request.document_url,
+            document_type="tos",  # Default type 
+            status=error_status,
+            document_id=None,
+            error_message=error_message,
+            created_at=datetime.now(),
+            updated_at=datetime.now()
+        )
 
 @router.get("/search-submissions", response_model=PaginatedSubmissionsResponse)
 async def search_submissions(
@@ -2667,6 +2853,20 @@ async def search_submissions(
         end_idx = start_idx + size
         paginated_submissions = submissions[start_idx:end_idx]
         
+        # If no submissions found, instead of failing, return empty results with message
+        if total_count == 0 and page == 1:
+            logger.info(f"No submissions found for search query '{query}' by user {user_email}")
+            # Return empty results with appropriate message
+            return PaginatedSubmissionsResponse(
+                items=[],
+                total=0,
+                page=page,
+                size=size,
+                pages=1,
+                error_status=False,  # Not an error, just empty results
+                error_message="No submissions found"
+            )
+        
         return PaginatedSubmissionsResponse(
             items=paginated_submissions,
             total=total_count,
@@ -2679,14 +2879,52 @@ async def search_submissions(
         logger.error(f"Error searching submissions: {str(e)}")
         # Fall back to regular listing if search fails
         logger.info("Falling back to Firebase query after Typesense search failure.")
-        return await list_submissions(
-            page=page,
-            size=size,
-            user_email=user_email,  # Ensure user_email is passed to filter results
-            sort_order=sort_order,
-            search_url=query,
-            api_key=api_key
-        )
+        
+        error_details = str(e)
+        error_type = "search_engine_error"
+        
+        # Check specific error types for better categorization
+        try:
+            error_str = error_details.lower()
+            if "connection" in error_str:
+                error_type = "connection_error"
+            elif "timeout" in error_str:
+                error_type = "timeout_error"
+            elif "permission" in error_str:
+                error_type = "permission_error"
+        except Exception as inner_e:
+            # If error analysis itself fails, just use the original error type
+            logger.warning(f"Error analyzing exception message: {str(inner_e)}")
+        
+        try:
+            # Try to fall back to regular listing
+            fallback_response = await list_submissions(
+                page=page,
+                size=size,
+                user_email=user_email,
+                sort_order=sort_order,
+                search_url=query,
+                api_key=api_key
+            )
+            
+            # Keep the original fallback response but add error info about search failure
+            fallback_response.error_status = True
+            fallback_response.error_message = f"Search engine error: {error_details}. Using fallback database query."
+            
+            return fallback_response
+        except Exception as fallback_e:
+            # If fallback also fails, return empty results with both errors
+            logger.error(f"Fallback query also failed: {str(fallback_e)}")
+            
+            return PaginatedSubmissionsResponse(
+                items=[],
+                total=0,
+                page=page,
+                size=size,
+                pages=1,
+                error_status=True,
+                error_message=f"Search failed ({error_type}): {error_details}. Fallback also failed: {str(fallback_e)}"
+            )
 
 @router.post("/admin/sync-submissions-to-typesense", response_model=Dict[str, Any])
 async def sync_submissions_to_typesense(
