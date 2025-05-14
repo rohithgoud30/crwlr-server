@@ -2012,7 +2012,7 @@ class URLSubmissionResponse(BaseModel):
     document_type: Literal["tos", "pp"]
     status: str  # "initialized", "processing", "analyzing", "success", "failed"
     document_id: Optional[str] = None
-    error_message: Optional[str] = None
+    error_message: Optional[str] = None  # Used for error info or "Document already exists" messages
     created_at: datetime
     updated_at: datetime
 
@@ -2047,9 +2047,40 @@ async def submit_url(
     document_type = request.document_type
     user_email = request.user_email
     
+    # Try to normalize the URL for more effective matching
+    normalized_url = url.lower().strip()
+    if not normalized_url.startswith(('http://', 'https://')):
+        normalized_url = 'https://' + normalized_url
+    
+    try:
+        # Extract the domain for domain-based matching
+        parsed_url = urlparse(normalized_url)
+        domain = parsed_url.netloc
+        if not domain and '/' in normalized_url:
+            domain = normalized_url.split('/')[0]
+    except:
+        domain = None  # If parsing fails, we'll just use the original URL
+    
     # Check if we already have a document for this URL and type
     from app.crud.document import document_crud
+    
+    # First try exact URL match
     existing_doc = await document_crud.get_by_url_and_type(url, document_type)
+    
+    # If not found, try with normalized URL
+    if not existing_doc and normalized_url != url:
+        existing_doc = await document_crud.get_by_url_and_type(normalized_url, document_type)
+    
+    # If still not found, try domain-based search
+    if not existing_doc and domain:
+        try:
+            # This would need to be implemented in your document_crud
+            similar_docs = await document_crud.find_documents_by_domain(domain, document_type, limit=1)
+            if similar_docs and len(similar_docs) > 0:
+                existing_doc = similar_docs[0]
+                logger.info(f"Found document with same domain: {domain}")
+        except Exception as e:
+            logger.warning(f"Error in domain-based document search: {e}")
     
     if existing_doc:
         # Document already exists, create a completed submission
@@ -2069,7 +2100,8 @@ async def submit_url(
                 status="success",
                 document_id=existing_doc['id'],
                 created_at=submission['created_at'],
-                updated_at=submission['updated_at']
+                updated_at=submission['updated_at'],
+                error_message="Document already exists in database. Redirecting to existing document."
             )
         else:
             raise HTTPException(status_code=500, detail="Failed to create submission record")

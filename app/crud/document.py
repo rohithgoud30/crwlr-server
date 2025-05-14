@@ -643,5 +643,60 @@ class DocumentCRUD(FirebaseCRUDBase):
                 "total": 0
             }
 
+    async def find_documents_by_domain(self, domain: str, document_type: Optional[str] = None, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Find documents that have the same domain in their URL.
+        
+        Args:
+            domain: The domain to search for (e.g., "example.com")
+            document_type: Optional filter for document type
+            limit: Maximum number of documents to return
+            
+        Returns:
+            List of document dictionaries
+        """
+        if not self.collection:
+            logger.error("Firebase collection not initialized")
+            return []
+            
+        try:
+            # Prepare query to search for documents containing the domain
+            query = self.collection
+            
+            # Add document_type filter if provided
+            if document_type:
+                query = query.where("document_type", "==", document_type)
+                
+            # We need to do a more complex search since Firestore doesn't support LIKE queries
+            # Start by getting documents and then filter in memory
+            results = []
+            docs = list(query.limit(100).stream())  # Get a reasonable batch size
+            
+            for doc in docs:
+                doc_data = doc.to_dict()
+                doc_data['id'] = doc.id
+                
+                # Check if domain is in the URL (case-insensitive)
+                url = doc_data.get('url', '').lower()
+                if domain.lower() in url:
+                    results.append(doc_data)
+                    if len(results) >= limit:
+                        break
+                        
+                # If still need more results, also check retrieved_url
+                if len(results) < limit and 'retrieved_url' in doc_data:
+                    retrieved_url = doc_data.get('retrieved_url', '').lower()
+                    if domain.lower() in retrieved_url and doc_data not in results:
+                        results.append(doc_data)
+                        if len(results) >= limit:
+                            break
+            
+            logger.info(f"Found {len(results)} documents with domain '{domain}'")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error finding documents by domain: {str(e)}")
+            return []
+
 # Create a global instance for reuse
 document_crud = DocumentCRUD() 
