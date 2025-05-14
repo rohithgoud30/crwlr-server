@@ -11,6 +11,7 @@ import re
 import time
 from datetime import datetime
 from pydantic import BaseModel, Field
+from firebase_admin import firestore
 
 from app.api.v1.endpoints.tos import find_tos, ToSRequest
 from app.api.v1.endpoints.privacy import find_privacy_policy, PrivacyRequest
