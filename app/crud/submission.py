@@ -16,10 +16,10 @@ class SubmissionCRUD(FirebaseCRUDBase):
         # Valid submission statuses
         self.valid_statuses = ["initialized", "processing", "analyzing", "success", "failed"]
     
-    async def get_submissions_by_user(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
-        """Get submissions by user ID."""
+    async def get_submissions_by_user(self, user_email: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get submissions by user email."""
         try:
-            query = self.collection.where("user_id", "==", str(user_id)).order_by("created_at", direction="desc").limit(limit)
+            query = self.collection.where("user_email", "==", str(user_email)).order_by("created_at", direction="desc").limit(limit)
             docs = list(query.stream())
             
             # Convert to list of dicts
@@ -101,7 +101,7 @@ class SubmissionCRUD(FirebaseCRUDBase):
 
     async def create_submission(
         self,
-        user_id: str,
+        user_email: str,
         document_id: Optional[str] = None,
         requested_url: Optional[str] = None,
         document_type: Optional[str] = None,
@@ -116,7 +116,7 @@ class SubmissionCRUD(FirebaseCRUDBase):
                 status = "initialized"
                 
             submission_data = {
-                "user_id": str(user_id),
+                "user_email": str(user_email),
                 "created_at": datetime.now(),
                 "updated_at": datetime.now(),
                 "status": status

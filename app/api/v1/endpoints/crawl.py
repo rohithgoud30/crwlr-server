@@ -124,9 +124,8 @@ async def save_document_to_db(
     retrieved_url: str, # Actual URL content was fetched from
     document_type: str,
     document_content: str,
-    analysis: Dict,
-    user_id: Optional[str] = None  # Changed from UUID to str
-) -> Optional[str]:  # Changed return type from UUID to str
+    analysis: Dict
+) -> Optional[str]:
     """
     Save document to database after crawling.
     
@@ -136,7 +135,6 @@ async def save_document_to_db(
         document_type: Type of document (TOS or PP).
         document_content: The parsed content.
         analysis: Dictionary of analysis results.
-        user_id: Optional user ID for submission tracking.
         
     Returns:
         String ID of created/existing document or None if operation fails.
@@ -271,25 +269,6 @@ async def save_document_to_db(
             document_id = created_doc.get('id')
             
         logger.info(f"Document {'updated' if existing_doc else 'saved'} in Firestore with ID: {document_id}")
-        
-        # If user_id is provided, create a submission record
-        if user_id:
-            from app.core.database import submissions
-            
-            submission_data = {
-                "user_id": user_id,
-                "document_id": document_id,
-                "created_at": datetime.now()
-            }
-            
-            # Get submissions collection
-            submissions_collection = submissions()
-            if submissions_collection:
-                submission_ref = submissions_collection.document()
-                submission_ref.set(submission_data)
-                logger.info(f"Submission record created for user {user_id} and document {document_id}")
-            else:
-                logger.error("Could not access submissions collection")
         
         # Update the last_updated timestamp in stats collection
         from app.crud.stats import stats_crud
