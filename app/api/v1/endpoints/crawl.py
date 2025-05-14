@@ -2401,18 +2401,23 @@ class PaginatedSubmissionsResponse(BaseModel):
 @router.get("/submissions", response_model=PaginatedSubmissionsResponse)
 async def list_submissions(
     page: int = Query(1, ge=1, description="Page number"),
-    size: int = Query(10, ge=1, le=50, description="Items per page"),
+    size: int = Query(6, description="Items per page - allowed values: 6, 9, 12, 15"),
     api_key: str = Depends(get_api_key)
 ):
     """
     List all submissions with pagination, sorted by most recent first.
     
     - **page**: Page number (starts at 1)
-    - **size**: Number of items per page (default: 10, max: 50)
+    - **size**: Number of items per page (allowed values: 6, 9, 12, 15, default: 6)
     
     Returns:
     - Paginated list of submissions with their statuses
     """
+    # Validate size parameter
+    allowed_sizes = [6, 9, 12, 15]
+    if size not in allowed_sizes:
+        size = 6  # Default to 6 if invalid size provided
+    
     try:
         # First get the total count
         total_query = db.collection('submissions')
