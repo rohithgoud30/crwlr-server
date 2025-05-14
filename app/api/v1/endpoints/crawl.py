@@ -2016,7 +2016,7 @@ class URLSubmissionRequest(BaseModel):
     """Request model for URL submission."""
     url: str
     document_type: Literal["tos", "pp"]
-    alternate_url: Optional[str] = None  # User can provide specific ToS/PP URL if base URL fails
+    document_url: Optional[str] = None  # User can provide specific ToS/PP URL if base URL fails
 
 class URLSubmissionResponse(BaseModel):
     """Response model for URL submission."""
@@ -2050,7 +2050,7 @@ async def submit_url(
     
     - **url**: Base URL of the website
     - **document_type**: Type of document to crawl ("tos" or "pp")
-    - **alternate_url**: Optional specific URL for the document (used if base URL crawl fails)
+    - **document_url**: Optional specific URL for the document (used if base URL crawl fails)
     
     Returns:
     - Submission details including ID and status
@@ -2143,11 +2143,11 @@ async def process_submission(submission_id: str, request: URLSubmissionRequest):
         url = request.url
         document_type = request.document_type
         
-        # If alternate URL is provided, use it instead of finding ToS/PP URL
-        extraction_url = request.alternate_url if request.alternate_url else url
+        # If document URL is provided, use it instead of finding ToS/PP URL
+        extraction_url = request.document_url if request.document_url else url
         
-        # Check if it's a retry (alternate URL was provided)
-        is_retry = bool(request.alternate_url)
+        # Check if it's a retry (document URL was provided)
+        is_retry = bool(request.document_url)
         
         if is_retry:
             logger.info(f"Processing direct URL submission for {submission_id} with URL: {extraction_url}")
@@ -2435,7 +2435,7 @@ async def list_submissions(
 
 class RetrySubmissionRequest(BaseModel):
     """Request model for retrying a failed submission."""
-    alternate_url: str = Field(..., description="The direct URL to the document (ToS or Privacy Policy)")
+    document_url: str = Field(..., description="The direct URL to the document (ToS or Privacy Policy)")
 
 @router.post("/submissions/{submission_id}/retry", response_model=URLSubmissionResponse)
 async def retry_submission(
@@ -2444,7 +2444,7 @@ async def retry_submission(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Retry a failed submission with an alternate URL.
+    Retry a failed submission with a direct document URL.
     
     This bypasses URL discovery and directly processes the provided URL.
     The submission will go through these states:
@@ -2454,7 +2454,7 @@ async def retry_submission(
     - success/failed
     
     - **submission_id**: ID of the failed submission to retry
-    - **alternate_url**: The direct URL to the document (ToS or Privacy Policy)
+    - **document_url**: The direct URL to the document (ToS or Privacy Policy)
     
     Returns:
     - Updated submission details
@@ -2493,7 +2493,7 @@ async def retry_submission(
     retry_request = URLSubmissionRequest(
         url=submission['requested_url'],
         document_type=submission['document_type'],
-        alternate_url=request.alternate_url
+        document_url=request.document_url
     )
     
     # Start background task to process the submission
