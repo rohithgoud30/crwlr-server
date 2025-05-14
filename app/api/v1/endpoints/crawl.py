@@ -2106,6 +2106,28 @@ async def submit_url(
         else:
             raise HTTPException(status_code=500, detail="Failed to create submission record")
     
+    # Check for duplicate submissions for this URL and document type across all users
+    try:
+        dup_query = db.collection('submissions')\
+            .where("requested_url", "==", url)\
+            .where("document_type", "==", document_type)
+        dup_submissions = list(dup_query.stream())
+        for dup in dup_submissions:
+            dup_data = dup.to_dict()
+            if dup_data.get('status') and dup_data['status'] != 'failed':
+                return URLSubmissionResponse(
+                    id=dup.id,
+                    url=dup_data.get('requested_url', url),
+                    document_type=dup_data.get('document_type', document_type),
+                    status=dup_data.get('status'),
+                    document_id=dup_data.get('document_id'),
+                    created_at=dup_data.get('created_at'),
+                    updated_at=dup_data.get('updated_at'),
+                    error_message="Duplicate submission exists. Returning existing submission."
+                )
+    except Exception as e:
+        logger.warning(f"Error checking duplicate submissions: {e}")
+
     # Check if there's a failed submission for this URL
     try:
         # Query for failed submissions with this URL
@@ -2871,12 +2893,17 @@ async def search_submissions(
                 created_at = datetime.fromtimestamp(data.get('created_at', 0))
                 updated_at = datetime.fromtimestamp(data.get('updated_at', 0))
                 
+                # Determine document_id; fallback to Firebase if missing in Typesense
+                doc_id = data.get('document_id')
+                if not doc_id:
+                    firebase_submission = await submission_crud.get(data['id'])
+                    doc_id = firebase_submission.get('document_id') if firebase_submission else None
                 submissions.append(URLSubmissionResponse(
                     id=data['id'],
                     url=data.get('url', ''),
                     document_type=data.get('document_type', ''),
                     status=data.get('status', ''),
-                    document_id=data.get('document_id'),
+                    document_id=doc_id,
                     error_message=data.get('error_message'),
                     created_at=created_at,
                     updated_at=updated_at
@@ -3181,12 +3208,17 @@ async def admin_search_all_submissions(
             created_at = datetime.fromtimestamp(data.get('created_at', 0))
             updated_at = datetime.fromtimestamp(data.get('updated_at', 0))
             
+            # Determine document_id; fallback to Firebase if missing in Typesense
+            doc_id = data.get('document_id')
+            if not doc_id:
+                firebase_submission = await submission_crud.get(data['id'])
+                doc_id = firebase_submission.get('document_id') if firebase_submission else None
             submissions.append(URLSubmissionResponse(
                 id=data['id'],
                 url=data.get('url', ''),
                 document_type=data.get('document_type', ''),
                 status=data.get('status', ''),
-                document_id=data.get('document_id'),
+                document_id=doc_id,
                 error_message=data.get('error_message'),
                 created_at=created_at,
                 updated_at=updated_at
