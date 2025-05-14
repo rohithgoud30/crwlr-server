@@ -322,6 +322,44 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   }
   ```
 
+### 8. Admin Search All Submissions
+
+- **Method:** GET
+- **Path:** `/api/v1/admin/search-all-submissions`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+- **Query Parameters:**
+  - `query` (string, optional): Search query for URLs (empty to list all)
+  - `user_email` (string, optional): Filter by user email
+  - `page` (integer, >= 1): Page number, default: 1
+  - `size` (integer): Items per page - allowed values: 6, 9, 12, 15; default: 6
+  - `sort_order` (string): 'asc' for older to newest, 'desc' for newest to oldest; default: 'desc'
+  - `document_type` (string, optional): Filter by document type (tos or pp)
+  - `status` (string, optional): Filter by status
+  - `role` (string, required): User role - must be 'admin' to access this endpoint
+- **Response:** `PaginatedSubmissionsResponse`
+  ```json
+  {
+    "items": [
+      {
+        "id": "abc123",
+        "url": "example.com/terms",
+        "document_type": "tos",
+        "user_email": "user@example.com",
+        "status": "completed",
+        "created_at": "2025-05-07T10:00:00",
+        "updated_at": "2025-05-08T12:35:00"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "per_page": 6,
+    "total_pages": 1,
+    "has_next": false,
+    "has_prev": false
+  }
+  ```
+
 ## Building and Running Locally
 
 ### Docker Build
