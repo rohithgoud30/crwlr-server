@@ -1007,7 +1007,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         ))
         response.company_name = company_name
         response.logo_url = logo_url
-
+        
         # Check if all analyses were successful before attempting to save
         all_analyses_successful = (
             analysis.get('one_sentence_summary') and analysis.get('hundred_word_summary') and
@@ -2390,25 +2390,39 @@ async def get_submission(
         updated_at=submission['updated_at']
     )
 
-@router.get("/submissions", response_model=List[URLSubmissionResponse])
+class PaginatedSubmissionsResponse(BaseModel):
+    """Response model for paginated submissions listing."""
+    items: List[URLSubmissionResponse]
+    total: int
+    page: int
+    size: int
+    pages: int
+
+@router.get("/submissions", response_model=PaginatedSubmissionsResponse)
 async def list_submissions(
-    limit: int = Query(10, ge=1, le=50),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(10, ge=1, le=50, description="Items per page"),
     api_key: str = Depends(get_api_key)
 ):
     """
-    List all submissions sorted by most recent first.
+    List all submissions with pagination, sorted by most recent first.
     
-    - **limit**: Maximum number of submissions to return (default: 10, max: 50)
+    - **page**: Page number (starts at 1)
+    - **size**: Number of items per page (default: 10, max: 50)
     
     Returns:
-    - List of submissions with their statuses
+    - Paginated list of submissions with their statuses
     """
     try:
-        # In a real application, you would filter by the authenticated user
-        # For simplicity, we're just retrieving the most recent submissions
+        # First get the total count
+        total_query = db.collection('submissions')
+        total_count = len(list(total_query.stream()))
         
-        # Query the most recent submissions
-        query = db.collection('submissions').order_by("created_at", direction="desc").limit(limit)
+        # Calculate offset
+        offset = (page - 1) * size
+        
+        # Query the most recent submissions with pagination
+        query = db.collection('submissions').order_by("created_at", direction="desc").offset(offset).limit(size)
         submissions_docs = list(query.stream())
         
         # Format response
@@ -2428,7 +2442,16 @@ async def list_submissions(
                 updated_at=data['updated_at']
             ))
         
-        return submissions
+        # Calculate total pages
+        total_pages = (total_count + size - 1) // size  # Ceiling division
+        
+        return PaginatedSubmissionsResponse(
+            items=submissions,
+            total=total_count,
+            page=page,
+            size=size,
+            pages=total_pages
+        )
     except Exception as e:
         logger.error(f"Error retrieving submissions: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve submissions: {str(e)}")
