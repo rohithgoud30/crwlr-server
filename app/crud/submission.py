@@ -2,6 +2,8 @@ from typing import Dict, Any, Optional, List, Union
 import logging
 from app.crud.firebase_base import FirebaseCRUDBase
 from datetime import datetime
+import time
+from app.core.typesense import get_typesense_client
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -94,6 +96,10 @@ class SubmissionCRUD(FirebaseCRUDBase):
             updated_doc = doc_ref.get()
             result = updated_doc.to_dict()
             result['id'] = id
+            
+            # Index in Typesense
+            await self._index_in_typesense(result)
+            
             return result
         except Exception as e:
             logger.error(f"Error updating submission status: {str(e)}")
@@ -134,10 +140,93 @@ class SubmissionCRUD(FirebaseCRUDBase):
                 
             # Create submission in Firestore
             result = await self.create(submission_data)
+            
+            # Index in Typesense
+            if result:
+                await self._index_in_typesense(result)
+                
             return result
         except Exception as e:
             logger.error(f"Error creating submission: {str(e)}")
             return None
+            
+    async def _index_in_typesense(self, submission: Dict[str, Any]) -> bool:
+        """
+        Index or update a submission in Typesense.
+        
+        Ensures the user_email field is properly indexed for user-specific searches.
+        """
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available. Skipping submission indexing.")
+            return False
+        
+        try:
+            # Create simple schema for submissions collection if it doesn't exist
+            SUBMISSIONS_COLLECTION = "submissions"
+            try:
+                # Check if submissions collection exists
+                client.collections[SUBMISSIONS_COLLECTION].retrieve()
+            except Exception:
+                # Create submissions collection if it doesn't exist
+                submissions_schema = {
+                    'name': SUBMISSIONS_COLLECTION,
+                    'fields': [
+                        {'name': 'id', 'type': 'string'},
+                        {'name': 'url', 'type': 'string', 'infix': True},
+                        {'name': 'document_type', 'type': 'string', 'facet': True},
+                        {'name': 'status', 'type': 'string', 'facet': True},
+                        {'name': 'user_email', 'type': 'string', 'facet': True},
+                        {'name': 'updated_at', 'type': 'int64', 'sort': True},
+                        {'name': 'created_at', 'type': 'int64', 'sort': True}
+                    ],
+                    'default_sorting_field': 'created_at'
+                }
+                client.collections.create(submissions_schema)
+                logger.info(f"Created new Typesense collection: {SUBMISSIONS_COLLECTION}")
+            
+            # Prepare submission for Typesense
+            # Convert updated_at to unix timestamp if it's a datetime
+            updated_at = submission.get('updated_at')
+            if isinstance(updated_at, datetime):
+                typesense_updated_at = int(time.mktime(updated_at.timetuple()))
+            else:
+                typesense_updated_at = int(time.time())  # Current time as fallback
+            
+            created_at = submission.get('created_at')
+            if isinstance(created_at, datetime):
+                typesense_created_at = int(time.mktime(created_at.timetuple()))
+            else:
+                typesense_created_at = int(time.time())  # Current time as fallback
+            
+            # Ensure user_email is set correctly
+            user_email = submission.get('user_email', '')
+            if not user_email and 'user_id' in submission and submission['user_id']:
+                # Fallback to user_id if user_email not present
+                user_email = submission['user_id']
+                logger.info(f"Using user_id as user_email for submission {submission['id']}")
+            
+            if not user_email:
+                logger.warning(f"No user identifier found for submission {submission['id']}. This will affect user-specific searches.")
+            
+            # Prepare document for Typesense
+            typesense_doc = {
+                'id': submission['id'],
+                'url': submission.get('requested_url', ''),
+                'document_type': submission.get('document_type', ''),
+                'status': submission.get('status', ''),
+                'user_email': user_email,
+                'updated_at': typesense_updated_at,
+                'created_at': typesense_created_at
+            }
+            
+            # Upsert document in Typesense
+            client.collections[SUBMISSIONS_COLLECTION].documents.upsert(typesense_doc)
+            logger.info(f"Submission {submission['id']} indexed in Typesense")
+            return True
+        except Exception as e:
+            logger.error(f"Error indexing submission in Typesense: {str(e)}")
+            return False
 
 # Create an instance
 submission_crud = SubmissionCRUD() 

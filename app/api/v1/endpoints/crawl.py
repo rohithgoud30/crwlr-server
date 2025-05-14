@@ -4,13 +4,12 @@ import asyncio
 from urllib.parse import urlparse
 import requests
 import random
-from typing import Dict, Optional, Tuple, Any, Union, List
+from typing import Dict, Optional, Tuple, Any, Union, List, Literal
 import string
 import json
 import re
 import time
 from datetime import datetime
-from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.api.v1.endpoints.tos import find_tos, ToSRequest
@@ -22,6 +21,7 @@ from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining,
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
 from app.core.firebase import db
+from app.core.typesense import get_typesense_client, TYPESENSE_COLLECTION_NAME
 from app.core.database import (
     get_document_by_url,
     increment_views
@@ -124,7 +124,8 @@ async def save_document_to_db(
     retrieved_url: str, # Actual URL content was fetched from
     document_type: str,
     document_content: str,
-    analysis: Dict
+    analysis: Dict,
+    user_email: Optional[str] = None
 ) -> Optional[str]:
     """
     Save document to database after crawling.
@@ -135,6 +136,7 @@ async def save_document_to_db(
         document_type: Type of document (TOS or PP).
         document_content: The parsed content.
         analysis: Dictionary of analysis results.
+        user_email: User's email for tracking submissions
         
     Returns:
         String ID of created/existing document or None if operation fails.
@@ -236,6 +238,10 @@ async def save_document_to_db(
             "text_mining_metrics": serializable_text_mining,
             "updated_at": datetime.now()
         }
+        
+        # Add user_email to the document data if provided - just store email directly without user collection reference
+        if user_email:
+            document_data["user_email"] = user_email
         
         # If the document already exists, update it instead of creating a new one
         document_id = None
@@ -634,7 +640,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                         "company_name": company_name,
                         "logo_url": logo_url
                     },
-                    user_id=None
+                    user_email=getattr(request, 'user_email', None)
                 )
                 response.document_id = document_id
                 # Success remains true since we saved the document and are returning valid data
@@ -1017,7 +1023,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                         "company_name": company_name,
                         "logo_url": logo_url
                     },
-                    user_id=None
+                    user_email=getattr(request, 'user_email', None)
                 )
                 response.document_id = document_id
             except Exception as e:
@@ -2047,7 +2053,7 @@ async def submit_url(
     if existing_doc:
         # Document already exists, create a completed submission
         submission = await submission_crud.create_submission(
-            user_id=user_email,  # Use email as user identifier
+            user_email=user_email,  # Use email as user identifier directly without user collection reference
             document_id=existing_doc['id'],
             requested_url=url,
             document_type=document_type,
@@ -2073,19 +2079,19 @@ async def submit_url(
         query = db.collection('submissions').where("requested_url", "==", url).where("status", "==", "failed").limit(1)
         failed_submissions = list(query.stream())
         
-        if failed_submissions and not request.alternate_url:
+        if failed_submissions and not request.document_url:
             # There's a failed submission for this URL and no alternate URL provided
             raise HTTPException(
                 status_code=400, 
-                detail="This URL has failed crawling before. Please provide an alternate_url for the document."
+                detail="This URL has failed crawling before. Please provide a direct document_url for the document."
             )
     except Exception as e:
         logger.error(f"Error checking failed submissions: {str(e)}")
         # Continue with submission even if check fails
     
-    # Create a new submission with initialized status
+    # Create a new submission with initialized status - using email directly without user references
     submission = await submission_crud.create_submission(
-        user_id=user_email,  # Use email as user identifier
+        user_email=user_email,  # Use email directly as identifier without user collection reference
         requested_url=url,
         document_type=document_type,
         status="initialized"
@@ -2233,7 +2239,8 @@ async def process_submission(submission_id: str, request: URLSubmissionRequest):
                         retrieved_url=extraction_url,
                         document_type=document_type,
                         document_content=extracted_text,
-                        analysis=document_analysis
+                        analysis=document_analysis,
+                        user_email=request.user_email
                     )
                     
                     # Update submission to success
@@ -2363,8 +2370,8 @@ async def get_submission(
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     
-    # Verify that the submission belongs to the user
-    if submission.get('user_id') != user_email:
+    # Verify that the submission belongs to the user using email directly (no user collection needed)
+    if submission.get('user_email') != user_email:
         raise HTTPException(status_code=403, detail="You do not have permission to access this submission")
     
     return URLSubmissionResponse(
@@ -2391,14 +2398,18 @@ async def list_submissions(
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(6, description="Items per page - allowed values: 6, 9, 12, 15"),
     user_email: str = Query(..., description="User's email to filter submissions"),
+    sort_order: str = Query("desc", description="Sort order - 'asc' for older to newest, 'desc' for newest to oldest"),
+    search_url: Optional[str] = Query(None, description="Search by base URL"),
     api_key: str = Depends(get_api_key)
 ):
     """
-    List all submissions for a specific user with pagination, sorted by most recent first.
+    List all submissions for a specific user with pagination and sorting options.
     
     - **page**: Page number (starts at 1)
     - **size**: Number of items per page (allowed values: 6, 9, 12, 15, default: 6)
     - **user_email**: User's email to filter submissions
+    - **sort_order**: Sort order - 'asc' for older to newest, 'desc' for newest to oldest (default: desc)
+    - **search_url**: Optional filter to search by base URL
     
     Returns:
     - Paginated list of submissions with their statuses
@@ -2408,16 +2419,32 @@ async def list_submissions(
     if size not in allowed_sizes:
         size = 6  # Default to 6 if invalid size provided
     
+    # Validate sort_order
+    if sort_order not in ["asc", "desc"]:
+        sort_order = "desc"  # Default to newest first if invalid sort_order provided
+    
     try:
-        # First get the total count for this user
-        total_query = db.collection('submissions').where("user_id", "==", user_email)
+        # Set up base query - directly using user_email for filtering without user collection reference
+        query = db.collection('submissions').where("user_email", "==", user_email)
+        
+        # Add search filter for URL if provided
+        if search_url:
+            # Convert to lowercase and add wildcard search
+            search_term = search_url.lower()
+            # Use firebase's array-contains or similar field comparison
+            query = query.where("requested_url", ">=", search_term)
+            query = query.where("requested_url", "<=", search_term + "\uf8ff")
+        
+        # Get total count with filters applied
+        total_query = query
         total_count = len(list(total_query.stream()))
         
         # Calculate offset
         offset = (page - 1) * size
         
-        # Query the most recent submissions with pagination and user filtering
-        query = db.collection('submissions').where("user_id", "==", user_email).order_by("created_at", direction="desc").offset(offset).limit(size)
+        # Apply sorting
+        direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
+        query = query.order_by("created_at", direction=direction).offset(offset).limit(size)
         submissions_docs = list(query.stream())
         
         # Format response
@@ -2530,3 +2557,243 @@ async def retry_submission(
         created_at=updated_submission['created_at'],
         updated_at=updated_submission['updated_at']
     )
+
+@router.get("/search-submissions", response_model=PaginatedSubmissionsResponse)
+async def search_submissions(
+    query: str = Query(..., description="Search query for URLs"),
+    user_email: str = Query(..., description="User's email to filter submissions"),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(6, description="Items per page - allowed values: 6, 9, 12, 15"),
+    sort_order: str = Query("desc", description="Sort order - 'asc' for older to newest, 'desc' for newest to oldest"),
+    document_type: Optional[str] = Query(None, description="Filter by document type (tos or pp)"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Search for submissions by URL using Typesense with full-text search capabilities.
+    Only returns submissions that belong to the user identified by their email.
+    
+    - **query**: Search query (searches in URLs)
+    - **user_email**: User's email to filter submissions
+    - **page**: Page number (starts at 1)
+    - **size**: Number of items per page (allowed values: 6, 9, 12, 15, default: 6)
+    - **sort_order**: Sort order - 'asc' for older to newest, 'desc' for newest to oldest (default: desc)
+    - **document_type**: Optional filter by document type (tos or pp)
+    - **status**: Optional filter by status
+    
+    Returns:
+    - Paginated list of matching submissions (only for the current user)
+    """
+    # Validate size parameter
+    allowed_sizes = [6, 9, 12, 15]
+    if size not in allowed_sizes:
+        size = 6  # Default to 6 if invalid size provided
+    
+    # Validate sort_order
+    if sort_order not in ["asc", "desc"]:
+        sort_order = "desc"  # Default to newest first if invalid sort_order provided
+    
+    try:
+        # Get Typesense client
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available. Falling back to Firebase query.")
+            # Fallback to Firebase query (reuse list_submissions logic)
+            return await list_submissions(
+                page=page,
+                size=size,
+                user_email=user_email,
+                sort_order=sort_order,
+                search_url=query,
+                api_key=api_key
+            )
+        
+        # Build search parameters for Typesense with strict user filtering using email directly
+        search_parameters = {
+            'q': query,
+            'query_by': 'url',  # Search in the URL field
+            'page': page,
+            'per_page': size,
+            'prefix': True,     # Enable prefix searching
+            'infix': 'always',  # Enable infix searching for substrings
+            'filter_by': f"user_email:={user_email}"  # Strict equality to ensure only user's submissions
+        }
+        
+        # Add document_type filter if provided
+        if document_type:
+            search_parameters['filter_by'] += f" && document_type:={document_type}"
+        
+        # Add status filter if provided
+        if status:
+            search_parameters['filter_by'] += f" && status:={status}"
+        
+        # Add sorting
+        sort_field = "created_at"  # Default sort field
+        search_parameters['sort_by'] = f"{sort_field}:{sort_order}"
+        
+        # Perform search
+        SUBMISSIONS_COLLECTION = "submissions"
+        search_results = client.collections[SUBMISSIONS_COLLECTION].documents.search(search_parameters)
+        
+        # Process results - double check that submissions belong to user by email
+        submissions = []
+        for hit in search_results['hits']:
+            data = hit['document']
+            
+            # Security check - only include if user_email matches
+            if data.get('user_email') == user_email:
+                # Convert timestamps back to datetime for the response model
+                created_at = datetime.fromtimestamp(data.get('created_at', 0))
+                updated_at = datetime.fromtimestamp(data.get('updated_at', 0))
+                
+                submissions.append(URLSubmissionResponse(
+                    id=data['id'],
+                    url=data.get('url', ''),
+                    document_type=data.get('document_type', ''),
+                    status=data.get('status', ''),
+                    document_id=data.get('document_id'),
+                    error_message=data.get('error_message'),
+                    created_at=created_at,
+                    updated_at=updated_at
+                ))
+        
+        # Get pagination info from results
+        total_count = len(submissions)  # Count after filtering
+        total_pages = (total_count + size - 1) // size if total_count > 0 else 1
+        
+        # Apply pagination in memory if needed
+        start_idx = (page - 1) * size
+        end_idx = start_idx + size
+        paginated_submissions = submissions[start_idx:end_idx]
+        
+        return PaginatedSubmissionsResponse(
+            items=paginated_submissions,
+            total=total_count,
+            page=page,
+            size=size,
+            pages=total_pages
+        )
+        
+    except Exception as e:
+        logger.error(f"Error searching submissions: {str(e)}")
+        # Fall back to regular listing if search fails
+        logger.info("Falling back to Firebase query after Typesense search failure.")
+        return await list_submissions(
+            page=page,
+            size=size,
+            user_email=user_email,  # Ensure user_email is passed to filter results
+            sort_order=sort_order,
+            search_url=query,
+            api_key=api_key
+        )
+
+@router.post("/admin/sync-submissions-to-typesense", response_model=Dict[str, Any])
+async def sync_submissions_to_typesense(
+    api_key: str = Depends(get_api_key),
+    limit: int = Query(1000, description="Maximum number of submissions to sync")
+):
+    """
+    Admin endpoint to sync all submissions to Typesense.
+    
+    This indexes all submissions from Firebase to Typesense for fast searching.
+    Only use when necessary, such as after initial setup or data recovery.
+    The sync process ensures user_email field is correctly indexed for proper user-specific searching.
+    
+    - **limit**: Maximum number of submissions to sync (default: 1000)
+    
+    Returns:
+    - Statistics about the sync operation
+    """
+    try:
+        # Get Typesense client
+        client = get_typesense_client()
+        if not client:
+            return {
+                "success": False,
+                "message": "Typesense client not available",
+                "indexed": 0,
+                "failed": 0,
+                "total": 0
+            }
+        
+        # Create simple schema for submissions collection if it doesn't exist
+        SUBMISSIONS_COLLECTION = "submissions"
+        try:
+            # Check if submissions collection exists
+            client.collections[SUBMISSIONS_COLLECTION].retrieve()
+        except Exception:
+            # Create submissions collection if it doesn't exist
+            submissions_schema = {
+                'name': SUBMISSIONS_COLLECTION,
+                'fields': [
+                    {'name': 'id', 'type': 'string'},
+                    {'name': 'url', 'type': 'string', 'infix': True},
+                    {'name': 'document_type', 'type': 'string', 'facet': True},
+                    {'name': 'status', 'type': 'string', 'facet': True},
+                    {'name': 'user_email', 'type': 'string', 'facet': True},
+                    {'name': 'updated_at', 'type': 'int64', 'sort': True},
+                    {'name': 'created_at', 'type': 'int64', 'sort': True}
+                ],
+                'default_sorting_field': 'created_at'
+            }
+            client.collections.create(submissions_schema)
+            logger.info(f"Created new Typesense collection: {SUBMISSIONS_COLLECTION}")
+        
+        # Get all submissions from Firebase
+        query = db.collection('submissions').limit(limit)
+        submissions_docs = list(query.stream())
+        
+        # Statistics counters
+        total = len(submissions_docs)
+        indexed = 0
+        failed = 0
+        missing_user_email = 0
+        
+        # Process each submission
+        for doc in submissions_docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            
+            try:
+                # Check if user_email field exists - critical for user-specific search
+                if 'user_email' not in data or not data['user_email']:
+                    logger.warning(f"Submission {doc.id} missing user_email field. Attempting to fix.")
+                    # Try to find user_id field instead and convert it
+                    if 'user_id' in data and data['user_id']:
+                        data['user_email'] = data['user_id']
+                        logger.info(f"Fixed submission {doc.id} by using user_id as user_email")
+                        # Update the record in Firebase as well
+                        doc.reference.update({"user_email": data['user_id']})
+                    else:
+                        missing_user_email += 1
+                        logger.error(f"Submission {doc.id} has no user identifier. Skipping.")
+                        failed += 1
+                        continue
+                
+                # Index submission in Typesense
+                result = await submission_crud._index_in_typesense(data)
+                if result:
+                    indexed += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                logger.error(f"Error indexing submission {doc.id} in Typesense: {str(e)}")
+                failed += 1
+        
+        return {
+            "success": True,
+            "message": f"Synced {indexed} of {total} submissions to Typesense",
+            "indexed": indexed,
+            "failed": failed,
+            "missing_user_email": missing_user_email,
+            "total": total
+        }
+    except Exception as e:
+        logger.error(f"Error syncing submissions to Typesense: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error syncing submissions: {str(e)}",
+            "indexed": 0,
+            "failed": 0,
+            "total": 0
+        }

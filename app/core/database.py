@@ -22,7 +22,6 @@ else:
 DOCUMENT_TYPES = ["tos", "pp"]
 
 # Collection references (initialized lazily)
-_users_collection = None
 _documents_collection = None
 _submissions_collection = None
 
@@ -50,13 +49,6 @@ def get_collection(collection_name):
     return db.collection(collection_name)
 
 # Lazy loading getters for collections
-def users():
-    """Lazy getter for users collection"""
-    global _users_collection
-    if _users_collection is None:
-        _users_collection = get_collection("users")
-    return _users_collection
-
 def documents():
     """Lazy getter for documents collection"""
     global _documents_collection
@@ -184,7 +176,7 @@ def ensure_collections_exist():
     
     try:
         # Define required collections
-        required_collections = ["users", "documents", "submissions"]
+        required_collections = ["documents", "submissions"]
         
         for collection_name in required_collections:
             try:
