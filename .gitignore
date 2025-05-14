@@ -99,3 +99,4 @@ google-*.json
 *.key
 
 
+update_env_vars.sh

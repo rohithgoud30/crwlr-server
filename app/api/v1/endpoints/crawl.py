@@ -39,8 +39,35 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Default logo URL
-DEFAULT_LOGO_URL = "/placeholder.svg?height=48&width=48"
+# Replace the static DEFAULT_LOGO_URL with a function
+def get_default_logo_url(url=None):
+    """
+    Returns a Google favicon URL for the given domain.
+    If no URL is provided, returns a generic Google favicon.
+    """
+    if not url:
+        return "https://www.google.com/s2/favicons?domain=example.com&sz=128"
+    
+    try:
+        # Extract domain from URL
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+        if not domain:
+            # Try to handle URLs without scheme
+            domain = url.split('/')[0]
+        
+        # Remove www. prefix if present
+        domain = re.sub(r'^www\.', '', domain)
+        
+        if domain:
+            return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+        else:
+            return "https://www.google.com/s2/favicons?domain=example.com&sz=128"
+    except:
+        return "https://www.google.com/s2/favicons?domain=example.com&sz=128"
+
+# Keep this for backward compatibility but it will be deprecated
+DEFAULT_LOGO_URL = get_default_logo_url()  # Now uses Google favicon as default
 
 async def perform_parallel_analysis(doc_url: str, extracted_text: str, doc_type: str):
     """
@@ -134,7 +161,7 @@ async def save_document_to_db(
                 company_name = extract_company_name_from_domain(domain)
                 
             if not logo_url:
-                logo_url = DEFAULT_LOGO_URL
+                logo_url = get_default_logo_url(original_url)
         
         # Serialize WordFrequency objects for Firebase storage
         serializable_word_freqs = []
@@ -337,7 +364,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                     success=False,  # CRITICAL: Must be False for existing documents
                     message="Document already exists in database.",
                     document_id=existing_doc['id'],
-                    tos_url=existing_doc.get('retrieved_url', ''),
+                    tos_url=existing_doc.get('retrieved_url', request.url),
                     one_sentence_summary=existing_doc.get('one_sentence_summary', ''),
                     hundred_word_summary=existing_doc.get('hundred_word_summary', '')
                 )
@@ -422,7 +449,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                     )
                 
                 response.company_name = existing_doc.get('company_name', '')
-                response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
+                response.logo_url = existing_doc.get('logo_url', get_default_logo_url(request.url))
                 
                 # CRITICAL: Ensure success is False for existing documents
                 response.success = False
@@ -482,7 +509,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
         
         # Extract company name and try to get the logo URL
         company_name = ""
-        logo_url = DEFAULT_LOGO_URL
+        logo_url = get_default_logo_url(request.url)
         try:
             # Create a request that includes the URL and any logo URL from the request
             request_info = CompanyInfoRequest(url=request.url)
@@ -504,7 +531,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                 logger.info(f"Company info extraction failed, using domain-based name: {company_name}")
                 
                 # Check if we have a logo URL
-                if company_info_response.logo_url and company_info_response.logo_url != DEFAULT_LOGO_URL:
+                if company_info_response.logo_url and company_info_response.logo_url != get_default_logo_url(request.url):
                     logo_url = company_info_response.logo_url
                 else:
                     # Try to get a logo from Google's favicon service
@@ -513,16 +540,16 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
                         # Test if logo exists with a head request
                         response_head = requests.head(logo_url, timeout=5)
                         if response_head.status_code != 200:
-                            logo_url = DEFAULT_LOGO_URL
+                            logo_url = get_default_logo_url(request.url)
                     except Exception as e:
                         logger.warning(f"Failed to get logo from favicon service for {domain}: {e}")
-                        logo_url = DEFAULT_LOGO_URL
+                        logo_url = get_default_logo_url(request.url)
         except Exception as e:
             logger.warning(f"Error extracting company info: {e}")
             # Fall back to simple domain-based extraction
             company_name = extract_company_name_from_domain(domain)
             logger.info(f"Exception in company info extraction, using domain-based name: {company_name}")
-            logo_url = DEFAULT_LOGO_URL
+            logo_url = get_default_logo_url(request.url)
         
         # Final safety check - ensure we have a company name
         if not company_name or company_name.strip() == "":
@@ -689,7 +716,7 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             common_word_percentage=0.0
         )
         response.company_name = "Error"
-        response.logo_url = DEFAULT_LOGO_URL
+        response.logo_url = get_default_logo_url(request.url)
         response.document_id = None
         return response
         
@@ -720,7 +747,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                     success=False,  # CRITICAL: Must be False for existing documents
                     message="Document already exists in database.",
                     document_id=existing_doc['id'],
-                    pp_url=existing_doc.get('retrieved_url', ''),
+                    pp_url=existing_doc.get('retrieved_url', request.url),
                     one_sentence_summary=existing_doc.get('one_sentence_summary', ''),
                     hundred_word_summary=existing_doc.get('hundred_word_summary', '')
                 )
@@ -805,7 +832,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                     )
                 
                 response.company_name = existing_doc.get('company_name', '')
-                response.logo_url = existing_doc.get('logo_url', DEFAULT_LOGO_URL)
+                response.logo_url = existing_doc.get('logo_url', get_default_logo_url(request.url))
                 
                 # CRITICAL: Ensure success is False for existing documents
                 response.success = False
@@ -865,7 +892,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
         
         # Extract company name and try to get the logo URL
         company_name = ""
-        logo_url = DEFAULT_LOGO_URL
+        logo_url = get_default_logo_url(request.url)
         try:
             # Create a request that includes the URL and any logo URL from the request
             request_info = CompanyInfoRequest(url=request.url)
@@ -887,7 +914,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                 logger.info(f"Company info extraction failed, using domain-based name: {company_name}")
                 
                 # Check if we have a logo URL
-                if company_info_response.logo_url and company_info_response.logo_url != DEFAULT_LOGO_URL:
+                if company_info_response.logo_url and company_info_response.logo_url != get_default_logo_url(request.url):
                     logo_url = company_info_response.logo_url
                 else:
                     # Try to get a logo from Google's favicon service
@@ -896,16 +923,16 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
                         # Test if logo exists with a head request
                         response_head = requests.head(logo_url, timeout=5)
                         if response_head.status_code != 200:
-                            logo_url = DEFAULT_LOGO_URL
+                            logo_url = get_default_logo_url(request.url)
                     except Exception as e:
                         logger.warning(f"Failed to get logo from favicon service for {domain}: {e}")
-                        logo_url = DEFAULT_LOGO_URL
+                        logo_url = get_default_logo_url(request.url)
         except Exception as e:
             logger.warning(f"Error extracting company info: {e}")
             # Fall back to simple domain-based extraction
             company_name = extract_company_name_from_domain(domain)
             logger.info(f"Exception in company info extraction, using domain-based name: {company_name}")
-            logo_url = DEFAULT_LOGO_URL
+            logo_url = get_default_logo_url(request.url)
         
         # Final safety check - ensure we have a company name
         if not company_name or company_name.strip() == "":
@@ -1070,7 +1097,7 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             common_word_percentage=0.0
         )
         response.company_name = "Error"
-        response.logo_url = DEFAULT_LOGO_URL
+        response.logo_url = get_default_logo_url(request.url)
         response.document_id = None
         return response
 
@@ -1657,7 +1684,7 @@ async def reanalyze_tos(request: ReanalyzeTosRequest) -> ReanalyzeTosResponse:
         
         # Set company info
         company_name = document.get('company_name', '')
-        logo_url = document.get('logo_url', DEFAULT_LOGO_URL)
+        logo_url = document.get('logo_url', get_default_logo_url(original_url))
         
         analysis['company_name'] = company_name
         analysis['logo_url'] = logo_url
@@ -1860,7 +1887,7 @@ async def reanalyze_pp(request: ReanalyzePrivacyRequest) -> ReanalyzePrivacyResp
         
         # Set company info
         company_name = document.get('company_name', '')
-        logo_url = document.get('logo_url', DEFAULT_LOGO_URL)
+        logo_url = document.get('logo_url', get_default_logo_url(original_url))
         
         analysis['company_name'] = company_name
         analysis['logo_url'] = logo_url
