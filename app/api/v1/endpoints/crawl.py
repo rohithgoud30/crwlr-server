@@ -2435,7 +2435,7 @@ async def list_submissions(
 
 class RetrySubmissionRequest(BaseModel):
     """Request model for retrying a failed submission."""
-    alternate_url: str
+    alternate_url: str = Field(..., description="The direct URL to the document (ToS or Privacy Policy)")
 
 @router.post("/submissions/{submission_id}/retry", response_model=URLSubmissionResponse)
 async def retry_submission(
@@ -2472,6 +2472,13 @@ async def retry_submission(
             detail=f"Only failed submissions can be retried. Current status: {submission['status']}"
         )
     
+    # Verify submission has the required fields
+    if 'requested_url' not in submission or 'document_type' not in submission:
+        raise HTTPException(
+            status_code=400,
+            detail="Submission record is missing required fields (URL or document type)"
+        )
+    
     # Update submission to initialized status
     updated_submission = await submission_crud.update_submission_status(
         id=submission_id,
@@ -2482,7 +2489,7 @@ async def retry_submission(
     if not updated_submission:
         raise HTTPException(status_code=500, detail="Failed to update submission")
     
-    # Create a submission request with the alternate URL
+    # Create a submission request with the alternate URL and data from the original submission
     retry_request = URLSubmissionRequest(
         url=submission['requested_url'],
         document_type=submission['document_type'],
