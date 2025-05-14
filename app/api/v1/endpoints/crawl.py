@@ -2017,6 +2017,7 @@ class URLSubmissionRequest(BaseModel):
     url: str
     document_type: Literal["tos", "pp"]
     document_url: Optional[str] = None  # User can provide specific ToS/PP URL if base URL fails
+    user_email: str = Field(..., description="User's email for tracking submissions")
 
 class URLSubmissionResponse(BaseModel):
     """Response model for URL submission."""
@@ -2051,12 +2052,14 @@ async def submit_url(
     - **url**: Base URL of the website
     - **document_type**: Type of document to crawl ("tos" or "pp")
     - **document_url**: Optional specific URL for the document (used if base URL crawl fails)
+    - **user_email**: User's email for tracking submissions
     
     Returns:
     - Submission details including ID and status
     """
     url = request.url
     document_type = request.document_type
+    user_email = request.user_email
     
     # Check if we already have a document for this URL and type
     from app.crud.document import document_crud
@@ -2065,7 +2068,7 @@ async def submit_url(
     if existing_doc:
         # Document already exists, create a completed submission
         submission = await submission_crud.create_submission(
-            user_id="anonymous",  # No user authentication in this example
+            user_id=user_email,  # Use email as user identifier
             document_id=existing_doc['id'],
             requested_url=url,
             document_type=document_type,
@@ -2103,7 +2106,7 @@ async def submit_url(
     
     # Create a new submission with initialized status
     submission = await submission_crud.create_submission(
-        user_id="anonymous",  # No user authentication in this example
+        user_id=user_email,  # Use email as user identifier
         requested_url=url,
         document_type=document_type,
         status="initialized"
@@ -2364,12 +2367,14 @@ async def process_submission(submission_id: str, request: URLSubmissionRequest):
 @router.get("/submissions/{submission_id}", response_model=URLSubmissionResponse)
 async def get_submission(
     submission_id: str,
+    user_email: str = Query(..., description="User's email to validate ownership"),
     api_key: str = Depends(get_api_key)
 ):
     """
     Get the status of a URL submission.
     
     - **submission_id**: ID of the submission to retrieve
+    - **user_email**: User's email to validate submission ownership
     
     Returns:
     - Submission details including ID, status, and document_id if available
@@ -2378,6 +2383,10 @@ async def get_submission(
     
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
+    
+    # Verify that the submission belongs to the user
+    if submission.get('user_id') != user_email:
+        raise HTTPException(status_code=403, detail="You do not have permission to access this submission")
     
     return URLSubmissionResponse(
         id=submission['id'],
@@ -2402,13 +2411,15 @@ class PaginatedSubmissionsResponse(BaseModel):
 async def list_submissions(
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(6, description="Items per page - allowed values: 6, 9, 12, 15"),
+    user_email: str = Query(..., description="User's email to filter submissions"),
     api_key: str = Depends(get_api_key)
 ):
     """
-    List all submissions with pagination, sorted by most recent first.
+    List all submissions for a specific user with pagination, sorted by most recent first.
     
     - **page**: Page number (starts at 1)
     - **size**: Number of items per page (allowed values: 6, 9, 12, 15, default: 6)
+    - **user_email**: User's email to filter submissions
     
     Returns:
     - Paginated list of submissions with their statuses
@@ -2419,15 +2430,15 @@ async def list_submissions(
         size = 6  # Default to 6 if invalid size provided
     
     try:
-        # First get the total count
-        total_query = db.collection('submissions')
+        # First get the total count for this user
+        total_query = db.collection('submissions').where("user_id", "==", user_email)
         total_count = len(list(total_query.stream()))
         
         # Calculate offset
         offset = (page - 1) * size
         
-        # Query the most recent submissions with pagination
-        query = db.collection('submissions').order_by("created_at", direction="desc").offset(offset).limit(size)
+        # Query the most recent submissions with pagination and user filtering
+        query = db.collection('submissions').where("user_id", "==", user_email).order_by("created_at", direction="desc").offset(offset).limit(size)
         submissions_docs = list(query.stream())
         
         # Format response
@@ -2464,6 +2475,7 @@ async def list_submissions(
 class RetrySubmissionRequest(BaseModel):
     """Request model for retrying a failed submission."""
     document_url: str = Field(..., description="The direct URL to the document (ToS or Privacy Policy)")
+    user_email: str = Field(..., description="User's email for tracking submissions")
 
 @router.post("/submissions/{submission_id}/retry", response_model=URLSubmissionResponse)
 async def retry_submission(
@@ -2483,6 +2495,7 @@ async def retry_submission(
     
     - **submission_id**: ID of the failed submission to retry
     - **document_url**: The direct URL to the document (ToS or Privacy Policy)
+    - **user_email**: User's email for tracking submissions
     
     Returns:
     - Updated submission details
@@ -2517,11 +2530,12 @@ async def retry_submission(
     if not updated_submission:
         raise HTTPException(status_code=500, detail="Failed to update submission")
     
-    # Create a submission request with the alternate URL and data from the original submission
+    # Create a submission request with the document URL and data from the original submission
     retry_request = URLSubmissionRequest(
         url=submission['requested_url'],
         document_type=submission['document_type'],
-        document_url=request.document_url
+        document_url=request.document_url,
+        user_email=request.user_email
     )
     
     # Start background task to process the submission
