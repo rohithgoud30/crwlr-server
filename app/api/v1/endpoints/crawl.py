@@ -35,6 +35,7 @@ from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequ
 from app.models.database import DocumentCreate, SubmissionCreate
 from app.models.company_info import CompanyInfoRequest
 from app.crud.submission import submission_crud
+from app.core.auth import get_api_key
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
