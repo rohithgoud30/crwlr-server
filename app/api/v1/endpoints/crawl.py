@@ -11,6 +11,7 @@ import re
 import time
 from datetime import datetime
 from typing import Literal
+from pydantic import BaseModel, Field
 
 from app.api.v1.endpoints.tos import find_tos, ToSRequest
 from app.api.v1.endpoints.privacy import find_privacy_policy, PrivacyRequest
