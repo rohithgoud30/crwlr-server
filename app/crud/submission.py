@@ -12,6 +12,9 @@ class SubmissionCRUD(FirebaseCRUDBase):
     def __init__(self):
         """Initialize the SubmissionCRUD with the 'submissions' collection."""
         super().__init__("submissions")
+        
+        # Valid submission statuses
+        self.valid_statuses = ["initialized", "processing", "analyzing", "success", "failed"]
     
     async def get_submissions_by_user(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         """Get submissions by user ID."""
@@ -57,6 +60,11 @@ class SubmissionCRUD(FirebaseCRUDBase):
     ) -> Optional[Dict[str, Any]]:
         """Update a submission status."""
         try:
+            # Validate status
+            if status not in self.valid_statuses:
+                logger.warning(f"Invalid submission status: {status}. Using 'failed' instead.")
+                status = "failed"
+                
             doc_ref = self.collection.document(str(id))
             
             # Check if document exists
@@ -75,6 +83,9 @@ class SubmissionCRUD(FirebaseCRUDBase):
                 
             if error_message:
                 update_data["error_message"] = error_message
+            elif status == "success" and "error_message" in doc.to_dict():
+                # Clear error message on success
+                update_data["error_message"] = None
                 
             # Update the document
             doc_ref.update(update_data)
@@ -94,11 +105,16 @@ class SubmissionCRUD(FirebaseCRUDBase):
         document_id: Optional[str] = None,
         requested_url: Optional[str] = None,
         document_type: Optional[str] = None,
-        status: str = "completed",
+        status: str = "initialized",
         error_message: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """Create a new submission record."""
         try:
+            # Validate status
+            if status not in self.valid_statuses:
+                logger.warning(f"Invalid submission status: {status}. Using 'initialized' instead.")
+                status = "initialized"
+                
             submission_data = {
                 "user_id": str(user_id),
                 "created_at": datetime.now(),
