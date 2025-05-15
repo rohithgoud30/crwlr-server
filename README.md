@@ -458,6 +458,189 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   }
   ```
 
+### 12. Create Submission
+
+- **Method:** POST
+- **Path:** `/api/v1/submissions`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "url": "https://example.com",
+    "document_type": "tos", // "tos" or "pp"
+    "document_url": null, // Optional direct URL to document
+    "user_email": "user@example.com"
+  }
+  ```
+- **Response:** `URLSubmissionResponse`
+  ```json
+  {
+    "id": "submission_id",
+    "url": "https://example.com",
+    "document_type": "tos",
+    "status": "initialized",
+    "document_id": null,
+    "error_message": null,
+    "created_at": "2024-03-20T10:00:00Z",
+    "updated_at": "2024-03-20T10:00:00Z",
+    "user_email": "user@example.com"
+  }
+  ```
+
+### 13. Get Submission by ID
+
+- **Method:** GET
+- **Path:** `/api/v1/submissions/{submission_id}`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+- **Query Parameters:**
+  - `user_email` (required): User's email to validate ownership
+  - `role` (optional): If set to "admin", allows viewing any submission
+- **Response:** `URLSubmissionResponse` (same format as Create Submission response)
+
+### 14. Retry Failed Submission
+
+- **Method:** POST
+- **Path:** `/api/v1/submissions/{submission_id}/retry`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "document_url": "https://example.com/terms",
+    "user_email": "user@example.com"
+  }
+  ```
+- **Response:** `URLSubmissionResponse` (same format as Create Submission response)
+
+### 15. Crawl Terms of Service
+
+- **Method:** POST
+- **Path:** `/api/v1/crawl-tos`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "url": "https://example.com",
+    "user_email": "user@example.com"
+  }
+  ```
+- **Response:** `CrawlTosResponse`
+  ```json
+  {
+    "url": "https://example.com",
+    "success": true,
+    "message": "ToS document successfully processed",
+    "document_id": "doc123",
+    "content": "...", // Raw text content
+    "one_sentence_summary": "...",
+    "hundred_word_summary": "...",
+    "word_frequencies": [...],
+    "text_mining_metrics": {...}
+  }
+  ```
+
+### 16. Crawl Privacy Policy
+
+- **Method:** POST
+- **Path:** `/api/v1/crawl-pp`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "url": "https://example.com",
+    "user_email": "user@example.com"
+  }
+  ```
+- **Response:** `CrawlPrivacyResponse` (similar format to Crawl ToS response)
+
+### 17. Reanalyze Terms of Service
+
+- **Method:** POST
+- **Path:** `/api/v1/reanalyze-tos`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "document_id": "doc123",
+    "user_email": "user@example.com"
+  }
+  ```
+- **Response:** `ReanalyzeTosResponse` (similar format to Crawl ToS response)
+
+### 18. Reanalyze Privacy Policy
+
+- **Method:** POST
+- **Path:** `/api/v1/reanalyze-pp`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "document_id": "doc123",
+    "user_email": "user@example.com"
+  }
+  ```
+- **Response:** `ReanalyzePrivacyResponse` (similar format to Crawl ToS response)
+
+### 19. Generate Summary
+
+- **Method:** POST
+- **Path:** `/api/v1/summary`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+  - `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "text": "Long document text...",
+    "url": "https://example.com",
+    "document_type": "tos", // "tos" or "pp"
+    "company_name": "Example Corp" // Optional
+  }
+  ```
+- **Response:**
+  ```json
+  {
+    "url": "https://example.com",
+    "document_type": "tos",
+    "success": true,
+    "message": "Summary generated successfully",
+    "one_sentence_summary": "...",
+    "hundred_word_summary": "..."
+  }
+  ```
+
+### 20. Sync Submissions to Typesense
+
+- **Method:** POST
+- **Path:** `/api/v1/admin/sync-submissions-to-typesense`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+- **Query Parameters:**
+  - `batch_size` (optional, default: 100): Number of submissions to process in each batch
+- **Response:**
+  ```json
+  {
+    "success": true,
+    "message": "Synchronized submissions to Typesense",
+    "indexed": 100,
+    "failed": 0,
+    "total": 100,
+    "timestamp": "2024-03-20T10:00:00Z"
+  }
+  ```
+
 ### Notes on Pagination
 
 - All submissions endpoints use consistent pagination with page sizes of 6, 9, 12, or 15 items
