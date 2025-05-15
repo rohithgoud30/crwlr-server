@@ -329,36 +329,60 @@ Below is a detailed list of available API endpoints, including HTTP method, path
 - **Headers:**
   - `X-API-Key: {API_KEY}`
 - **Query Parameters:**
-  - `query` (string, optional): Search query for URLs (empty to list all)
-  - `user_email` (string, optional): Filter by user email
-  - `page` (integer, >= 1): Page number, default: 1
-  - `size` (integer): Items per page - allowed values: 6, 9, 12, 15; default: 6
-  - `sort_order` (string): 'asc' for older to newest, 'desc' for newest to oldest; default: 'desc'
-  - `document_type` (string, optional): Filter by document type (tos or pp)
-  - `status` (string, optional): Filter by status
-  - `role` (string, required): User role - must be 'admin' to access this endpoint
-- **Response:** `PaginatedSubmissionsResponse`
+  - `query` (optional, default: ""): Search text for URLs (empty to list all)
+  - `user_email` (optional): Filter by specific user email
+  - `page` (optional, default: 1): Page number (>=1)
+  - `size` (optional, default: 6): Items per page (allowed values: 6, 9, 12, 15)
+  - `sort_order` (optional, default: "desc"): Sort order ("asc" or "desc")
+  - `document_type` (optional): Filter by type ("tos" or "pp")
+  - `status` (optional): Filter by status
+  - `role` (required): Must be "admin" to access this endpoint
+- **Response:**
   ```json
   {
     "items": [
       {
-        "id": "abc123",
-        "url": "example.com/terms",
+        "id": "submission_id",
+        "url": "https://example.com",
         "document_type": "tos",
-        "user_email": "user@example.com",
-        "status": "completed",
-        "created_at": "2025-05-07T10:00:00",
-        "updated_at": "2025-05-08T12:35:00"
+        "status": "success",
+        "document_id": "doc_id",
+        "error_message": null,
+        "created_at": "2024-03-20T10:00:00Z",
+        "updated_at": "2024-03-20T10:01:00Z",
+        "user_email": "user@example.com"
       }
     ],
-    "total": 1,
+    "total": 100,
     "page": 1,
-    "per_page": 6,
-    "total_pages": 1,
-    "has_next": false,
-    "has_prev": false
+    "size": 6,
+    "pages": 17,
+    "error_status": false,
+    "error_message": null
   }
   ```
+
+### 9. List User Submissions
+
+- **Method:** GET
+- **Path:** `/api/v1/submissions`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+- **Query Parameters:**
+  - `user_email` (required): User's email to filter submissions
+  - `page` (optional, default: 1): Page number (>=1)
+  - `size` (optional, default: 6): Items per page (allowed values: 6, 9, 12, 15)
+  - `sort_order` (optional, default: "desc"): Sort order ("asc" or "desc")
+  - `search_url` (optional): Filter by base URL
+- **Response:** Same format as Search Submissions response
+
+### Notes on Pagination
+
+- All submissions endpoints use consistent pagination with page sizes of 6, 9, 12, or 15 items
+- Default page size is 6 items
+- Results are sorted by creation date (newest first by default)
+- The response includes total count and total pages for pagination UI
+- Use the `page` parameter to navigate through results
 
 ## Building and Running Locally
 
