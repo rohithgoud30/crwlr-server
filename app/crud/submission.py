@@ -182,11 +182,17 @@ class SubmissionCRUD(FirebaseCRUDBase):
                 return False
             
             # Prepare document for Typesense
+            # Handle status field properly - ensure it's never empty and one of valid statuses
+            status = submission.get('status', '')
+            if not status or status not in self.valid_statuses:
+                status = 'initialized' if not status else status
+                logger.info(f"Normalizing status for submission {submission['id']}: '{submission.get('status', '')}' -> '{status}'")
+                
             typesense_doc = {
                 'id': submission['id'],
                 'url': submission.get('requested_url', '').lower(),  # Store URL in lowercase for case-insensitive search
                 'document_type': submission.get('document_type', ''),
-                'status': submission.get('status', ''),
+                'status': status,  # Use normalized status
                 'user_email': user_email,
                 'document_id': submission.get('document_id', ''),  # Empty string if None
                 'error_message': submission.get('error_message', ''),  # Empty string if None
@@ -229,6 +235,33 @@ class SubmissionCRUD(FirebaseCRUDBase):
         if not client:
             logger.warning("Typesense client not available. Cannot sync submissions.")
             return 0, 0, []
+            
+        # Ensure the submissions collection exists with proper schema
+        try:
+            # Check if collection exists
+            client.collections[SUBMISSIONS_COLLECTION_NAME].retrieve()
+            logger.info(f"Using existing Typesense collection: {SUBMISSIONS_COLLECTION_NAME}")
+        except Exception:
+            # Create collection with proper schema including status field
+            try:
+                submissions_schema = {
+                    'name': SUBMISSIONS_COLLECTION_NAME,
+                    'fields': [
+                        {'name': 'id', 'type': 'string'},
+                        {'name': 'url', 'type': 'string', 'infix': True},
+                        {'name': 'document_type', 'type': 'string', 'facet': True},
+                        {'name': 'status', 'type': 'string', 'facet': True, 'index': True},  # Ensure status is indexed properly
+                        {'name': 'user_email', 'type': 'string', 'facet': True},
+                        {'name': 'updated_at', 'type': 'int64', 'sort': True},
+                        {'name': 'created_at', 'type': 'int64', 'sort': True}
+                    ],
+                    'default_sorting_field': 'created_at'
+                }
+                client.collections.create(submissions_schema)
+                logger.info(f"Created new Typesense collection: {SUBMISSIONS_COLLECTION_NAME}")
+            except Exception as e:
+                logger.error(f"Failed to create Typesense collection: {str(e)}")
+                # Continue anyway as the collection might exist but with a different error
             
         try:
             # Get all submissions from Firestore

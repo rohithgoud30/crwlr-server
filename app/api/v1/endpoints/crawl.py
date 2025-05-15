@@ -3341,7 +3341,7 @@ async def sync_submissions_to_typesense(
                     {'name': 'id', 'type': 'string'},
                     {'name': 'url', 'type': 'string', 'infix': True},
                     {'name': 'document_type', 'type': 'string', 'facet': True},
-                    {'name': 'status', 'type': 'string', 'facet': True},
+                    {'name': 'status', 'type': 'string', 'facet': True, 'index': True},  # Ensure status is indexed for filtering
                     {'name': 'user_email', 'type': 'string', 'facet': True},
                     {'name': 'updated_at', 'type': 'int64', 'sort': True},
                     {'name': 'created_at', 'type': 'int64', 'sort': True}
@@ -3382,7 +3382,11 @@ async def sync_submissions_to_typesense(
                         failed += 1
                         continue
                 
-                # Index submission in Typesense
+                # Ensure status field is present and correctly formatted for Typesense
+                if 'status' not in data or not data['status']:
+                    data['status'] = 'unknown'
+                
+                # Index submission in Typesense with properly formatted status
                 result = await submission_crud._index_in_typesense(data)
                 if result:
                     indexed += 1
@@ -3405,6 +3409,87 @@ async def sync_submissions_to_typesense(
         return {
             "success": False,
             "message": f"Error syncing submissions: {str(e)}",
+            "indexed": 0,
+            "failed": 0,
+            "total": 0
+        }
+
+@router.post("/admin/recreate-submissions-index", response_model=Dict[str, Any])
+async def recreate_submissions_index(
+    api_key: str = Depends(get_api_key),
+    role: str = Query(..., description="User role - must be 'admin' to access this endpoint")
+):
+    """
+    Admin-only endpoint to recreate the Typesense submissions collection and reindex all submissions.
+    
+    This endpoint will:
+    1. Delete the existing submissions collection in Typesense if it exists
+    2. Create a new submissions collection with proper schema including status field
+    3. Reindex all submissions from Firestore
+    
+    Use this endpoint to fix issues with status filtering in Typesense.
+    
+    - **role**: User role - must be 'admin' to access this endpoint
+    
+    Returns:
+    - Success status and reindexing results
+    """
+    # Verify admin role
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required to access this endpoint")
+    
+    try:
+        # Get Typesense client
+        client = get_typesense_client()
+        if not client:
+            return {
+                "success": False,
+                "message": "Typesense client not available",
+                "indexed": 0,
+                "failed": 0,
+                "total": 0
+            }
+        
+        # Delete existing collection if it exists
+        try:
+            client.collections[SUBMISSIONS_COLLECTION_NAME].delete()
+            logger.info(f"Deleted existing Typesense collection: {SUBMISSIONS_COLLECTION_NAME}")
+        except Exception as e:
+            logger.info(f"Collection doesn't exist or couldn't be deleted: {str(e)}")
+        
+        # Create new collection with proper schema
+        submissions_schema = {
+            'name': SUBMISSIONS_COLLECTION_NAME,
+            'fields': [
+                {'name': 'id', 'type': 'string'},
+                {'name': 'url', 'type': 'string', 'infix': True},
+                {'name': 'document_type', 'type': 'string', 'facet': True},
+                {'name': 'status', 'type': 'string', 'facet': True, 'index': True},  # Ensure status is indexed properly
+                {'name': 'user_email', 'type': 'string', 'facet': True},
+                {'name': 'updated_at', 'type': 'int64', 'sort': True},
+                {'name': 'created_at', 'type': 'int64', 'sort': True}
+            ],
+            'default_sorting_field': 'created_at'
+        }
+        client.collections.create(submissions_schema)
+        logger.info(f"Created new Typesense collection: {SUBMISSIONS_COLLECTION_NAME}")
+        
+        # Now perform a full resync
+        total, success, failed_ids = await submission_crud.sync_to_typesense(batch_size=100)
+        
+        return {
+            "success": True,
+            "message": f"Successfully recreated Typesense collection and reindexed {success} of {total} submissions",
+            "indexed": success,
+            "failed": len(failed_ids),
+            "failed_ids": failed_ids,
+            "total": total
+        }
+    except Exception as e:
+        logger.error(f"Error recreating submissions index: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error recreating index: {str(e)}",
             "indexed": 0,
             "failed": 0,
             "total": 0
