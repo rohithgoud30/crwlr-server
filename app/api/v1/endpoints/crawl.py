@@ -2071,7 +2071,7 @@ class URLSubmissionResponse(BaseModel):
     id: str  # Submission ID
     url: str
     document_type: Literal["tos", "pp"]
-    status: str  # "initialized", "processing", "analyzing", "success", "failed"
+    status: str  # "initialized", "processing", "success", "failed"
     document_id: Optional[str] = None
     error_message: Optional[str] = None  # Used for error info or "Document already exists" messages
     created_at: datetime
@@ -2089,7 +2089,6 @@ async def submit_url(
     The submission state is tracked through several stages:
     - initialized: Submission created
     - processing: Crawling in progress
-    - analyzing: Text analysis in progress
     - success: Crawling completed successfully
     - failed: Crawling failed
     
@@ -2108,7 +2107,7 @@ async def submit_url(
     document_type = request.document_type
     user_email = request.user_email
     
-    # Try to normalize the URL for more effective matching
+        # Try to normalize the URL for more effective matching
     normalized_url = url.lower().strip()
     if not normalized_url.startswith(('http://', 'https://')):
         normalized_url = 'https://' + normalized_url
@@ -2143,6 +2142,21 @@ async def submit_url(
         except Exception as e:
             logger.warning(f"Error in domain-based document search: {e}")
     
+    # Check for duplicate submissions in progress
+    if not existing_doc:
+        try:
+            # Look for any non-failed submissions with the same URL
+            dup_query = db.collection('submissions')\
+                .where("requested_url", "==", url)\
+                .where("document_type", "==", document_type)\
+                .where("status", "in", ["initialized", "processing"])
+            dup_submissions = list(dup_query.stream())
+            if dup_submissions:
+                logger.info(f"Found duplicate in-progress submission for URL: {url}")
+                dup_data = dup_submissions[0].to_dict()
+                existing_doc = {"id": "pending_duplicate", "message": "Duplicate submission in progress"}
+        except Exception as e:
+            logger.warning(f"Error checking for duplicate in-progress submissions: {e}")
     if existing_doc:
         # Document already exists, create a completed submission
         submission = await submission_crud.create_submission(
@@ -2294,11 +2308,8 @@ async def process_submission(submission_id: str, request: URLSubmissionRequest):
                 logger.warning(f"Error extracting company info: {e}")
                 # Continue with domain-based company name
             
-            # Update submission to analyzing status
-            await submission_crud.update_submission_status(
-                id=submission_id,
-                status="analyzing"
-            )
+            # Continue with processing status
+            # Analysis is part of the processing stage
             
             # Perform analysis
             analysis = await perform_parallel_analysis(extraction_url, extracted_text, document_type)
