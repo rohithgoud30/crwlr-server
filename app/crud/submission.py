@@ -1,9 +1,9 @@
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Tuple
 import logging
 from app.crud.firebase_base import FirebaseCRUDBase
 from datetime import datetime
 import time
-from app.core.typesense import get_typesense_client
+from app.core.typesense import get_typesense_client, SUBMISSIONS_COLLECTION_NAME
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -162,31 +162,7 @@ class SubmissionCRUD(FirebaseCRUDBase):
             return False
         
         try:
-            # Create simple schema for submissions collection if it doesn't exist
-            SUBMISSIONS_COLLECTION = "submissions"
-            try:
-                # Check if submissions collection exists
-                client.collections[SUBMISSIONS_COLLECTION].retrieve()
-            except Exception:
-                # Create submissions collection if it doesn't exist
-                submissions_schema = {
-                    'name': SUBMISSIONS_COLLECTION,
-                    'fields': [
-                        {'name': 'id', 'type': 'string'},
-                        {'name': 'url', 'type': 'string', 'infix': True},
-                        {'name': 'document_type', 'type': 'string', 'facet': True},
-                        {'name': 'status', 'type': 'string', 'facet': True},
-                        {'name': 'user_email', 'type': 'string', 'facet': True},
-                        {'name': 'updated_at', 'type': 'int64', 'sort': True},
-                        {'name': 'created_at', 'type': 'int64', 'sort': True}
-                    ],
-                    'default_sorting_field': 'created_at'
-                }
-                client.collections.create(submissions_schema)
-                logger.info(f"Created new Typesense collection: {SUBMISSIONS_COLLECTION}")
-            
-            # Prepare submission for Typesense
-            # Convert updated_at to unix timestamp if it's a datetime
+            # Convert timestamps to Unix timestamps for Typesense
             updated_at = submission.get('updated_at')
             if isinstance(updated_at, datetime):
                 typesense_updated_at = int(time.mktime(updated_at.timetuple()))
@@ -201,32 +177,124 @@ class SubmissionCRUD(FirebaseCRUDBase):
             
             # Ensure user_email is set correctly
             user_email = submission.get('user_email', '')
-            if not user_email and 'user_id' in submission and submission['user_id']:
-                # Fallback to user_id if user_email not present
-                user_email = submission['user_id']
-                logger.info(f"Using user_id as user_email for submission {submission['id']}")
-            
             if not user_email:
-                logger.warning(f"No user identifier found for submission {submission['id']}. This will affect user-specific searches.")
+                logger.warning(f"No user email found for submission {submission['id']}. This will affect user-specific searches.")
+                return False
             
             # Prepare document for Typesense
             typesense_doc = {
                 'id': submission['id'],
-                'url': submission.get('requested_url', ''),
+                'url': submission.get('requested_url', '').lower(),  # Store URL in lowercase for case-insensitive search
                 'document_type': submission.get('document_type', ''),
                 'status': submission.get('status', ''),
                 'user_email': user_email,
+                'document_id': submission.get('document_id', ''),  # Empty string if None
+                'error_message': submission.get('error_message', ''),  # Empty string if None
                 'updated_at': typesense_updated_at,
                 'created_at': typesense_created_at
             }
             
-            # Upsert document in Typesense
-            client.collections[SUBMISSIONS_COLLECTION].documents.upsert(typesense_doc)
-            logger.info(f"Submission {submission['id']} indexed in Typesense")
+            # First try to delete any existing document to avoid duplicates
+            try:
+                client.collections[SUBMISSIONS_COLLECTION_NAME].documents[submission['id']].delete()
+                logger.debug(f"Deleted existing submission {submission['id']} from Typesense")
+            except Exception as del_e:
+                if "Not Found" not in str(del_e):
+                    logger.warning(f"Error deleting existing submission from Typesense: {str(del_e)}")
+            
+            # Create new document in Typesense
+            client.collections[SUBMISSIONS_COLLECTION_NAME].documents.create(typesense_doc)
+            logger.info(f"Successfully indexed submission {submission['id']} in Typesense")
             return True
         except Exception as e:
             logger.error(f"Error indexing submission in Typesense: {str(e)}")
+            # Log more details about the document that failed
+            logger.error(f"Failed document details: {submission}")
             return False
+
+    async def sync_to_typesense(self, batch_size: int = 100) -> Tuple[int, int, List[str]]:
+        """
+        Sync all submissions to Typesense.
+        
+        Args:
+            batch_size: Number of submissions to process in each batch
+            
+        Returns:
+            Tuple containing:
+            - Total number of submissions processed
+            - Number of submissions successfully indexed
+            - List of IDs that failed to index
+        """
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available. Cannot sync submissions.")
+            return 0, 0, []
+            
+        try:
+            # Get all submissions from Firestore
+            submissions = self.collection.stream()
+            
+            total_processed = 0
+            success_count = 0
+            failed_ids = []
+            current_batch = []
+            
+            for doc in submissions:
+                submission = doc.to_dict()
+                submission['id'] = doc.id
+                current_batch.append(submission)
+                
+                # Process batch when it reaches the size limit
+                if len(current_batch) >= batch_size:
+                    success, failed = await self._process_typesense_batch(current_batch)
+                    total_processed += len(current_batch)
+                    success_count += success
+                    failed_ids.extend(failed)
+                    current_batch = []
+                    
+            # Process remaining submissions
+            if current_batch:
+                success, failed = await self._process_typesense_batch(current_batch)
+                total_processed += len(current_batch)
+                success_count += success
+                failed_ids.extend(failed)
+            
+            logger.info(f"Typesense sync completed: {success_count}/{total_processed} submissions indexed successfully")
+            if failed_ids:
+                logger.warning(f"{len(failed_ids)} submissions failed to index: {failed_ids}")
+            
+            return total_processed, success_count, failed_ids
+            
+        except Exception as e:
+            logger.error(f"Error syncing submissions to Typesense: {str(e)}")
+            return 0, 0, []
+            
+    async def _process_typesense_batch(self, submissions: List[Dict[str, Any]]) -> Tuple[int, List[str]]:
+        """
+        Process a batch of submissions for Typesense indexing.
+        
+        Args:
+            submissions: List of submission documents to process
+            
+        Returns:
+            Tuple containing:
+            - Number of successfully indexed submissions
+            - List of IDs that failed to index
+        """
+        success_count = 0
+        failed_ids = []
+        
+        for submission in submissions:
+            try:
+                if await self._index_in_typesense(submission):
+                    success_count += 1
+                else:
+                    failed_ids.append(submission['id'])
+            except Exception as e:
+                logger.error(f"Error processing submission {submission.get('id')}: {str(e)}")
+                failed_ids.append(submission.get('id'))
+                
+        return success_count, failed_ids
 
 # Create an instance
 submission_crud = SubmissionCRUD() 

@@ -2620,63 +2620,96 @@ async def list_submissions(
         sort_order = "desc"  # Default to newest first if invalid sort_order provided
     
     try:
-        # Set up base query - directly using user_email for filtering without user collection reference
-        query = db.collection('submissions').where("user_email", "==", user_email)
-        
-        # Add search filter for URL if provided
-        if search_url:
-            # Convert to lowercase and add wildcard search
-            search_term = search_url.lower()
-            # Use firebase's array-contains or similar field comparison
-            query = query.where("requested_url", ">=", search_term)
-            query = query.where("requested_url", "<=", search_term + "\uf8ff")
-        
-        # Apply sorting first - before pagination for consistency
-        direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
-        query = query.order_by("created_at", direction=direction)
-        
-        # Get all matching documents to ensure accurate count and consistent pagination
-        all_matching_docs = list(query.stream())
-        total_count = len(all_matching_docs)
-        
-        # Calculate pagination
-        offset = (page - 1) * size
-        page_end = offset + size
-        
-        # Get the paginated subset (in memory)
-        submissions_docs = all_matching_docs[offset:page_end] if offset < total_count else []
-        
-        # Format response
-        submissions = []
-        for doc in submissions_docs:
-            data = doc.to_dict()
-            data['id'] = doc.id
+        # Get Typesense client
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available, falling back to Firestore")
+            # Fall back to Firestore query
+            query = db.collection('submissions').where("user_email", "==", user_email)
+            if search_url:
+                search_term = search_url.lower()
+                query = query.where("requested_url", ">=", search_term)
+                query = query.where("requested_url", "<=", search_term + "\uf8ff")
             
-            submissions.append(URLSubmissionResponse(
-                id=data['id'],
-                url=data['requested_url'],
-                document_type=data['document_type'],
-                status=data['status'],
-                document_id=data.get('document_id'),
-                error_message=data.get('error_message'),
-                created_at=data['created_at'],
-                updated_at=data['updated_at']
-            ))
+            direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
+            query = query.order_by("created_at", direction=direction)
+            all_matching_docs = list(query.stream())
+            total_count = len(all_matching_docs)
+            offset = (page - 1) * size
+            page_end = offset + size
+            submissions_docs = all_matching_docs[offset:page_end] if offset < total_count else []
+            
+            submissions = []
+            for doc in submissions_docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                submissions.append(URLSubmissionResponse(
+                    id=data['id'],
+                    url=data['requested_url'],
+                    document_type=data['document_type'],
+                    status=data['status'],
+                    document_id=data.get('document_id'),
+                    error_message=data.get('error_message'),
+                    created_at=data['created_at'],
+                    updated_at=data['updated_at'],
+                    user_email=data.get('user_email')
+                ))
+        else:
+            # Use Typesense for faster search and pagination
+            search_parameters = {
+                'q': search_url if search_url else '*',
+                'query_by': 'url',
+                'filter_by': f'user_email:{user_email}',
+                'sort_by': f'created_at:{sort_order}',
+                'page': page,
+                'per_page': size
+            }
+            
+            try:
+                search_results = client.collections[SUBMISSIONS_COLLECTION_NAME].documents.search(search_parameters)
+                
+                total_count = search_results['found']
+                submissions = []
+                
+                for hit in search_results['hits']:
+                    doc = hit['document']
+                    submissions.append(URLSubmissionResponse(
+                        id=doc['id'],
+                        url=doc['url'],
+                        document_type=doc['document_type'],
+                        status=doc['status'],
+                        document_id=doc.get('document_id'),
+                        error_message=doc.get('error_message'),
+                        created_at=datetime.fromtimestamp(doc['created_at']),
+                        updated_at=datetime.fromtimestamp(doc['updated_at']),
+                        user_email=doc.get('user_email')
+                    ))
+            except Exception as e:
+                logger.error(f"Typesense search error: {str(e)}")
+                # Fall back to empty results with error
+                return PaginatedSubmissionsResponse(
+                    items=[],
+                    total=0,
+                    page=page,
+                    size=size,
+                    pages=1,
+                    error_status=True,
+                    error_message=f"Search error: {str(e)}"
+                )
         
         # Calculate total pages
-        total_pages = (total_count + size - 1) // size if total_count > 0 else 1  # Ensure at least 1 page even when empty
+        total_pages = (total_count + size - 1) // size if total_count > 0 else 1
         
-        # If no submissions found, instead of raising an error, return empty results with message
+        # If no submissions found, return empty results with message
         if len(submissions) == 0 and page == 1:
             logger.info(f"No submissions found for user {user_email}")
-            # Return empty results with appropriate message
             return PaginatedSubmissionsResponse(
                 items=[],
                 total=0,
                 page=page,
                 size=size,
                 pages=total_pages,
-                error_status=False,  # Not an error, just empty results
+                error_status=False,
                 error_message="No submissions found"
             )
         
@@ -3180,6 +3213,43 @@ async def sync_submissions_to_typesense(
             "indexed": 0,
             "failed": 0,
             "total": 0
+        }
+
+@router.post("/admin/sync-submissions-to-typesense", response_model=Dict[str, Any])
+async def sync_submissions_to_typesense(
+    api_key: str = Depends(get_api_key),
+    batch_size: int = Query(100, description="Number of submissions to process in each batch")
+):
+    """
+    Sync all submissions to Typesense for faster search.
+    
+    This endpoint will:
+    1. Fetch all submissions from Firestore
+    2. Index them in Typesense
+    3. Return statistics about the sync process
+    
+    Only accessible by admin users.
+    """
+    try:
+        total, success, failed_ids = await submission_crud.sync_to_typesense(batch_size=batch_size)
+        
+        return {
+            "status": "success",
+            "total_processed": total,
+            "successfully_indexed": success,
+            "failed_count": len(failed_ids),
+            "failed_ids": failed_ids,
+            "error": None
+        }
+    except Exception as e:
+        logger.error(f"Error syncing submissions to Typesense: {str(e)}")
+        return {
+            "status": "error",
+            "total_processed": 0,
+            "successfully_indexed": 0,
+            "failed_count": 0,
+            "failed_ids": [],
+            "error": str(e)
         }
 
 @router.get("/admin/search-all-submissions", response_model=PaginatedSubmissionsResponse)

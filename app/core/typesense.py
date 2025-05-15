@@ -19,6 +19,7 @@ TYPESENSE_PORT = os.getenv("TYPESENSE_PORT", "8108")
 TYPESENSE_PROTOCOL = os.getenv("TYPESENSE_PROTOCOL", "http")
 TYPESENSE_API_KEY = os.getenv("TYPESENSE_API_KEY", "")
 TYPESENSE_COLLECTION_NAME = "documents"
+SUBMISSIONS_COLLECTION_NAME = "submissions"
 
 # Hardcoded values as fallback
 if not TYPESENSE_API_KEY:
@@ -39,7 +40,7 @@ typesense_config = {
             'protocol': TYPESENSE_PROTOCOL
         }
     ],
-    'connection_timeout_seconds': 2
+    'connection_timeout_seconds': 10
 }
 
 # Document collection schema
@@ -47,20 +48,36 @@ documents_schema = {
     'name': TYPESENSE_COLLECTION_NAME,
     'fields': [
         {'name': 'id', 'type': 'string'},
-        {'name': 'url', 'type': 'string', 'infix': True},
-        {'name': 'document_type', 'type': 'string', 'facet': True},
-        {'name': 'company_name', 'type': 'string', 'sort': True, 'infix': True, 'optional': True},
-        {'name': 'views', 'type': 'int32'},
-        {'name': 'logo_url', 'type': 'string', 'optional': True},
-        {'name': 'updated_at', 'type': 'int64', 'sort': True, 'optional': True}  # Store as Unix timestamp
-    ],
-    'default_sorting_field': 'views'
+        {'name': 'url', 'type': 'string'},
+        {'name': 'title', 'type': 'string', 'optional': True},
+        {'name': 'content', 'type': 'string'},
+        {'name': 'summary', 'type': 'string', 'optional': True},
+        {'name': 'document_type', 'type': 'string'},
+        {'name': 'created_at', 'type': 'int64'},
+        {'name': 'updated_at', 'type': 'int64'}
+    ]
 }
 
-client: Optional[typesense.Client] = None
+# Submissions collection schema
+submissions_schema = {
+    'name': SUBMISSIONS_COLLECTION_NAME,
+    'fields': [
+        {'name': 'id', 'type': 'string'},
+        {'name': 'url', 'type': 'string'},
+        {'name': 'document_type', 'type': 'string'},
+        {'name': 'status', 'type': 'string'},
+        {'name': 'document_id', 'type': 'string', 'optional': True},
+        {'name': 'error_message', 'type': 'string', 'optional': True},
+        {'name': 'user_email', 'type': 'string', 'facet': True},
+        {'name': 'created_at', 'type': 'int64'},
+        {'name': 'updated_at', 'type': 'int64'}
+    ]
+}
+
+client = None
 
 def init_typesense():
-    """Initialize Typesense client and create collection if it doesn't exist."""
+    """Initialize Typesense client and create collections if they don't exist."""
     global client
     
     if not TYPESENSE_API_KEY:
@@ -69,62 +86,38 @@ def init_typesense():
     
     try:
         client = typesense.Client(typesense_config)
-        create_new_collection = True
         
-        try:
-            # Check if collection exists
-            collections = client.collections.retrieve()
-            for collection in collections:
-                if collection['name'] == TYPESENSE_COLLECTION_NAME:
-                    logger.info(f"Found existing Typesense collection: {TYPESENSE_COLLECTION_NAME}")
-                    
-                    try:
-                        # Try a simple search to verify the collection is working
-                        test_search = client.collections[TYPESENSE_COLLECTION_NAME].documents.search({
-                            'q': '*',
-                            'query_by': 'company_name',
-                            'per_page': 1
-                        })
-                        logger.info(f"Typesense collection {TYPESENSE_COLLECTION_NAME} exists and is working")
-                        create_new_collection = False
-                    except Exception as search_err:
-                        logger.warning(f"Collection exists but search failed: {str(search_err)}")
-                        logger.warning("Will drop and recreate collection")
-                        
-                        try:
-                            client.collections[TYPESENSE_COLLECTION_NAME].delete()
-                            logger.info(f"Successfully deleted collection: {TYPESENSE_COLLECTION_NAME}")
-                        except Exception as del_err:
-                            logger.error(f"Error deleting collection: {str(del_err)}")
-                            # Continue anyway, as we'll try to recreate it
-                    break
-        except Exception as coll_err:
-            logger.warning(f"Error retrieving collections: {str(coll_err)}")
-            # Continue to attempt creating a new collection
+        # Initialize both collections
+        collections_to_init = [
+            (TYPESENSE_COLLECTION_NAME, documents_schema),
+            (SUBMISSIONS_COLLECTION_NAME, submissions_schema)
+        ]
         
-        # Create new collection if needed
-        if create_new_collection:
+        for collection_name, schema in collections_to_init:
+            create_new_collection = True
+            
             try:
-                # First try to delete if it exists (in case we couldn't check properly)
+                # Check if collection exists
+                client.collections[collection_name].retrieve()
+                create_new_collection = False
+                logger.info(f"Collection {collection_name} already exists")
+            except Exception as e:
+                if "not found" in str(e).lower():
+                    create_new_collection = True
+                else:
+                    logger.error(f"Error checking collection {collection_name}: {str(e)}")
+                    continue
+            
+            if create_new_collection:
                 try:
-                    client.collections[TYPESENSE_COLLECTION_NAME].delete()
-                    logger.info(f"Deleted existing collection before recreation: {TYPESENSE_COLLECTION_NAME}")
-                except:
-                    # Ignore errors here - the collection might not exist
-                    pass
-                
-                # Now create a fresh collection
-                client.collections.create(documents_schema)
-                logger.info(f"Created new Typesense collection: {TYPESENSE_COLLECTION_NAME}")
-            except Exception as create_err:
-                logger.error(f"Error creating collection: {str(create_err)}")
-                return None
+                    client.collections.create(schema)
+                    logger.info(f"Created new collection: {collection_name}")
+                except Exception as e:
+                    logger.error(f"Error creating collection {collection_name}: {str(e)}")
         
-        logger.info("Typesense client initialized successfully")
         return client
     except Exception as e:
         logger.error(f"Error initializing Typesense: {str(e)}")
-        client = None
         return None
 
 def get_typesense_client():
