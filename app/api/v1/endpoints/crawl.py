@@ -22,7 +22,7 @@ from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining,
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
 from app.core.firebase import db
-from app.core.typesense import get_typesense_client, TYPESENSE_COLLECTION_NAME
+from app.core.typesense import get_typesense_client, SUBMISSIONS_COLLECTION_NAME, TYPESENSE_COLLECTION_NAME
 from app.core.database import (
     get_document_by_url,
     increment_views
@@ -2659,10 +2659,12 @@ async def list_submissions(
             search_parameters = {
                 'q': search_url if search_url else '*',
                 'query_by': 'url',
-                'filter_by': f'user_email:{user_email}',
+                'filter_by': f'user_email:={user_email}',  # Exact match for user_email
                 'sort_by': f'created_at:{sort_order}',
                 'page': page,
-                'per_page': size
+                'per_page': size,
+                'prefix': True,  # Enable prefix matching for URLs
+                'infix': None  # Disable infix search for better performance
             }
             
             try:
@@ -2946,6 +2948,166 @@ async def search_submissions(
     Returns:
     - Paginated list of matching submissions (only for the current user)
     """
+    # Validate size parameter
+    allowed_sizes = [6, 9, 12, 15]
+    if size not in allowed_sizes:
+        size = 6  # Default to 6 if invalid size provided
+    
+    # Validate sort_order
+    if sort_order not in ["asc", "desc"]:
+        sort_order = "desc"  # Default to newest first if invalid sort_order provided
+    
+    try:
+        # Get Typesense client
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available, falling back to Firestore")
+            # Fall back to Firestore query
+            base_query = db.collection('submissions').where("user_email", "==", user_email)
+            
+            # Add filters
+            if document_type:
+                base_query = base_query.where("document_type", "==", document_type)
+            if status:
+                base_query = base_query.where("status", "==", status)
+            
+            # Add URL search if provided
+            if query:
+                search_term = query.lower()
+                base_query = base_query.where("requested_url", ">=", search_term)
+                base_query = base_query.where("requested_url", "<=", search_term + "\uf8ff")
+            
+            # Apply sorting
+            direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
+            base_query = base_query.order_by("created_at", direction=direction)
+            
+            # Get all matching documents
+            all_matching_docs = list(base_query.stream())
+            total_count = len(all_matching_docs)
+            
+            # Apply pagination
+            offset = (page - 1) * size
+            page_end = offset + size
+            submissions_docs = all_matching_docs[offset:page_end] if offset < total_count else []
+            
+            # Format response
+            submissions = []
+            for doc in submissions_docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                submissions.append(URLSubmissionResponse(
+                    id=data['id'],
+                    url=data['requested_url'],
+                    document_type=data['document_type'],
+                    status=data['status'],
+                    document_id=data.get('document_id'),
+                    error_message=data.get('error_message'),
+                    created_at=data['created_at'],
+                    updated_at=data['updated_at'],
+                    user_email=data.get('user_email')
+                ))
+        else:
+            # Build filter conditions
+            filter_conditions = [f'user_email:={user_email}']
+            if document_type:
+                filter_conditions.append(f'document_type:={document_type}')
+            if status:
+                filter_conditions.append(f'status:={status}')
+            
+            # Use Typesense for faster search and pagination
+            search_parameters = {
+                'q': query,
+                'query_by': 'url',
+                'filter_by': ' && '.join(filter_conditions),
+                'sort_by': f'created_at:{sort_order}',
+                'page': page,
+                'per_page': size,
+                'prefix': True,  # Enable prefix matching for URLs
+                'infix': None  # Disable infix search for better performance
+            }
+            
+            try:
+                search_results = client.collections[SUBMISSIONS_COLLECTION_NAME].documents.search(search_parameters)
+                
+                total_count = search_results['found']
+                submissions = []
+                
+                for hit in search_results['hits']:
+                    doc = hit['document']
+                    submissions.append(URLSubmissionResponse(
+                        id=doc['id'],
+                        url=doc['url'],
+                        document_type=doc['document_type'],
+                        status=doc['status'],
+                        document_id=doc.get('document_id'),
+                        error_message=doc.get('error_message'),
+                        created_at=datetime.fromtimestamp(doc['created_at']),
+                        updated_at=datetime.fromtimestamp(doc['updated_at']),
+                        user_email=doc.get('user_email')
+                    ))
+            except Exception as e:
+                logger.error(f"Typesense search error: {str(e)}")
+                # Fall back to empty results with error
+                return PaginatedSubmissionsResponse(
+                    items=[],
+                    total=0,
+                    page=page,
+                    size=size,
+                    pages=1,
+                    error_status=True,
+                    error_message=f"Search error: {str(e)}"
+                )
+        
+        # Calculate total pages
+        total_pages = (total_count + size - 1) // size if total_count > 0 else 1
+        
+        # If no submissions found, return empty results with message
+        if len(submissions) == 0 and page == 1:
+            logger.info(f"No submissions found for user {user_email}")
+            return PaginatedSubmissionsResponse(
+                items=[],
+                total=0,
+                page=page,
+                size=size,
+                pages=total_pages,
+                error_status=False,
+                error_message="No submissions found"
+            )
+        
+        return PaginatedSubmissionsResponse(
+            items=submissions,
+            total=total_count,
+            page=page,
+            size=size,
+            pages=total_pages
+        )
+    except Exception as e:
+        logger.error(f"Error searching submissions: {str(e)}")
+        # Return an error response
+        error_message = f"Failed to search submissions: {str(e)}"
+        
+        # Check for common error types and provide more specific messages
+        try:
+            error_str = str(e).lower()
+            if "connection" in error_str or "network" in error_str:
+                error_message = "Database connection error while searching"
+            elif "timeout" in error_str:
+                error_message = "Operation timed out while searching"
+            elif "permission" in error_str:
+                error_message = "Permission denied while searching"
+        except Exception as inner_e:
+            # If error analysis itself fails, just use the original error message
+            logger.warning(f"Error analyzing exception message: {str(inner_e)}")
+        
+        return PaginatedSubmissionsResponse(
+            items=[],
+            total=0,
+            page=page,
+            size=size,
+            pages=1,
+            error_status=True,
+            error_message=error_message
+                 )
     # Validate size parameter
     allowed_sizes = [6, 9, 12, 15]
     if size not in allowed_sizes:
