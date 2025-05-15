@@ -157,11 +157,17 @@ async def save_document_to_db(
     logger.info(f"Incoming text_mining type: {type(tm_data)}, content snippet: {str(tm_data)[:500]}")
 
     try:
-        # Check if document already exists by URL and document type
+        # Check if document already exists by EXACT URL and document type matching
         from app.crud.document import document_crud
         
+        # Only use exact URL match for duplicate checking - no domain-based matching
         existing_doc = await document_crud.get_by_url_and_type(original_url, document_type)
-        # Only check base URL for duplicates; allow same retrieved_url for different base URLs
+        # Only check base original_url for duplicates - strict equality required to prevent false matches
+        
+        if existing_doc:
+            logger.info(f"Found existing document with EXACT URL match: {original_url}")
+        else:
+            logger.info(f"No existing document found with exact URL match: {original_url}")
         
         # Use company_name and logo_url from analysis if available
         company_name = analysis.get('company_name', None)
@@ -2124,37 +2130,41 @@ async def submit_url(
     # Check if we already have a document for this URL and type
     from app.crud.document import document_crud
     
-    # First try exact URL match
+    # Only check for exact URL match - strict matching to prevent false positives
     existing_doc = await document_crud.get_by_url_and_type(url, document_type)
     
-    # If not found, try with normalized URL
+    # If not found and URL was normalized, check with normalized URL only if very similar to original
     if not existing_doc and normalized_url != url:
-        existing_doc = await document_crud.get_by_url_and_type(normalized_url, document_type)
+        # Only try normalized URL if it's just a protocol or www difference
+        normalized_domain = urlparse(normalized_url).netloc
+        original_domain = urlparse(url if url.startswith(('http://', 'https://')) else 'https://'+url).netloc
+        
+        if normalized_domain == original_domain:
+            existing_doc = await document_crud.get_by_url_and_type(normalized_url, document_type)
+            if existing_doc:
+                logger.info(f"Found document with normalized URL: {normalized_url}")
     
-    # If still not found, try domain-based search
-    if not existing_doc and domain:
-        try:
-            # This would need to be implemented in your document_crud
-            similar_docs = await document_crud.find_documents_by_domain(domain, document_type, limit=1)
-            if similar_docs and len(similar_docs) > 0:
-                existing_doc = similar_docs[0]
-                logger.info(f"Found document with same domain: {domain}")
-        except Exception as e:
-            logger.warning(f"Error in domain-based document search: {e}")
+    # No more domain-based search to prevent false positives
     
-    # Check for duplicate submissions in progress
+    # Check for duplicate submissions in progress using exact URL match only
     if not existing_doc:
         try:
-            # Look for any non-failed submissions with the same URL
+            # Look for any non-failed submissions with the EXACT same URL
             dup_query = db.collection('submissions')\
                 .where("requested_url", "==", url)\
                 .where("document_type", "==", document_type)\
                 .where("status", "in", ["initialized", "processing"])
             dup_submissions = list(dup_query.stream())
+            
+            # Only consider as duplicate if it's the exact same URL, not based on domain
             if dup_submissions:
-                logger.info(f"Found duplicate in-progress submission for URL: {url}")
                 dup_data = dup_submissions[0].to_dict()
-                existing_doc = {"id": "pending_duplicate", "message": "Duplicate submission in progress"}
+                dup_url = dup_data.get('requested_url', '')
+                
+                # Strict exact match check
+                if dup_url == url:
+                    logger.info(f"Found duplicate in-progress submission for exact URL: {url}")
+                    existing_doc = {"id": "pending_duplicate", "message": "Duplicate submission in progress"}
         except Exception as e:
             logger.warning(f"Error checking for duplicate in-progress submissions: {e}")
     if existing_doc:

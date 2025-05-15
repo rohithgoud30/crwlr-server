@@ -645,7 +645,7 @@ class DocumentCRUD(FirebaseCRUDBase):
 
     async def find_documents_by_domain(self, domain: str, document_type: Optional[str] = None, limit: int = 5) -> List[Dict[str, Any]]:
         """
-        Find documents that have the same domain in their URL.
+        Find documents that have the EXACT same domain in their URL - strict matching to prevent false positives.
         
         Args:
             domain: The domain to search for (e.g., "example.com")
@@ -667,8 +667,8 @@ class DocumentCRUD(FirebaseCRUDBase):
             if document_type:
                 query = query.where("document_type", "==", document_type)
                 
-            # We need to do a more complex search since Firestore doesn't support LIKE queries
-            # Start by getting documents and then filter in memory
+            # IMPORTANT: We're switching to an exact domain match approach for stricter matching
+            # Start by getting documents and then filter for EXACT domain match in memory
             results = []
             docs = list(query.limit(100).stream())  # Get a reasonable batch size
             
@@ -676,22 +676,23 @@ class DocumentCRUD(FirebaseCRUDBase):
                 doc_data = doc.to_dict()
                 doc_data['id'] = doc.id
                 
-                # Check if domain is in the URL (case-insensitive)
+                # Extract domain from the URL for strict exact matching
                 url = doc_data.get('url', '').lower()
-                if domain.lower() in url:
-                    results.append(doc_data)
-                    if len(results) >= limit:
-                        break
-                        
-                # If still need more results, also check retrieved_url
-                if len(results) < limit and 'retrieved_url' in doc_data:
-                    retrieved_url = doc_data.get('retrieved_url', '').lower()
-                    if domain.lower() in retrieved_url and doc_data not in results:
+                try:
+                    from urllib.parse import urlparse
+                    parsed_url = urlparse(url)
+                    url_domain = parsed_url.netloc
+                    
+                    # Only match if the domains are EXACTLY the same
+                    if url_domain == domain.lower():
+                        logger.info(f"Found exact domain match: {url_domain} == {domain.lower()}")
                         results.append(doc_data)
                         if len(results) >= limit:
                             break
+                except Exception as parse_err:
+                    logger.warning(f"Error parsing URL domain: {parse_err}")
             
-            logger.info(f"Found {len(results)} documents with domain '{domain}'")
+            logger.info(f"Found {len(results)} documents with EXACT domain '{domain}'")
             return results
             
         except Exception as e:
