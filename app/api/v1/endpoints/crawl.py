@@ -2596,6 +2596,7 @@ async def list_submissions(
     user_email: str = Query(..., description="User's email to filter submissions"),
     sort_order: str = Query("desc", description="Sort order - 'asc' for older to newest, 'desc' for newest to oldest"),
     search_url: Optional[str] = Query(None, description="Search by base URL"),
+    status: Optional[str] = Query(None, description="Filter by status (one of: initialized, processing, success, failed)"),
     api_key: str = Depends(get_api_key)
 ):
     """
@@ -2606,6 +2607,7 @@ async def list_submissions(
     - **user_email**: User's email to filter submissions
     - **sort_order**: Sort order - 'asc' for older to newest, 'desc' for newest to oldest (default: desc)
     - **search_url**: Optional filter to search by base URL
+    - **status**: Optional filter by status (one of: initialized, processing, success, failed)
     
     Returns:
     - Paginated list of submissions with their statuses
@@ -2630,6 +2632,10 @@ async def list_submissions(
                 search_term = search_url.lower()
                 query = query.where("requested_url", ">=", search_term)
                 query = query.where("requested_url", "<=", search_term + "\uf8ff")
+            
+            # Add status filter if provided
+            if status:
+                query = query.where("status", "==", status)
             
             direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
             query = query.order_by("created_at", direction=direction)
@@ -2667,6 +2673,10 @@ async def list_submissions(
                 'infix': None  # Disable infix search for better performance
             }
             
+            # Add status filter if provided
+            if status:
+                search_parameters['filter_by'] = f"{search_parameters['filter_by']} && status:={status}"
+            
             try:
                 search_results = client.collections[SUBMISSIONS_COLLECTION_NAME].documents.search(search_parameters)
                 
@@ -2694,6 +2704,11 @@ async def list_submissions(
                     search_term = search_url.lower()
                     base_query = base_query.where("requested_url", ">=", search_term)
                     base_query = base_query.where("requested_url", "<=", search_term + "\uf8ff")
+                
+                # Add status filter if provided
+                if status:
+                    base_query = base_query.where("status", "==", status)
+                    
                 direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
                 base_query = base_query.order_by("created_at", direction=direction)
                 all_matching_docs = list(base_query.stream())
