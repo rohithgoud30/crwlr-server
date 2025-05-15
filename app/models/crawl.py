@@ -6,6 +6,7 @@ from app.models.textmining import TextMiningResults
 
 class CrawlTosRequest(BaseModel):
     url: str
+    submission_id: Optional[str] = None
 
 class CrawlTosResponse(BaseModel):
     url: str
@@ -30,6 +31,7 @@ class CrawlTosResponse(BaseModel):
 
 class CrawlPrivacyRequest(BaseModel):
     url: str
+    submission_id: Optional[str] = None
 
 class CrawlPrivacyResponse(BaseModel):
     url: str
