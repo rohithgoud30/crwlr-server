@@ -3017,7 +3017,7 @@ async def search_submissions(
             
             # Use Typesense for faster search and pagination
             search_parameters = {
-                'q': query,
+                'q': query if query is not None else '*',  # Use * wildcard if query is None
                 'query_by': 'url',
                 'filter_by': ' && '.join(filter_conditions),
                 'sort_by': f'created_at:{sort_order}',
