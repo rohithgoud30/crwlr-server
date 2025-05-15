@@ -383,7 +383,7 @@ Below is a detailed list of available API endpoints, including HTTP method, path
 - **Headers:**
   - `X-API-Key: {API_KEY}`
 - **Query Parameters:**
-  - `query` (string, required): Search query for URLs
+  - `query` (string, optional, default: ""): Search query for URLs (empty string to list all)
   - `user_email` (string, required): User's email to filter submissions
   - `page` (integer, optional, default: 1): Page number (>=1)
   - `size` (integer, optional, default: 6): Items per page (allowed values: 6, 9, 12, 15)

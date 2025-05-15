@@ -2924,7 +2924,7 @@ async def retry_submission(
 
 @router.get("/search-submissions", response_model=PaginatedSubmissionsResponse)
 async def search_submissions(
-    query: str = Query(..., description="Search query for URLs"),
+    query: str = Query("", description="Search query for URLs (optional, empty to list all)"),
     user_email: str = Query(..., description="User's email to filter submissions"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(6, description="Items per page - allowed values: 6, 9, 12, 15"),
@@ -2936,8 +2936,9 @@ async def search_submissions(
     """
     Search for submissions by URL using Typesense with full-text search capabilities.
     Only returns submissions that belong to the user identified by their email.
+    If no search query is provided, returns all submissions for the user (similar to list endpoint).
     
-    - **query**: Search query (searches in URLs)
+    - **query**: Optional search query (searches in URLs). Empty to list all submissions.
     - **user_email**: User's email to filter submissions
     - **page**: Page number (starts at 1)
     - **size**: Number of items per page (allowed values: 6, 9, 12, 15, default: 6)
