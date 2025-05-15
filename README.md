@@ -376,7 +376,46 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   - `search_url` (optional): Filter by base URL
 - **Response:** Same format as Search Submissions response
 
-### 10. Delete Submission
+### 10. Search Submissions
+
+- **Method:** GET
+- **Path:** `/api/v1/search-submissions`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+- **Query Parameters:**
+  - `query` (string, required): Search query for URLs
+  - `user_email` (string, required): User's email to filter submissions
+  - `page` (integer, optional, default: 1): Page number (>=1)
+  - `size` (integer, optional, default: 6): Items per page (allowed values: 6, 9, 12, 15)
+  - `sort_order` (string, optional, default: "desc"): Sort order ("asc" or "desc")
+  - `document_type` (string, optional): Filter by document type ("tos" or "pp")
+  - `status` (string, optional): Filter by status
+- **Response:** `PaginatedSubmissionsResponse`
+  ```json
+  {
+    "items": [
+      {
+        "id": "submission_id",
+        "url": "https://example.com",
+        "document_type": "tos",
+        "status": "success",
+        "document_id": "doc_id",
+        "error_message": null,
+        "created_at": "2024-03-20T10:00:00Z",
+        "updated_at": "2024-03-20T10:01:00Z",
+        "user_email": "user@example.com"
+      }
+    ],
+    "total": 10,
+    "page": 1,
+    "size": 6,
+    "pages": 2,
+    "error_status": false,
+    "error_message": null
+  }
+  ```
+
+### 11. Delete Submission
 
 - **Method:** DELETE
 - **Path:** `/api/v1/submissions/{submission_id}`
