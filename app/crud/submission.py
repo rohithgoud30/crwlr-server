@@ -295,6 +295,69 @@ class SubmissionCRUD(FirebaseCRUDBase):
                 failed_ids.append(submission.get('id'))
                 
         return success_count, failed_ids
+        
+    async def _delete_from_typesense(self, id: str) -> bool:
+        """
+        Delete a submission from Typesense index.
+        
+        Args:
+            id: ID of the submission to delete
+            
+        Returns:
+            bool: True if deletion was successful, False otherwise
+        """
+        client = get_typesense_client()
+        if not client:
+            logger.warning("Typesense client not available. Skipping deletion from index.")
+            return False
+        
+        try:
+            client.collections[SUBMISSIONS_COLLECTION_NAME].documents[id].delete()
+            logger.info(f"Submission {id} deleted from Typesense index")
+            return True
+        except Exception as e:
+            if "Not Found" in str(e):
+                # If the document wasn't in Typesense, consider deletion successful
+                logger.info(f"Submission {id} not found in Typesense index")
+                return True
+            logger.error(f"Error deleting submission from Typesense: {str(e)}")
+            return False
+            
+    async def delete_submission(self, id: str) -> bool:
+        """
+        Delete a submission by ID from both Firebase and Typesense.
+        
+        Args:
+            id: ID of the submission to delete
+            
+        Returns:
+            bool: True if deletion was successful, False otherwise
+        """
+        if not self.collection:
+            logger.error("Firebase database not initialized")
+            return False
+            
+        try:
+            doc_id = str(id)
+            doc_ref = self.collection.document(doc_id)
+            
+            # Check if submission exists
+            doc = doc_ref.get()
+            if not doc.exists:
+                logger.warning(f"Submission {id} not found - cannot delete")
+                return False
+                
+            # Delete from Firebase
+            doc_ref.delete()
+            logger.info(f"Submission {id} deleted from Firebase")
+            
+            # Remove from Typesense index
+            await self._delete_from_typesense(id)
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting submission {id}: {str(e)}")
+            return False
 
 # Create an instance
 submission_crud = SubmissionCRUD() 

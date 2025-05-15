@@ -3414,6 +3414,68 @@ async def sync_submissions_to_typesense(
             "error": str(e)
         }
 
+@router.delete("/submissions/{submission_id}", response_model=Dict[str, Any])
+async def delete_submission(
+    submission_id: str = Path(..., description="ID of the submission to delete"),
+    user_email: str = Query(..., description="User's email to validate ownership"),
+    role: Optional[str] = Query(None, description="User role - 'admin' gives additional permissions"),
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Delete a submission by ID.
+    
+    This endpoint will:
+    1. Check if the submission exists and belongs to the requesting user
+    2. Delete the submission from both Firebase and Typesense
+    
+    - **submission_id**: ID of the submission to delete
+    - **user_email**: User's email to validate submission ownership
+    - **role**: Optional. If set to 'admin', allows deleting any submission without permission checks
+    
+    Returns:
+    - A success message if deletion was successful, or an error message if it failed
+    """
+    try:
+        # Check if submission exists and validate ownership
+        submission = await submission_crud.get(submission_id)
+        
+        if not submission:
+            return {
+                "success": False,
+                "message": f"Submission with ID {submission_id} not found"
+            }
+        
+        # If role is admin, allow deletion without checking email
+        is_admin = role == "admin"
+        
+        # For non-admins, verify that the submission belongs to the user
+        if not is_admin and submission.get('user_email') != user_email:
+            return {
+                "success": False,
+                "message": "You do not have permission to delete this submission"
+            }
+        
+        # Delete the submission
+        success = await submission_crud.delete_submission(submission_id)
+        
+        if success:
+            return {
+                "success": True,
+                "message": "Submission deleted successfully",
+                "submission_id": submission_id
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to delete submission"
+            }
+    except Exception as e:
+        logger.error(f"Error deleting submission {submission_id}: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error deleting submission: {str(e)}"
+        }
+
 @router.get("/admin/search-all-submissions", response_model=PaginatedSubmissionsResponse)
 async def admin_search_all_submissions(
     query: str = Query("", description="Search query for URLs (empty to list all)"),

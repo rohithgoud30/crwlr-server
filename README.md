@@ -376,6 +376,44 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   - `search_url` (optional): Filter by base URL
 - **Response:** Same format as Search Submissions response
 
+### 10. Delete Submission
+
+- **Method:** DELETE
+- **Path:** `/api/v1/submissions/{submission_id}`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+- **Path Parameters:**
+  - `submission_id` (string): ID of the submission to delete
+- **Query Parameters:**
+  - `user_email` (required): User's email to validate ownership
+  - `role` (optional): If set to "admin", allows deleting any submission
+- **cURL Example:**
+  ```bash
+  curl -X DELETE "https://api.example.com/api/v1/submissions/submission_123?user_email=user@example.com" \
+    -H "X-API-Key: your_api_key"
+  ```
+- **Response:**
+  ```json
+  {
+    "success": true,
+    "message": "Submission deleted successfully",
+    "submission_id": "submission_123"
+  }
+  ```
+- **Error Responses:**
+  ```json
+  {
+    "success": false,
+    "message": "Submission with ID submission_123 not found"
+  }
+  ```
+  ```json
+  {
+    "success": false,
+    "message": "You do not have permission to delete this submission"
+  }
+  ```
+
 ### Notes on Pagination
 
 - All submissions endpoints use consistent pagination with page sizes of 6, 9, 12, or 15 items
