@@ -379,6 +379,12 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   - `size` (optional, default: 6): Items per page (allowed values: 6, 9, 12, 15)
   - `sort_order` (optional, default: "desc"): Sort order ("asc" or "desc")
   - `search_url` (optional): Filter by base URL
+  - `status` (optional): Filter by submission status (one of: initialized, processing, success, failed)
+- **Possible Status Values:**
+  - `initialized`: Submission created, processing not yet started
+  - `processing`: Crawling or analysis in progress
+  - `success`: Crawling and analysis completed successfully
+  - `failed`: Crawling or analysis failed (check `error_message` for details)
 - **Response:** Same format as Search Submissions response
 
 ### 10. Search Submissions
@@ -394,7 +400,12 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   - `size` (integer, optional, default: 6): Items per page (allowed values: 6, 9, 12, 15)
   - `sort_order` (string, optional, default: "desc"): Sort order ("asc" or "desc")
   - `document_type` (string, optional): Filter by document type ("tos" or "pp")
-  - `status` (string, optional): Filter by status
+  - `status` (string, optional): Filter by submission status (one of: initialized, processing, success, failed)
+- **Possible Status Values:**
+  - `initialized`: Submission created, processing not yet started
+  - `processing`: Crawling or analysis in progress
+  - `success`: Crawling and analysis completed successfully
+  - `failed`: Crawling or analysis failed (check `error_message` for details)
 - **Response:** `PaginatedSubmissionsResponse`
   ```json
   {
@@ -480,7 +491,7 @@ Below is a detailed list of available API endpoints, including HTTP method, path
     "id": "submission_id",
     "url": "https://example.com",
     "document_type": "tos",
-    "status": "initialized",
+    "status": "initialized", // One of: initialized, processing, success, failed
     "document_id": null,
     "error_message": null,
     "created_at": "2024-03-20T10:00:00Z",
@@ -488,6 +499,11 @@ Below is a detailed list of available API endpoints, including HTTP method, path
     "user_email": "user@example.com"
   }
   ```
+- **Submission Status Values:**
+  - `initialized`: Submission created, processing not yet started
+  - `processing`: Crawling or analysis in progress
+  - `success`: Crawling and analysis completed successfully
+  - `failed`: Crawling or analysis failed (check `error_message` for details)
 
 ### 13. Get Submission by ID
 
@@ -498,7 +514,7 @@ Below is a detailed list of available API endpoints, including HTTP method, path
 - **Query Parameters:**
   - `user_email` (required): User's email to validate ownership
   - `role` (optional): If set to "admin", allows viewing any submission
-- **Response:** `URLSubmissionResponse` (same format as Create Submission response)
+- **Response:** `URLSubmissionResponse` with status field (initialized, processing, success, failed)
 
 ### 14. Retry Failed Submission
 
@@ -515,6 +531,7 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   }
   ```
 - **Response:** `URLSubmissionResponse` (same format as Create Submission response)
+- **Note:** After a successful retry request, the submission status will change from `failed` to `initialized` and the processing will start again. The status will then transition to `processing` and finally to either `success` or `failed` based on the outcome.
 
 ### 15. Crawl Terms of Service
 
