@@ -2687,17 +2687,39 @@ async def list_submissions(
                         user_email=doc.get('user_email')
                     ))
             except Exception as e:
-                logger.error(f"Typesense search error: {str(e)}")
-                # Fall back to empty results with error
-                return PaginatedSubmissionsResponse(
-                    items=[],
-                    total=0,
-                    page=page,
-                    size=size,
-                    pages=1,
-                    error_status=True,
-                    error_message=f"Search error: {str(e)}"
-                )
+                logger.error(f"Typesense search error: {str(e)}. Falling back to Firestore")
+                # Fall back to Firestore query
+                base_query = db.collection('submissions').where("user_email", "==", user_email)
+                if document_type:
+                    base_query = base_query.where("document_type", "==", document_type)
+                if status:
+                    base_query = base_query.where("status", "==", status)
+                if query:
+                    search_term = query.lower()
+                    base_query = base_query.where("requested_url", ">=", search_term)
+                    base_query = base_query.where("requested_url", "<=", search_term + "\uf8ff")
+                direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
+                base_query = base_query.order_by("created_at", direction=direction)
+                all_matching_docs = list(base_query.stream())
+                total_count = len(all_matching_docs)
+                offset = (page - 1) * size
+                page_end = offset + size
+                submissions_docs = all_matching_docs[offset:page_end] if offset < total_count else []
+                submissions = []
+                for doc in submissions_docs:
+                    data = doc.to_dict(); data['id'] = doc.id
+                    submissions.append(URLSubmissionResponse(
+                        id=data['id'],
+                        url=data['requested_url'],
+                        document_type=data['document_type'],
+                        status=data['status'],
+                        document_id=data.get('document_id'),
+                        error_message=data.get('error_message'),
+                        created_at=data['created_at'],
+                        updated_at=data['updated_at'],
+                        user_email=data.get('user_email')
+                    ))
+                # Continue to pagination and return response as usual
         
         # Calculate total pages
         total_pages = (total_count + size - 1) // size if total_count > 0 else 1
@@ -3023,8 +3045,7 @@ async def search_submissions(
                 'sort_by': f'created_at:{sort_order}',
                 'page': page,
                 'per_page': size,
-                'prefix': True,  # Enable prefix matching for URLs
-                'infix': None  # Disable infix search for better performance
+                'prefix': True  # Enable prefix matching for URLs
             }
             
             try:
