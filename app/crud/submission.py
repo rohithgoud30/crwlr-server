@@ -16,7 +16,7 @@ class SubmissionCRUD(FirebaseCRUDBase):
         super().__init__("submissions")
         
         # Valid submission statuses
-        self.valid_statuses = ["initialized", "processing", "analyzing", "success", "failed"]
+        self.valid_statuses = ["initialized", "processing", "success", "failed"]
     
     async def get_submissions_by_user(self, user_email: str, limit: int = 20) -> List[Dict[str, Any]]:
         """Get submissions by user email."""
