@@ -335,8 +335,13 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   - `size` (optional, default: 6): Items per page (allowed values: 6, 9, 12, 15)
   - `sort_order` (optional, default: "desc"): Sort order ("asc" or "desc")
   - `document_type` (optional): Filter by type ("tos" or "pp")
-  - `status` (optional): Filter by status
+  - `status` (optional): Filter by status (one of: initialized, processing, success, failed)
   - `role` (required): Must be "admin" to access this endpoint
+- **Possible Status Values:**
+  - `initialized`: Submission created, processing not yet started
+  - `processing`: Crawling or analysis in progress
+  - `success`: Crawling and analysis completed successfully
+  - `failed`: Crawling or analysis failed (check `error_message` for details)
 - **Response:**
   ```json
   {
