@@ -2690,12 +2690,8 @@ async def list_submissions(
                 logger.error(f"Typesense search error: {str(e)}. Falling back to Firestore")
                 # Fall back to Firestore query
                 base_query = db.collection('submissions').where("user_email", "==", user_email)
-                if document_type:
-                    base_query = base_query.where("document_type", "==", document_type)
-                if status:
-                    base_query = base_query.where("status", "==", status)
-                if query:
-                    search_term = query.lower()
+                if search_url:
+                    search_term = search_url.lower()
                     base_query = base_query.where("requested_url", ">=", search_term)
                     base_query = base_query.where("requested_url", "<=", search_term + "\uf8ff")
                 direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
