@@ -2618,17 +2618,20 @@ async def list_submissions(
             query = query.where("requested_url", ">=", search_term)
             query = query.where("requested_url", "<=", search_term + "\uf8ff")
         
-        # Get total count with filters applied
-        total_query = query
-        total_count = len(list(total_query.stream()))
-        
-        # Calculate offset
-        offset = (page - 1) * size
-        
-        # Apply sorting
+        # Apply sorting first - before pagination for consistency
         direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
-        query = query.order_by("created_at", direction=direction).offset(offset).limit(size)
-        submissions_docs = list(query.stream())
+        query = query.order_by("created_at", direction=direction)
+        
+        # Get all matching documents to ensure accurate count and consistent pagination
+        all_matching_docs = list(query.stream())
+        total_count = len(all_matching_docs)
+        
+        # Calculate pagination
+        offset = (page - 1) * size
+        page_end = offset + size
+        
+        # Get the paginated subset (in memory)
+        submissions_docs = all_matching_docs[offset:page_end] if offset < total_count else []
         
         # Format response
         submissions = []
@@ -2970,17 +2973,15 @@ async def search_submissions(
                     updated_at=updated_at
                 ))
         
-        # Get pagination info from results
-        total_count = len(submissions)  # Count after filtering
+        # Get pagination info from results - use the total found from Typesense directly
+        total_count = search_results.get('found', 0)  # Use Typesense's reported total for accurate pagination
         total_pages = (total_count + size - 1) // size if total_count > 0 else 1
         
-        # Apply pagination in memory if needed
-        start_idx = (page - 1) * size
-        end_idx = start_idx + size
-        paginated_submissions = submissions[start_idx:end_idx]
+        # No need to manually paginate here - Typesense already returns the correct page
+        # The submissions list already contains just the items for this page
         
         # If no submissions found, instead of failing, return empty results with message
-        if total_count == 0 and page == 1:
+        if len(submissions) == 0 and page == 1:
             logger.info(f"No submissions found for search query '{query}' by user {user_email}")
             # Return empty results with appropriate message
             return PaginatedSubmissionsResponse(
@@ -2994,7 +2995,7 @@ async def search_submissions(
             )
         
         return PaginatedSubmissionsResponse(
-            items=paginated_submissions,
+            items=submissions,  # Use the submissions directly - already paginated by Typesense
             total=total_count,
             page=page,
             size=size,
@@ -3340,17 +3341,20 @@ async def admin_list_all_submissions(
             query = query.where("requested_url", ">=", search_term)
             query = query.where("requested_url", "<=", search_term + "\uf8ff")
         
-        # Get total count with filters applied
-        total_query = query
-        total_count = len(list(total_query.stream()))
-        
-        # Calculate offset
-        offset = (page - 1) * size
-        
-        # Apply sorting
+        # Apply sorting first - before pagination for consistency
         direction = firestore.Query.ASCENDING if sort_order == "asc" else firestore.Query.DESCENDING
-        query = query.order_by("created_at", direction=direction).offset(offset).limit(size)
-        submissions_docs = list(query.stream())
+        query = query.order_by("created_at", direction=direction)
+        
+        # Get all matching documents to ensure accurate count and consistent pagination
+        all_matching_docs = list(query.stream())
+        total_count = len(all_matching_docs)
+        
+        # Calculate pagination
+        offset = (page - 1) * size
+        page_end = offset + size
+        
+        # Get the paginated subset (in memory)
+        submissions_docs = all_matching_docs[offset:page_end] if offset < total_count else []
         
         # Format response
         submissions = []
