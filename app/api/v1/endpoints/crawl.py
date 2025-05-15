@@ -2076,6 +2076,7 @@ class URLSubmissionResponse(BaseModel):
     error_message: Optional[str] = None  # Used for error info or "Document already exists" messages
     created_at: datetime
     updated_at: datetime
+    user_email: Optional[str] = None  # User email for admin views
 
 @router.post("/submissions", response_model=URLSubmissionResponse)
 async def submit_url(
@@ -3300,7 +3301,8 @@ async def admin_search_all_submissions(
                 document_id=doc_id,
                 error_message=data.get('error_message'),
                 created_at=created_at,
-                updated_at=updated_at
+                updated_at=updated_at,
+                user_email=data.get('user_email')  # Include user email for admin views
             ))
         
         # Get pagination info from results
@@ -3405,7 +3407,8 @@ async def admin_list_all_submissions(
                 document_id=data.get('document_id'),
                 error_message=data.get('error_message'),
                 created_at=data.get('created_at'),
-                updated_at=data.get('updated_at')
+                updated_at=data.get('updated_at'),
+                user_email=data.get('user_email')  # Include user email for admin views
             ))
         
         # Calculate total pages (ensure at least 1 page even when empty)
