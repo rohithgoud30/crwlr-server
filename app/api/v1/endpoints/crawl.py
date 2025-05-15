@@ -3307,6 +3307,19 @@ async def admin_search_all_submissions(
         total_count = search_results.get('found', len(submissions))
         total_pages = (total_count + size - 1) // size if total_count > 0 else 1
         
+        # If no submissions found, return empty results with message
+        if len(submissions) == 0 and page == 1:
+            logger.info(f"No submissions found for admin search query '{query}'")
+            return PaginatedSubmissionsResponse(
+                items=[],
+                total=0,
+                page=page,
+                size=size,
+                pages=1,
+                error_status=False,
+                error_message="No submissions found"
+            )
+        
         return PaginatedSubmissionsResponse(
             items=submissions,
             total=total_count,
@@ -3395,8 +3408,21 @@ async def admin_list_all_submissions(
                 updated_at=data.get('updated_at')
             ))
         
-        # Calculate total pages
-        total_pages = (total_count + size - 1) // size  # Ceiling division
+        # Calculate total pages (ensure at least 1 page even when empty)
+        total_pages = (total_count + size - 1) // size if total_count > 0 else 1
+        
+        # If no submissions found, return empty results with message
+        if len(submissions) == 0 and page == 1:
+            logger.info(f"No submissions found for admin listing")
+            return PaginatedSubmissionsResponse(
+                items=[],
+                total=0,
+                page=page,
+                size=size,
+                pages=1,
+                error_status=False,
+                error_message="No submissions found"
+            )
         
         return PaginatedSubmissionsResponse(
             items=submissions,
