@@ -33,6 +33,7 @@ from app.models.extract import ExtractRequest, ExtractResponse
 from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse, WordFrequency
 from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMiningResults
 from app.models.crawl import CrawlTosRequest, CrawlTosResponse, CrawlPrivacyRequest, CrawlPrivacyResponse, ReanalyzeTosRequest, ReanalyzeTosResponse, ReanalyzePrivacyRequest, ReanalyzePrivacyResponse
+from typing import Optional
 from app.models.database import DocumentCreate, SubmissionCreate
 from app.models.company_info import CompanyInfoRequest
 from app.crud.submission import submission_crud
@@ -470,6 +471,16 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             response.tos_url = None
             response.success = False
             response.message = "No terms of service page found."
+            
+            # Immediately update submission status if submission_id exists in request
+            if hasattr(request, 'submission_id') and request.submission_id:
+                await submission_crud.update_submission_status(
+                    id=request.submission_id,
+                    status="failed",
+                    error_message="No terms of service page found"
+                )
+                logger.info(f"Updated submission {request.submission_id} status to failed - no ToS found")
+                
             return response
             
         logger.info(f"Found Terms of Service URL: {tos_url}")
@@ -482,6 +493,16 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             logger.warning(f"Complete failure extracting content from {tos_url}")
             response.success = False
             response.message = "Failed to extract content from terms of service page."
+            
+            # Immediately update submission status if submission_id exists in request
+            if hasattr(request, 'submission_id') and request.submission_id:
+                await submission_crud.update_submission_status(
+                    id=request.submission_id,
+                    status="failed",
+                    error_message="Failed to extract content from terms of service page"
+                )
+                logger.info(f"Updated submission {request.submission_id} status to failed - extraction failed")
+                
             return response
             
         extracted_text, extraction_error = extraction_result
@@ -492,15 +513,25 @@ async def crawl_tos(request: CrawlTosRequest) -> CrawlTosResponse:
             response.message = f"Failed to extract content: {extraction_error}"
             return response
             
-        # Check for very short content which might indicate a bot verification page
-        if len(extracted_text.split()) < 100:
-            logger.warning(f"Extracted content from {tos_url} is suspiciously short ({len(extracted_text.split())} words)")
-            # Check for common verification phrases
-            if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser"]):
-                logger.warning(f"Short extracted content appears to be a verification page: {tos_url}")
-                response.success = False
-                response.message = "Bot verification page detected - unable to access actual content"
-                return response
+                    # Check for very short content which might indicate a bot verification page
+            if len(extracted_text.split()) < 100:
+                logger.warning(f"Extracted content from {tos_url} is suspiciously short ({len(extracted_text.split())} words)")
+                # Check for common verification phrases
+                if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser", "captcha", "robot"]):
+                    logger.warning(f"Short extracted content appears to be a verification page: {tos_url}")
+                    response.success = False
+                    response.message = "Bot verification page detected - unable to access actual content"
+                    
+                    # Immediately update submission status if submission_id exists in request
+                    if hasattr(request, 'submission_id') and request.submission_id:
+                        await submission_crud.update_submission_status(
+                            id=request.submission_id,
+                            status="failed",
+                            error_message="Bot verification page detected - unable to access actual content"
+                        )
+                        logger.info(f"Updated submission {request.submission_id} status to failed - bot verification detected")
+                    
+                    return response
                 
         # Extract company name and logo URL right after content extraction
         # This way we can include the company name in the summary process
@@ -853,6 +884,16 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             response.pp_url = None
             response.success = False
             response.message = "No privacy policy page found."
+            
+            # Immediately update submission status if submission_id exists in request
+            if hasattr(request, 'submission_id') and request.submission_id:
+                await submission_crud.update_submission_status(
+                    id=request.submission_id,
+                    status="failed",
+                    error_message="No privacy policy page found"
+                )
+                logger.info(f"Updated submission {request.submission_id} status to failed - no PP found")
+                
             return response
             
         logger.info(f"Found Privacy Policy URL: {pp_url}")
@@ -865,6 +906,16 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             logger.warning(f"Complete failure extracting content from {pp_url}")
             response.success = False
             response.message = "Failed to extract content from privacy policy page."
+            
+            # Immediately update submission status if submission_id exists in request
+            if hasattr(request, 'submission_id') and request.submission_id:
+                await submission_crud.update_submission_status(
+                    id=request.submission_id,
+                    status="failed",
+                    error_message="Failed to extract content from privacy policy page"
+                )
+                logger.info(f"Updated submission {request.submission_id} status to failed - extraction failed")
+                
             return response
             
         extracted_text, extraction_error = extraction_result
@@ -875,15 +926,25 @@ async def crawl_pp(request: CrawlPrivacyRequest) -> CrawlPrivacyResponse:
             response.message = f"Failed to extract content: {extraction_error}"
             return response
             
-        # Check for very short content which might indicate a bot verification page
-        if len(extracted_text.split()) < 100:
-            logger.warning(f"Extracted content from {pp_url} is suspiciously short ({len(extracted_text.split())} words)")
-            # Check for common verification phrases
-            if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser"]):
-                logger.warning(f"Short extracted content appears to be a verification page: {pp_url}")
-                response.success = False
-                response.message = "Bot verification page detected - unable to access actual content"
-                return response
+                    # Check for very short content which might indicate a bot verification page
+            if len(extracted_text.split()) < 100:
+                logger.warning(f"Extracted content from {pp_url} is suspiciously short ({len(extracted_text.split())} words)")
+                # Check for common verification phrases
+                if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser", "captcha", "robot"]):
+                    logger.warning(f"Short extracted content appears to be a verification page: {pp_url}")
+                    response.success = False
+                    response.message = "Bot verification page detected - unable to access actual content"
+                    
+                    # Immediately update submission status if submission_id exists in request
+                    if hasattr(request, 'submission_id') and request.submission_id:
+                        await submission_crud.update_submission_status(
+                            id=request.submission_id,
+                            status="failed",
+                            error_message="Bot verification page detected - unable to access actual content"
+                        )
+                        logger.info(f"Updated submission {request.submission_id} status to failed - bot verification detected")
+                    
+                    return response
                 
         # Extract company name and logo URL right after content extraction
         # This way we can include the company name in the summary process
@@ -2200,34 +2261,40 @@ async def process_submission(submission_id: str, request: URLSubmissionRequest):
             
             if not extraction_result:
                 logger.warning(f"Failed to extract content from {extraction_url}")
+                # Immediate status update
                 await submission_crud.update_submission_status(
                     id=submission_id,
                     status="failed",
                     error_message="Failed to extract content from URL"
                 )
+                logger.info(f"Updated submission {submission_id} status to failed - extraction failed immediately")
                 return
                 
             extracted_text, extraction_error = extraction_result
             
             if not extracted_text:
                 logger.warning(f"Empty content extracted from {extraction_url}: {extraction_error}")
+                # Immediate status update for empty content
                 await submission_crud.update_submission_status(
                     id=submission_id,
                     status="failed",
                     error_message=f"Failed to extract content: {extraction_error}"
                 )
+                logger.info(f"Updated submission {submission_id} status to failed - empty content extracted")
                 return
             
             # Check for very short content which might indicate a bot verification page
             if len(extracted_text.split()) < 100:
                 logger.warning(f"Extracted content from {extraction_url} is suspiciously short ({len(extracted_text.split())} words)")
-                if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser"]):
+                if any(phrase in extracted_text.lower() for phrase in ["verify", "security", "check", "browser", "captcha", "robot"]):
                     logger.warning(f"Short extracted content appears to be a verification page: {extraction_url}")
+                    # Immediate status update for bot verification
                     await submission_crud.update_submission_status(
                         id=submission_id,
                         status="failed",
                         error_message="Bot verification page detected - unable to access actual content"
                     )
+                    logger.info(f"Updated submission {submission_id} status to failed - bot verification detected")
                     return
             
             # Extract company info
@@ -2350,8 +2417,8 @@ async def process_submission(submission_id: str, request: URLSubmissionRequest):
         # Standard submission flow (not a retry)
         document_id = None
         if document_type == "tos":
-            # Create ToS request
-            tos_request = CrawlTosRequest(url=url)
+            # Create ToS request with submission_id
+            tos_request = CrawlTosRequest(url=url, submission_id=submission_id)
             
             # Call crawl-tos endpoint
             response = await crawl_tos(tos_request)
@@ -2373,8 +2440,8 @@ async def process_submission(submission_id: str, request: URLSubmissionRequest):
                     error_message=response.message
                 )
         else:  # document_type == "pp"
-            # Create Privacy Policy request
-            pp_request = CrawlPrivacyRequest(url=url)
+            # Create Privacy Policy request with submission_id
+            pp_request = CrawlPrivacyRequest(url=url, submission_id=submission_id)
             
             # Call crawl-pp endpoint
             response = await crawl_pp(pp_request)
