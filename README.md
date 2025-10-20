@@ -42,12 +42,14 @@ Set `SUMMARY_PROVIDER` to `google` (Gemini) or `zai` (Z.AI). When set to `google
 ### Render (Docker)
 
 1. In Render, click **New + → Web Service** and select **Build & deploy from a Git repository**. Pick the `main` branch of this repo.
-2. Choose **Docker** when asked for the environment. Render will detect `Dockerfile`, but you can also import the repository’s `render.yaml` blueprint (Render dashboard → **Blueprints → New Blueprint**). The blueprint tracks the `main` branch, uses the Dockerfile, enables the `/health` check, and sets auto-deploys.
-3. Define the secrets referenced in `render.yaml` under **Settings → Secrets**:
-   - `api-key`, `gemini-api-key`, `zai-api-key`
-   - `neon-database-url`
-   - `summary-provider`
-4. Still in Render, enable a **Deploy Hook** for the service and copy the URL; this lets GitHub Actions trigger deployments after tests pass.
+2. Choose **Docker** when asked for the environment. Render will detect the `Dockerfile`, so you only need to confirm the default build/start commands.
+3. In the service **Settings → Environment** (or **Secrets**), add the variables below. Use the left column as the key and paste your values on the right:
+   - `API_KEY`
+   - `GEMINI_API_KEY`
+   - `ZAI_API_KEY`
+   - `NEON_DATABASE_URL`
+   - `SUMMARY_PROVIDER`
+4. Enable a **Deploy Hook** for the service and copy the URL; this lets GitHub Actions trigger deployments after tests pass.
 
 ### GitHub Actions
 
