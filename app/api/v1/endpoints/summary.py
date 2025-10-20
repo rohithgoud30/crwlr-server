@@ -1,13 +1,13 @@
-from fastapi import APIRouter, Response, HTTPException
-import httpx
 import logging
-import re
 import os
+import re
 from typing import Optional, Tuple
 
+import httpx
+from fastapi import APIRouter
+
 from app.core.config import settings
-from app.models.summary import SummaryRequest, SummaryResponse
-from app.models.extract import ExtractResponse, ExtractRequest
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,11 +19,8 @@ def clean_summary_text(text: str) -> str:
     """
     Clean summary text by removing unwanted characters and formatting
     """
-    text = re.sub(r'[*"`']+', '', text)
-    text = re.sub(r'
-{2,}', '
-
-', text)
+    text = re.sub(r'[*"`\']+', "", text)
+    text = re.sub(r"\n{2,}", "\n\n", text)
     return text.strip()
 
 
@@ -49,7 +46,9 @@ def get_zai_api_key() -> Optional[str]:
     return api_key
 
 
-def resolve_provider_and_model(provider_override: Optional[str], model_override: Optional[str]) -> Tuple[str, str]:
+def resolve_provider_and_model(
+    provider_override: Optional[str], model_override: Optional[str]
+) -> Tuple[str, str]:
     provider = (provider_override or settings.SUMMARY_PROVIDER or "google").lower()
     model = model_override or settings.SUMMARY_MODEL
 
@@ -79,17 +78,15 @@ def extract_summaries(summary_text: str) -> Tuple[str, str]:
     if hundred_word_start == -1 or one_sentence_start == -1:
         raise ValueError("Summary text missing expected sections")
     hundred_word = summary_text[hundred_word_start:one_sentence_start].strip()
-    hundred_word = "
-".join(hundred_word.split("
-")[1:]).strip()
+    hundred_word = "\n".join(hundred_word.split("\n")[1:]).strip()
     one_sentence = summary_text[one_sentence_start:].strip()
-    one_sentence = "
-".join(one_sentence.split("
-")[1:]).strip()
+    one_sentence = "\n".join(one_sentence.split("\n")[1:]).strip()
     return clean_summary_text(hundred_word), clean_summary_text(one_sentence)
 
 
-async def call_google_summary(prompt: str, model: str) -> Tuple[Optional[str], Optional[str]]:
+async def call_google_summary(
+    prompt: str, model: str
+) -> Tuple[Optional[str], Optional[str]]:
     api_key = get_google_api_key()
     if not api_key:
         return None, "Gemini API key not configured"
@@ -101,7 +98,12 @@ async def call_google_summary(prompt: str, model: str) -> Tuple[Optional[str], O
     try:
         async with httpx.AsyncClient() as client:
             logger.info(f"Calling Google Gemini model '{model_name}'")
-            response = await client.post(api_url, headers={"Content-Type": "application/json"}, json=payload, timeout=60.0)
+            response = await client.post(
+                api_url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=60.0,
+            )
             if response.status_code != 200:
                 logger.error("Gemini API request failed: %s", response.text)
                 return None, f"Gemini API error ({response.status_code})"
@@ -116,17 +118,24 @@ async def call_google_summary(prompt: str, model: str) -> Tuple[Optional[str], O
         return None, "Unexpected Gemini response structure"
 
 
-async def call_zai_summary(prompt: str, model: str) -> Tuple[Optional[str], Optional[str]]:
+async def call_zai_summary(
+    prompt: str, model: str
+) -> Tuple[Optional[str], Optional[str]]:
     api_key = get_zai_api_key()
     if not api_key:
         return None, "Z.AI API key not configured"
 
-    base_url = (settings.ZAI_BASE_URL or "https://api.z.ai/api/coding/paas/v4").rstrip('/')
+    base_url = (settings.ZAI_BASE_URL or "https://api.z.ai/api/coding/paas/v4").rstrip(
+        "/"
+    )
     url = f"{base_url}/chat/completions"
     payload = {
         "model": model or settings.ZAI_MODEL,
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant that writes concise policy summaries."},
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that writes concise policy summaries.",
+            },
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
@@ -139,7 +148,9 @@ async def call_zai_summary(prompt: str, model: str) -> Tuple[Optional[str], Opti
     try:
         async with httpx.AsyncClient() as client:
             logger.info(f"Calling Z.AI model '{payload['model']}' at {base_url}")
-            response = await client.post(url, headers=headers, json=payload, timeout=60.0)
+            response = await client.post(
+                url, headers=headers, json=payload, timeout=60.0
+            )
             if response.status_code != 200:
                 logger.error("Z.AI API request failed: %s", response.text)
                 return None, f"Z.AI API error ({response.status_code})"
@@ -155,37 +166,53 @@ async def call_zai_summary(prompt: str, model: str) -> Tuple[Optional[str], Opti
 
 
 def is_likely_bot_verification_text(text: str) -> bool:
-def is_likely_bot_verification_text(text: str) -> bool:
     """
     Checks if the extracted text is likely from a bot verification page rather than actual content.
     """
     if not text:
         return False
-        
+
     text_lower = text.lower()
     word_count = len(text.split())
-    
+
     # Verification keywords that suggest this is a bot check page
     verification_phrases = [
-        "verify yourself", "verification required", "security check",
-        "captcha", "prove you're human", "not a robot", 
-        "security verification", "security measure"
+        "verify yourself",
+        "verification required",
+        "security check",
+        "captcha",
+        "prove you're human",
+        "not a robot",
+        "security verification",
+        "security measure",
     ]
-    
+
     # If the text is short and contains verification phrases, it's likely a bot check
-    if word_count < 200 and any(phrase in text_lower for phrase in verification_phrases):
+    if word_count < 200 and any(
+        phrase in text_lower for phrase in verification_phrases
+    ):
         # Check for additional bot verification indicators
         bot_indicators = [
-            "browser", "reload", "retry", "try again", 
-            "refresh", "access", "blocked", "temporary"
+            "browser",
+            "reload",
+            "retry",
+            "try again",
+            "refresh",
+            "access",
+            "blocked",
+            "temporary",
         ]
-        
+
         matches = [phrase for phrase in verification_phrases if phrase in text_lower]
-        indicators = [indicator for indicator in bot_indicators if indicator in text_lower]
-        
+        indicators = [
+            indicator for indicator in bot_indicators if indicator in text_lower
+        ]
+
         # If we find both verification phrases and indicators, it's very likely a bot page
         if matches and indicators:
-            logger.warning(f"Bot verification content detected. Phrases: {matches}, Indicators: {indicators}")
+            logger.warning(
+                f"Bot verification content detected. Phrases: {matches}, Indicators: {indicators}"
+            )
             return True
-    
-    return False 
+
+    return False
