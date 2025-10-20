@@ -31,15 +31,30 @@ NEON_DATABASE_URL=postgresql://user:password@ep-your-url.neon.tech/neondb
 
 # Summary provider configuration
 SUMMARY_PROVIDER=google        # 'google' or 'zai'
-SUMMARY_MODEL=                 # optional override
-ZAI_BASE_URL=https://api.z.ai/api/coding/paas/v4
-ZAI_MODEL=GLM-4.5-Air
 ```
-
 
 ### Summary Provider Selection
 
-Set `SUMMARY_PROVIDER` to `google` (Gemini) or `zai` (Z.AI). You can override per request by sending `provider` and `model` fields to the `/summary` endpoint. Models that start with `glm` automatically route to Z.AI; models containing `gemini` route to Google.
+Set `SUMMARY_PROVIDER` to `google` (Gemini) or `zai` (Z.AI). When set to `google`, the service defaults to `gemini-2.0-flash-lite`; when set to `zai`, it uses `GLM-4.5-Air`. You can still override per request by sending `provider` and `model` fields to the `/summary` endpoint. Models that start with `glm` automatically route to Z.AI; models containing `gemini` route to Google.
+
+## Deployment
+
+### Render (Docker)
+
+1. In Render, click **New + → Web Service** and select **Build & deploy from a Git repository**. Pick the `main` branch of this repo.
+2. Choose **Docker** when asked for the environment. Render will detect `Dockerfile`, but you can also import the repository’s `render.yaml` blueprint (Render dashboard → **Blueprints → New Blueprint**). The blueprint tracks the `main` branch, uses the Dockerfile, enables the `/health` check, and sets auto-deploys.
+3. Define the secrets referenced in `render.yaml` under **Settings → Secrets**:
+   - `api-key`, `gemini-api-key`, `zai-api-key`
+   - `neon-database-url`
+   - `summary-provider`
+4. Still in Render, enable a **Deploy Hook** for the service and copy the URL; this lets GitHub Actions trigger deployments after tests pass.
+
+### GitHub Actions
+
+- Workflow: `.github/workflows/render-deploy.yml`
+- Triggers on pushes and pull requests targeting `main`.
+- On pushes to `main`, the `deploy` job posts to the Render Deploy Hook.
+- Add the hook URL as the `RENDER_DEPLOY_HOOK` secret in GitHub (Repository → Settings → Secrets and variables → Actions).
 
 ## API Documentation
 
@@ -177,8 +192,15 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   }
   ```
 
+<<<<<<< Updated upstream
 
 - **Method:** POST
+=======
+### 7. Sync Documents from Queue
+
+- **Method:** POST
+- **Path:** `/api/v1/sync-documents`
+>>>>>>> Stashed changes
 - **Headers:** `X-API-Key: {API_KEY}`
 - **Response:**
   ```json
@@ -270,11 +292,6 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   - `sort_order` (string, optional, default: "desc"): Sort order ("asc" or "desc")
   - `document_type` (string, optional): Filter by document type ("tos" or "pp")
   - `status` (string, optional): Filter by submission status (one of: initialized, processing, success, failed)
-- **Possible Status Values:**
-  - `initialized`: Submission created, processing not yet started
-  - `processing`: Crawling or analysis in progress
-  - `success`: Crawling and analysis completed successfully
-  - `failed`: Crawling or analysis failed (check `error_message` for details)
 - **Response:** `PaginatedSubmissionsResponse`
   ```json
   {
@@ -320,89 +337,47 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   ```json
   {
     "success": true,
-    "message": "Submission deleted successfully",
-    "submission_id": "submission_123"
-  }
-  ```
-- **Error Responses:**
-  ```json
-  {
-    "success": false,
-    "message": "Submission with ID submission_123 not found"
-  }
-  ```
-  ```json
-  {
-    "success": false,
-    "message": "You do not have permission to delete this submission"
+    "message": "Submission deleted successfully"
   }
   ```
 
-### 12. Create Submission
+### 12. Cancel Submission
 
 - **Method:** POST
-- **Path:** `/api/v1/submissions`
+- **Path:** `/api/v1/submissions/{submission_id}/cancel`
 - **Headers:**
   - `X-API-Key: {API_KEY}`
-  - `Content-Type: application/json`
-- **Request Body:**
-  ```json
-  {
-    "url": "https://example.com",
-    "document_type": "tos", // "tos" or "pp"
-    "document_url": null, // Optional direct URL to document
-    "user_email": "user@example.com"
-  }
-  ```
-- **Response:** `URLSubmissionResponse`
-  ```json
-  {
-    "id": "submission_id",
-    "url": "https://example.com",
-    "document_type": "tos",
-    "status": "initialized", // One of: initialized, processing, success, failed
-    "document_id": null,
-    "error_message": null,
-    "created_at": "2024-03-20T10:00:00Z",
-    "updated_at": "2024-03-20T10:00:00Z",
-    "user_email": "user@example.com"
-  }
-  ```
-- **Submission Status Values:**
-  - `initialized`: Submission created, processing not yet started
-  - `processing`: Crawling or analysis in progress
-  - `success`: Crawling and analysis completed successfully
-  - `failed`: Crawling or analysis failed (check `error_message` for details)
-
-### 13. Get Submission by ID
-
-- **Method:** GET
-- **Path:** `/api/v1/submissions/{submission_id}`
-- **Headers:**
-  - `X-API-Key: {API_KEY}`
+- **Path Parameters:**
+  - `submission_id` (string): ID of the submission to cancel
 - **Query Parameters:**
   - `user_email` (required): User's email to validate ownership
-  - `role` (optional): If set to "admin", allows viewing any submission
-- **Response:** `URLSubmissionResponse` with status field (initialized, processing, success, failed)
-
-### 14. Retry Failed Submission
-
-- **Method:** POST
-- **Path:** `/api/v1/submissions/{submission_id}/retry`
-- **Headers:**
-  - `X-API-Key: {API_KEY}`
-  - `Content-Type: application/json`
-- **Request Body:**
+- **Response:**
   ```json
   {
-    "document_url": "https://example.com/terms",
-    "user_email": "user@example.com"
+    "success": true,
+    "message": "Submission canceled successfully"
   }
   ```
-- **Response:** `URLSubmissionResponse` (same format as Create Submission response)
-- **Note:** After a successful retry request, the submission status will change from `failed` to `initialized` and the processing will start again. The status will then transition to `processing` and finally to either `success` or `failed` based on the outcome.
 
-### 15. Crawl Terms of Service
+### 13. Trigger Reprocessing
+
+- **Method:** POST
+- **Path:** `/api/v1/submissions/{submission_id}/reprocess`
+- **Headers:**
+  - `X-API-Key: {API_KEY}`
+- **Path Parameters:**
+  - `submission_id` (string): ID of the submission to reprocess
+- **Query Parameters:**
+  - `user_email` (required): User's email to validate ownership
+- **Response:**
+  ```json
+  {
+    "success": true,
+    "message": "Submission reprocessing triggered successfully"
+  }
+  ```
+
+### 14. Crawl Terms of Service
 
 - **Method:** POST
 - **Path:** `/api/v1/crawl-tos`
@@ -417,21 +392,8 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   }
   ```
 - **Response:** `CrawlTosResponse`
-  ```json
-  {
-    "url": "https://example.com",
-    "success": true,
-    "message": "ToS document successfully processed",
-    "document_id": "doc123",
-    "content": "...", // Raw text content
-    "one_sentence_summary": "...",
-    "hundred_word_summary": "...",
-    "word_frequencies": [...],
-    "text_mining_metrics": {...}
-  }
-  ```
 
-### 16. Crawl Privacy Policy
+### 15. Crawl Privacy Policy
 
 - **Method:** POST
 - **Path:** `/api/v1/crawl-pp`
@@ -447,7 +409,7 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   ```
 - **Response:** `CrawlPrivacyResponse` (similar format to Crawl ToS response)
 
-### 17. Reanalyze Terms of Service
+### 16. Reanalyze Terms of Service
 
 - **Method:** POST
 - **Path:** `/api/v1/reanalyze-tos`
@@ -463,7 +425,7 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   ```
 - **Response:** `ReanalyzeTosResponse` (similar format to Crawl ToS response)
 
-### 18. Reanalyze Privacy Policy
+### 17. Reanalyze Privacy Policy
 
 - **Method:** POST
 - **Path:** `/api/v1/reanalyze-pp`
@@ -479,7 +441,9 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   ```
 - **Response:** `ReanalyzePrivacyResponse` (similar format to Crawl ToS response)
 
-### 19. Generate Summary
+### 18. Generate Summary
+
+If no `provider` is supplied, the service uses the `SUMMARY_PROVIDER` value from the environment. Models whose names start with `glm` automatically route to Z.AI; models containing `gemini` route to the Google Gemini API.
 
 If no `provider` is supplied, the service uses the `SUMMARY_PROVIDER` value from the environment. Models whose names start with `glm` automatically route to Z.AI; models containing `gemini` route to the Google Gemini API.
 
@@ -526,7 +490,10 @@ If no `provider` is supplied, the service uses the `SUMMARY_PROVIDER` value from
 ### Neon (PostgreSQL)
 
 Set `NEON_DATABASE_URL` to your Neon connection string. The application uses Postgres for document, submission, and stats storage, including full-text search.
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
 
 ## Troubleshooting
 

@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: crwlr-server
+    env: docker
+    plan: starter
+    region: oregon
+    branch: main
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    numInstances: 1
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: API_KEY
+        fromSecret: api-key
+      - key: GEMINI_API_KEY
+        fromSecret: gemini-api-key
+      - key: ZAI_API_KEY
+        fromSecret: zai-api-key
+      - key: NEON_DATABASE_URL
+        fromSecret: neon-database-url
+      - key: SUMMARY_PROVIDER
+        fromSecret: summary-provider
