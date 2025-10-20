@@ -21,14 +21,25 @@ Create a `.env` file with the following configuration:
 # API Keys
 API_KEY=your_api_key_here
 GEMINI_API_KEY=your_gemini_api_key
+ZAI_API_KEY=your_zai_api_key
 
 # Environment setting
 ENVIRONMENT=development  # or 'production'
 
 # Neon PostgreSQL
 NEON_DATABASE_URL=postgresql://user:password@ep-your-url.neon.tech/neondb
+
+# Summary provider configuration
+SUMMARY_PROVIDER=google        # 'google' or 'zai'
+SUMMARY_MODEL=                 # optional override
+ZAI_BASE_URL=https://api.z.ai/api/coding/paas/v4
+ZAI_MODEL=GLM-4.5-Air
 ```
 
+
+### Summary Provider Selection
+
+Set `SUMMARY_PROVIDER` to `google` (Gemini) or `zai` (Z.AI). You can override per request by sending `provider` and `model` fields to the `/summary` endpoint. Models that start with `glm` automatically route to Z.AI; models containing `gemini` route to Google.
 
 ## API Documentation
 
@@ -470,6 +481,8 @@ Below is a detailed list of available API endpoints, including HTTP method, path
 
 ### 19. Generate Summary
 
+If no `provider` is supplied, the service uses the `SUMMARY_PROVIDER` value from the environment. Models whose names start with `glm` automatically route to Z.AI; models containing `gemini` route to the Google Gemini API.
+
 - **Method:** POST
 - **Path:** `/api/v1/summary`
 - **Headers:**
@@ -481,7 +494,9 @@ Below is a detailed list of available API endpoints, including HTTP method, path
     "text": "Long document text...",
     "url": "https://example.com",
     "document_type": "tos", // "tos" or "pp"
-    "company_name": "Example Corp" // Optional
+    "company_name": "Example Corp", // Optional
+    "provider": "zai", // Optional: "google" or "zai"
+    "model": "GLM-4.5-Air" // Optional model override
   }
   ```
 - **Response:**
@@ -489,27 +504,12 @@ Below is a detailed list of available API endpoints, including HTTP method, path
   {
     "url": "https://example.com",
     "document_type": "tos",
+    "provider": "zai",
+    "model": "GLM-4.5-Air",
     "success": true,
     "message": "Summary generated successfully",
     "one_sentence_summary": "...",
     "hundred_word_summary": "..."
-  }
-  ```
-
-
-- **Method:** POST
-- **Headers:**
-  - `X-API-Key: {API_KEY}`
-- **Query Parameters:**
-  - `batch_size` (optional, default: 100): Number of submissions to process in each batch
-- **Response:**
-  ```json
-  {
-    "success": true,
-    "indexed": 100,
-    "failed": 0,
-    "total": 100,
-    "timestamp": "2024-03-20T10:00:00Z"
   }
   ```
 

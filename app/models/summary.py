@@ -17,5 +17,7 @@ class SummaryResponse(BaseModel):
     document_type: Literal["tos", "pp"]  # Type of document (only "tos" or "pp" allowed)
     one_sentence_summary: Optional[str] = None
     hundred_word_summary: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
     success: bool  # Indicates if the operation was successful
     message: str  # Status message or additional information about the processing result
