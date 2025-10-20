@@ -27,7 +27,15 @@ class StatsCRUD:
                 )
                 row = existing.fetchone()
                 if row:
-                    return dict(row._mapping)
+                    cached = dict(row._mapping)
+                    if all(
+                        cached.get(field) is not None
+                        for field in ("tos_count", "pp_count", "total_count")
+                    ):
+                        return cached
+                    logger.info(
+                        "Cached stats row missing values; recalculating document counts."
+                    )
 
             aggregation = await conn.execute(
                 select(

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from sqlalchemy import case, delete, func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.core.database import (
@@ -14,7 +14,6 @@ from app.core.database import (
     get_document_by_retrieved_url as _get_document_by_retrieved_url,
     get_document_by_url as _get_document_by_url,
     increment_views as _increment_views,
-    stats,
 )
 from app.crud.base import CRUDBase
 
@@ -183,56 +182,9 @@ class DocumentCRUD(CRUDBase):
         return bool(deleted)
 
     async def get_document_counts(self) -> Dict[str, Any]:
-        async with async_engine.begin() as conn:
-            stats_query = select(stats).where(stats.c.id == 'global_stats').limit(1)
-            stats_result = await conn.execute(stats_query)
-            existing = stats_result.fetchone()
-            if existing:
-                return dict(existing._mapping)
+        from app.crud.stats import stats_crud
 
-            aggregate_query = select(
-                func.sum(
-                    case((documents.c.document_type == 'tos', 1), else_=0)
-                ).label('tos_count'),
-                func.sum(
-                    case((documents.c.document_type == 'pp', 1), else_=0)
-                ).label('pp_count'),
-                func.count().label('total_count'),
-            )
-            agg_result = await conn.execute(aggregate_query)
-            totals = agg_result.fetchone()
-            tos_count = totals.tos_count or 0
-            pp_count = totals.pp_count or 0
-            total_count = totals.total_count or 0
-            now = datetime.now(timezone.utc)
-
-            upsert_stmt = (
-                insert(stats)
-                .values(
-                    id='global_stats',
-                    tos_count=tos_count,
-                    pp_count=pp_count,
-                    total_count=total_count,
-                    last_updated=now,
-                )
-                .on_conflict_do_update(
-                    index_elements=[stats.c.id],
-                    set_={
-                        'tos_count': tos_count,
-                        'pp_count': pp_count,
-                        'total_count': total_count,
-                        'last_updated': now,
-                    },
-                )
-            )
-            await conn.execute(upsert_stmt)
-            return {
-                'id': 'global_stats',
-                'tos_count': tos_count,
-                'pp_count': pp_count,
-                'total_count': total_count,
-                'last_updated': now,
-            }
+        return await stats_crud.get_document_counts()
 
     async def update_document_analysis(
         self, doc_id: str, analysis_data: Dict[str, Any]
