@@ -14,7 +14,7 @@ from app.api.v1.endpoints.extract import auth_manager
 
 # Import settings
 from app.core.config import settings
-from app.core.database import async_engine
+from app.core.database import async_engine, ensure_tables_exist
 
 # Import environment validator
 from app.core.env_checker import validate_environment
@@ -92,6 +92,7 @@ app = FastAPI(
 
 # Variables to track initialization status
 environment_valid = False
+database_initialized = False
 playwright_initialized = False
 startup_errors = []
 
@@ -99,7 +100,7 @@ startup_errors = []
 @app.on_event("startup")
 async def startup_event():
     """Application startup event handler that initializes all required services."""
-    global environment_valid, playwright_initialized
+    global environment_valid, database_initialized, playwright_initialized
     
     logger.info("Application startup: Beginning initialization sequence...")
     
@@ -117,8 +118,19 @@ async def startup_event():
         logger.error(error_msg)
         startup_errors.append(error_msg)
     
-    # STEP 2: Initialize Playwright
-    logger.info("STEP 2: Initializing Playwright...")
+    # STEP 2: Ensure database tables exist
+    logger.info("STEP 2: Ensuring database tables exist...")
+    try:
+        await ensure_tables_exist()
+        database_initialized = True
+        logger.info("Database tables verified or created.")
+    except Exception as e:
+        error_msg = f"Database table creation failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        startup_errors.append(error_msg)
+
+    # STEP 3: Initialize Playwright
+    logger.info("STEP 3: Initializing Playwright...")
     try:
         # Start Playwright with a timeout
         await asyncio.wait_for(auth_manager.startup(), timeout=90.0) # 90 second timeout
@@ -139,6 +151,7 @@ async def startup_event():
     # Log summary of startup status
     logger.info("===== STARTUP SUMMARY =====")
     logger.info(f"Environment validation: {'✅ PASSED' if environment_valid else '❌ FAILED'}")
+    logger.info(f"Database initialization: {'✅ PASSED' if database_initialized else '❌ FAILED'}")
     logger.info(f"Playwright initialization: {'✅ PASSED' if playwright_initialized else '❌ FAILED'}")
     
     if startup_errors:
@@ -172,7 +185,7 @@ async def health_check():
     Simple health check endpoint.
     Returns status of all initialized services.
     """
-    database_status = "connected" if async_engine else "disconnected"
+    database_status = "ready" if database_initialized else "not_ready"
     
     status = {
         "status": "running", 
@@ -207,7 +220,8 @@ async def debug_status():
                 "status": "passed" if environment_valid else "failed"
             },
             "database": {
-                "engine_available": async_engine is not None
+                "engine_available": async_engine is not None,
+                "initialised": database_initialized,
             },
             "playwright": {
                 "status": "ready" if playwright_initialized else "not_ready",
