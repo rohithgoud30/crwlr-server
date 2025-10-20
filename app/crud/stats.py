@@ -1,364 +1,79 @@
-from typing import Dict, Any, Optional
 import logging
-from app.crud.firebase_base import FirebaseCRUDBase
-from app.core.database import db
-from datetime import datetime
-from google.cloud import firestore
-from google.cloud.firestore_v1.transaction import Transaction
+from datetime import datetime, timezone
+from typing import Any, Dict
 
-# Setup logging
+from sqlalchemy import case, func, select
+from sqlalchemy.dialects.postgresql import insert
+
+from app.core.database import async_engine, documents, stats
+
 logger = logging.getLogger(__name__)
 
-class StatsCRUD(FirebaseCRUDBase):
-    """CRUD for document statistics management."""
-    
-    def __init__(self):
-        """Initialize with stats collection."""
-        super().__init__("stats")
-        self.stats_id = "global_stats"
-        # Set a flag to track if Firebase is working
-        self.firebase_operational = self.collection is not None
-        if not self.firebase_operational:
-            logger.error("StatsCRUD initialized with non-functional Firebase connection")
-    
+
+class StatsCRUD:
+    """Utility helpers for aggregating document statistics from Neon."""
+
     async def get_document_counts(self) -> Dict[str, Any]:
-        """Get document counts from the stats collection."""
-        try:
-            # First check if Firebase is available
-            if not self.collection:
-                logger.error("Firebase not initialized - returning default document counts")
-                return {
-                    "tos_count": 0,
-                    "pp_count": 0,
-                    "total_count": 0,
-                    "last_updated": None
-                }
-            
-            # Get the stats document
-            doc_ref = self.collection.document(self.stats_id)
-            doc = doc_ref.get()
-            
-            if doc.exists:
-                # Stats document exists, return the counts
-                stats = doc.to_dict()
-                return {
-                    "tos_count": stats.get("tos_count", 0),
-                    "pp_count": stats.get("pp_count", 0),
-                    "total_count": stats.get("total_count", 0),
-                    "last_updated": stats.get("last_updated")
-                }
-            else:
-                # Stats document doesn't exist yet, create it by counting documents
-                logger.info("Stats document not found, creating it by counting documents")
-                counts = await self.initialize_stats()
-                return counts
-                
-        except Exception as e:
-            logger.error(f"Error getting document counts from stats: {str(e)}")
-            # Return default counts when an error occurs
-            return {
-                "tos_count": 0,
-                "pp_count": 0,
-                "total_count": 0,
-                "last_updated": None
-            }
-    
-    async def initialize_stats(self) -> Dict[str, Any]:
-        """Initialize stats by counting all documents."""
-        try:
-            # Get a reference to the documents collection
-            docs_collection = db.collection("documents")
-            
-            # Count ToS documents
-            tos_query = docs_collection.where("document_type", "==", "tos")
-            tos_docs = list(tos_query.stream())
-            tos_count = len(tos_docs)
-            
-            # Count PP documents
-            pp_query = docs_collection.where("document_type", "==", "pp")
-            pp_docs = list(pp_query.stream())
-            pp_count = len(pp_docs)
-            
-            # Total count
-            total_count = tos_count + pp_count
-            
-            # Get current time for last_updated
-            now = datetime.now()
-            
-            # Create the stats document
-            stats_data = {
-                "tos_count": tos_count,
-                "pp_count": pp_count,
-                "total_count": total_count,
-                "last_updated": now
-            }
-            
-            # Save to Firestore
-            self.collection.document(self.stats_id).set(stats_data)
-            logger.info(f"Stats initialized: ToS={tos_count}, PP={pp_count}, Total={total_count}")
-            
-            return {
-                "tos_count": tos_count,
-                "pp_count": pp_count,
-                "total_count": total_count,
-                "last_updated": now
-            }
-        except Exception as e:
-            logger.error(f"Error initializing stats: {str(e)}")
-            return {
-                "tos_count": 0,
-                "pp_count": 0,
-                "total_count": 0,
-                "last_updated": None
-            }
-    
+        return await self._aggregate_and_cache_counts()
+
     async def force_recount_stats(self) -> Dict[str, Any]:
-        """
-        Force a recount of all documents and update the stats table.
-        
-        This is useful when the stats table may be out of sync with the actual document counts.
-        It performs a full scan of the documents collection and updates the stats with accurate counts.
-        
-        Returns:
-            Updated document counts after recount.
-        """
-        try:
-            if not self.collection:
-                logger.error("Firebase not initialized - cannot recount stats")
-                return {
-                    "tos_count": 0,
-                    "pp_count": 0,
-                    "total_count": 0,
-                    "last_updated": None,
-                    "success": False,
-                    "message": "Firebase not initialized"
-                }
-                
-            logger.info("Starting forced recount of all documents")
-            
-            # Get a reference to the documents collection
-            docs_collection = db.collection("documents")
-            
-            # Count ToS documents
-            tos_query = docs_collection.where("document_type", "==", "tos")
-            tos_docs = list(tos_query.stream())
-            tos_count = len(tos_docs)
-            logger.info(f"Recount found {tos_count} ToS documents")
-            
-            # Count PP documents
-            pp_query = docs_collection.where("document_type", "==", "pp")
-            pp_docs = list(pp_query.stream())
-            pp_count = len(pp_docs)
-            logger.info(f"Recount found {pp_count} PP documents")
-            
-            # Total count
-            total_count = tos_count + pp_count
-            
-            # Get current time for last_updated
-            now = datetime.now()
-            
-            # Update the stats document
-            stats_data = {
-                "tos_count": tos_count,
-                "pp_count": pp_count,
-                "total_count": total_count,
-                "last_updated": now
-            }
-            
-            # Use a transaction to update the stats document
-            doc_ref = self.collection.document(self.stats_id)
-            transaction = db.transaction()
-            
-            @firestore.transactional
-            def update_in_transaction(transaction, doc_ref, stats_data):
-                # Always set the document, whether it exists or not
-                transaction.set(doc_ref, stats_data)
-                return True
-                
-            result = update_in_transaction(transaction, doc_ref, stats_data)
-            
-            if result:
-                logger.info(f"Stats recounted and updated: ToS={tos_count}, PP={pp_count}, Total={total_count}")
-                return {
-                    "tos_count": tos_count,
-                    "pp_count": pp_count,
-                    "total_count": total_count,
-                    "last_updated": now,
-                    "success": True,
-                    "message": "Stats recounted successfully"
-                }
-            else:
-                logger.error("Failed to update stats document during recount")
-                return {
-                    "tos_count": tos_count,
-                    "pp_count": pp_count,
-                    "total_count": total_count,
-                    "last_updated": None,
-                    "success": False,
-                    "message": "Failed to update stats document"
-                }
-        except Exception as e:
-            logger.error(f"Error during forced stats recount: {str(e)}")
-            return {
-                "tos_count": 0,
-                "pp_count": 0,
-                "total_count": 0,
-                "last_updated": None,
-                "success": False,
-                "message": f"Error during recount: {str(e)}"
-            }
-    
-    async def increment_document_count(self, document_type: str) -> bool:
-        """Increment the count for a specific document type."""
-        if not self.collection:
-            logger.error("Firebase not initialized - cannot increment count")
-            return False
-            
-        try:
-            # Get document reference
-            doc_ref = self.collection.document(self.stats_id)
-            
-            # Use transaction to ensure atomic update
-            transaction = db.transaction()
-            
-            @firestore.transactional
-            def update_in_transaction(transaction: Transaction, doc_ref):
-                doc = doc_ref.get(transaction=transaction)
-                
-                if not doc.exists:
-                    # Document doesn't exist, initialize it
-                    stats_data = {
-                        "tos_count": 1 if document_type == "tos" else 0,
-                        "pp_count": 1 if document_type == "pp" else 0,
-                        "total_count": 1,
-                        "last_updated": datetime.now()
-                    }
-                    transaction.set(doc_ref, stats_data)
-                else:
-                    # Document exists, update counts
-                    stats = doc.to_dict()
-                    tos_count = stats.get("tos_count", 0)
-                    pp_count = stats.get("pp_count", 0)
-                    
-                    if document_type == "tos":
-                        tos_count += 1
-                    elif document_type == "pp":
-                        pp_count += 1
-                    
-                    total_count = tos_count + pp_count
-                    
-                    transaction.update(doc_ref, {
+        return await self._aggregate_and_cache_counts(force_refresh=True)
+
+    async def _aggregate_and_cache_counts(self, force_refresh: bool = False) -> Dict[str, Any]:
+        async with async_engine.begin() as conn:
+            if not force_refresh:
+                existing = await conn.execute(
+                    select(stats).where(stats.c.id == "global_stats").limit(1)
+                )
+                row = existing.fetchone()
+                if row:
+                    return dict(row._mapping)
+
+            aggregation = await conn.execute(
+                select(
+                    func.sum(
+                        case((documents.c.document_type == "tos", 1), else_=0)
+                    ).label("tos_count"),
+                    func.sum(
+                        case((documents.c.document_type == "pp", 1), else_=0)
+                    ).label("pp_count"),
+                    func.count().label("total_count"),
+                )
+            )
+            totals = aggregation.fetchone()
+            tos_count = totals.tos_count or 0
+            pp_count = totals.pp_count or 0
+            total_count = totals.total_count or 0
+            now = datetime.now(timezone.utc)
+
+            upsert = (
+                insert(stats)
+                .values(
+                    id="global_stats",
+                    tos_count=tos_count,
+                    pp_count=pp_count,
+                    total_count=total_count,
+                    last_updated=now,
+                )
+                .on_conflict_do_update(
+                    index_elements=[stats.c.id],
+                    set_={
                         "tos_count": tos_count,
                         "pp_count": pp_count,
                         "total_count": total_count,
-                        "last_updated": datetime.now()
-                    })
-                
-                return True
-            
-            # Execute the transaction
-            result = update_in_transaction(transaction, doc_ref)
-            logger.info(f"Incremented count for document type: {document_type}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error incrementing document count: {str(e)}")
-            return False
-    
-    async def decrement_document_count(self, document_type: str) -> bool:
-        """Decrement the count for a specific document type."""
-        if not self.collection:
-            logger.error("Firebase not initialized - cannot decrement count")
-            return False
-            
-        try:
-            # Get document reference
-            doc_ref = self.collection.document(self.stats_id)
-            
-            # Use transaction to ensure atomic update
-            transaction = db.transaction()
-            
-            @firestore.transactional
-            def update_in_transaction(transaction: Transaction, doc_ref):
-                doc = doc_ref.get(transaction=transaction)
-                
-                if not doc.exists:
-                    # Document doesn't exist, initialize it with zeros
-                    stats_data = {
-                        "tos_count": 0,
-                        "pp_count": 0,
-                        "total_count": 0,
-                        "last_updated": datetime.now()
-                    }
-                    transaction.set(doc_ref, stats_data)
-                    return True
-                
-                # Document exists, update counts
-                stats = doc.to_dict()
-                tos_count = max(0, stats.get("tos_count", 0) - (1 if document_type == "tos" else 0))
-                pp_count = max(0, stats.get("pp_count", 0) - (1 if document_type == "pp" else 0))
-                total_count = tos_count + pp_count
-                
-                transaction.update(doc_ref, {
-                    "tos_count": tos_count,
-                    "pp_count": pp_count,
-                    "total_count": total_count,
-                    "last_updated": datetime.now()
-                })
-                
-                return True
-            
-            # Execute the transaction
-            result = update_in_transaction(transaction, doc_ref)
-            logger.info(f"Decremented count for document type: {document_type}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error decrementing document count: {str(e)}")
-            return False
-    
-    async def update_last_updated(self) -> bool:
-        """Update only the last_updated timestamp without changing counts."""
-        if not self.collection:
-            logger.error("Firebase not initialized - cannot update timestamp")
-            return False
-            
-        try:
-            # Get document reference
-            doc_ref = self.collection.document(self.stats_id)
-            
-            # Use transaction to ensure atomic update
-            transaction = db.transaction()
-            
-            @firestore.transactional
-            def update_in_transaction(transaction: Transaction, doc_ref):
-                doc = doc_ref.get(transaction=transaction)
-                
-                if not doc.exists:
-                    # Document doesn't exist, initialize it with zeros
-                    stats_data = {
-                        "tos_count": 0,
-                        "pp_count": 0,
-                        "total_count": 0,
-                        "last_updated": datetime.now()
-                    }
-                    transaction.set(doc_ref, stats_data)
-                else:
-                    # Only update the last_updated field
-                    transaction.update(doc_ref, {
-                        "last_updated": datetime.now()
-                    })
-                
-                return True
-            
-            # Execute the transaction
-            result = update_in_transaction(transaction, doc_ref)
-            logger.info(f"Updated last_updated timestamp in stats")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error updating last_updated timestamp: {str(e)}")
-            return False
+                        "last_updated": now,
+                    },
+                )
+            )
+            await conn.execute(upsert)
 
-# Create a global instance for reuse
-stats_crud = StatsCRUD() 
+        return {
+            "id": "global_stats",
+            "tos_count": tos_count,
+            "pp_count": pp_count,
+            "total_count": total_count,
+            "last_updated": now,
+        }
+
+
+stats_crud = StatsCRUD()

@@ -3,6 +3,8 @@ import httpx
 import logging
 import re
 import os
+from typing import Optional, Tuple
+
 from app.core.config import settings
 from app.models.summary import SummaryRequest, SummaryResponse
 from app.models.extract import ExtractResponse, ExtractRequest
@@ -12,302 +14,147 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 def clean_summary_text(text: str) -> str:
     """
     Clean summary text by removing unwanted characters and formatting
     """
-    # Remove markdown formatting (asterisks, quotes, etc.)
-    text = re.sub(r'[*"`\']+', '', text)
-    
-    # Remove excessive newlines
-    text = re.sub(r'\n{2,}', '\n\n', text)
-    
-    # Strip leading/trailing whitespace
-    text = text.strip()
-    
-    return text
+    text = re.sub(r'[*"`']+', '', text)
+    text = re.sub(r'
+{2,}', '
 
-def get_gemini_api_key():
-    """
-    Get the Gemini API key from environment variables loaded via settings,
-    with a fallback to direct environment variable check during request.
-    """
-    # Primary check: Rely on settings object
-    api_key = settings.GEMINI_API_KEY
-    found_via_settings = bool(api_key)
-    
-    # ---> ADDED: Fallback check directly from os.environ during the request
-    if not api_key:
-        logger.warning("API Key not found via settings, attempting direct env var check...")
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if api_key:
-            logger.info("Found API key via direct os.environ check.")
-        else:
-            logger.error("API Key not found via direct os.environ check either.")
-            
-    # Log API key status (without revealing the key)
+', text)
+    return text.strip()
+
+
+def get_google_api_key() -> Optional[str]:
+    api_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
     if api_key:
-        source = "settings" if found_via_settings else "direct env check"
+        source = "settings" if settings.GEMINI_API_KEY else "environment"
         logger.info(f"Gemini API Key found via {source}.")
-        # Check for API key validity - minimum length and format
         if len(api_key) < 20:
-            logger.warning("Gemini API key appears too short. Check for correct formatting.")
+            logger.warning("Gemini API key appears short. Check formatting.")
     else:
-        logger.error("Gemini API key NOT FOUND via settings or direct env check.")
-    
+        logger.error("Gemini API key not configured.")
     return api_key
 
-@router.post("/summary", response_model=SummaryResponse)
-async def generate_summary(request: SummaryRequest, response: Response) -> SummaryResponse:
-    """
-    Takes text content (such as Terms of Service or Privacy Policy text) and generates 
-    a one-sentence summary and a 100-word summary using Gemini API.
-    
-    The input can be either direct text or an ExtractResponse from the extract endpoint.
-    """
-    try:
-        # Determine if this is an ExtractResponse object or direct text input
-        text = request.text
-        base_url = request.url or ""
-        document_type = request.document_type or "tos"
-        extraction_success = True
-        extraction_message = ""
-        
-        # Handle input from extract endpoint
-        if hasattr(request, 'extract_response') and request.extract_response:
-            extraction_success = request.extract_response.success
-            extraction_message = request.extract_response.message
-            
-            if request.extract_response.text:
-                text = request.extract_response.text
-                # Use document type from extract response if available
-                if request.extract_response.document_type:
-                    document_type = request.extract_response.document_type
-                if request.extract_response.url:
-                    base_url = request.extract_response.url
-        
-        logger.info(f"Processing summary request for document type: {document_type}")
-        
-        # Check if extraction failed due to bot detection or other issues
-        if not extraction_success:
-            logger.warning(f"Text extraction failed: {extraction_message}")
-            # If extraction failed, return appropriate error message
-            return SummaryResponse(
-                url=base_url,
-                document_type=document_type,
-                success=False,
-                message=f"Unable to generate summary: {extraction_message}",
-                one_sentence_summary=None,
-                hundred_word_summary=None
-            )
-            
-        # Check for bot detection patterns in the extracted text
-        if text and is_likely_bot_verification_text(text):
-            logger.warning("Bot verification content detected in extracted text")
-            return SummaryResponse(
-                url=base_url,
-                document_type=document_type,
-                success=False,
-                message="Unable to generate summary: Bot verification page detected - unable to access actual content",
-                one_sentence_summary=None,
-                hundred_word_summary=None
-            )
-        
-        # If no text is provided, return an error
-        if not text or len(text.strip()) < 100:
-            logger.warning("Insufficient text provided for summarization")
-            
-            # Still return successful response with extracted text, even if insufficient
-            # Rather than failing, just indicate no summary is available
-            return SummaryResponse(
-                url=base_url,
-                document_type=document_type,
-                success=True,
-                message="Text is too short to generate a meaningful summary. A minimum of 100 characters is required.",
-                one_sentence_summary=None,
-                hundred_word_summary=None
-            )
-        
-        # Get API key using helper function
-        API_KEY = get_gemini_api_key()
-        
-        if not API_KEY:
-            logger.error("GEMINI_API_KEY not found in environment variables or settings")
-            
-            # Still return a successful response with the extracted text
-            # Just report that summarization failed due to API key
-            return SummaryResponse(
-                url=base_url,
-                document_type=document_type,
-                success=True,
-                message="Text extraction succeeded but summarization failed: GEMINI_API_KEY not configured",
-                one_sentence_summary=None, 
-                hundred_word_summary=None
-            )
-        
-        # Prepare the content
-        content = text
-        doc_type = document_type
-        
-        # Map document type to full name
-        if doc_type == "pp":
-            doc_type_full = "Privacy Policy"
-        elif doc_type == "tos":
-            doc_type_full = "Terms of Service"
+
+def get_zai_api_key() -> Optional[str]:
+    api_key = settings.ZAI_API_KEY or os.environ.get("ZAI_API_KEY")
+    if api_key:
+        source = "settings" if settings.ZAI_API_KEY else "environment"
+        logger.info(f"Z.AI API Key found via {source}.")
+    else:
+        logger.error("Z.AI API key not configured.")
+    return api_key
+
+
+def resolve_provider_and_model(provider_override: Optional[str], model_override: Optional[str]) -> Tuple[str, str]:
+    provider = (provider_override or settings.SUMMARY_PROVIDER or "google").lower()
+    model = model_override or settings.SUMMARY_MODEL
+
+    if model:
+        lowered = model.lower()
+        if lowered.startswith("glm"):
+            provider = "zai"
+        elif "gemini" in lowered:
+            provider = "google"
+    else:
+        if provider == "zai":
+            model = settings.ZAI_MODEL
         else:
-            # Default to using the original value
-            doc_type_full = doc_type
-            
-        # Include company name if available
-        company_reference = ""
-        if hasattr(request, 'company_name') and request.company_name:
-            company_name = request.company_name
-            company_reference = f" for {company_name}"
-            logger.info(f"Including company name in summary: {company_name}")
-        
-        # Construct the prompt
-        prompt = f"""100-WORD SUMMARY
+            model = settings.GOOGLE_SUMMARY_MODEL
 
-Write a concise, factual 100-word summary of the {doc_type_full}{company_reference}. Focus on the company policies and practices without referencing external services, other companies, or general industry practices.
+    if provider == "zai" and not model:
+        model = settings.ZAI_MODEL
+    if provider == "google" and not model:
+        model = settings.GOOGLE_SUMMARY_MODEL
 
-Requirements:
-- Exactly 100 words (±10)
-- Single paragraph
-- Objective, factual tone
-- No personal pronouns (I, we, you)
-- No meta-references (e.g., "this document", "this text" ,"this policy")
-- No conditional language (e.g., "may", "might", "could")
-- No links or external references
-
-Provide a direct, factual, and company-specific summary.
+    return provider, model
 
 
-ONE-SENTENCE SUMMARY
+def extract_summaries(summary_text: str) -> Tuple[str, str]:
+    hundred_word_start = summary_text.find("100-WORD SUMMARY")
+    one_sentence_start = summary_text.find("ONE-SENTENCE SUMMARY")
+    if hundred_word_start == -1 or one_sentence_start == -1:
+        raise ValueError("Summary text missing expected sections")
+    hundred_word = summary_text[hundred_word_start:one_sentence_start].strip()
+    hundred_word = "
+".join(hundred_word.split("
+")[1:]).strip()
+    one_sentence = summary_text[one_sentence_start:].strip()
+    one_sentence = "
+".join(one_sentence.split("
+")[1:]).strip()
+    return clean_summary_text(hundred_word), clean_summary_text(one_sentence)
 
-Write a single sentence (maximum 40 words) summarizing the most important aspect of the {doc_type_full}{company_reference}. Focus on the company policies and practices without referencing external services, other companies, or general industry practices.
 
-Requirements:
-- One clear, direct sentence
-- Maximum 40 words
-- Objective, factual tone
-- No personal pronouns (I, we, you)
-- No meta-references (e.g., "this document", "this text")
-- No conditional language (e.g., "may", "might", "could")
-- No links or external references
+async def call_google_summary(prompt: str, model: str) -> Tuple[Optional[str], Optional[str]]:
+    api_key = get_google_api_key()
+    if not api_key:
+        return None, "Gemini API key not configured"
+
+    model_name = model or settings.GOOGLE_SUMMARY_MODEL
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            logger.info(f"Calling Google Gemini model '{model_name}'")
+            response = await client.post(api_url, headers={"Content-Type": "application/json"}, json=payload, timeout=60.0)
+            if response.status_code != 200:
+                logger.error("Gemini API request failed: %s", response.text)
+                return None, f"Gemini API error ({response.status_code})"
+            data = response.json()
+            summary_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            return summary_text, None
+    except httpx.HTTPError as exc:
+        logger.error("HTTP error during Gemini request: %s", exc)
+        return None, f"HTTP error - {exc}"
+    except (KeyError, IndexError) as exc:
+        logger.error("Error parsing Gemini response: %s", exc)
+        return None, "Unexpected Gemini response structure"
 
 
-Here is the document content:
+async def call_zai_summary(prompt: str, model: str) -> Tuple[Optional[str], Optional[str]]:
+    api_key = get_zai_api_key()
+    if not api_key:
+        return None, "Z.AI API key not configured"
 
-{content}"""
-        
-        # Construct JSON payload
-        json_payload = {
-            "contents": [{
-                "parts": [{
-                    "text": prompt
-                }]
-            }]
-        }
-        
-        # Log that we're about to make the API request
-        logger.info(f"Sending request to Gemini API for {document_type} summary")
-        
-        # Attempt to make API call with error handling
-        try:
-            # Send API request
-            async with httpx.AsyncClient() as client:
-                api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b-001:generateContent?key={API_KEY}"
-                logger.info(f"Using Gemini API URL: {api_url.split('?key=')[0]}") # Log URL without the API key
-                
-                api_response = await client.post(
-                    api_url,
-                    headers={"Content-Type": "application/json"},
-                    json=json_payload,
-                    timeout=60.0
-                )
-                
-                # Check if request was successful
-                if api_response.status_code != 200:
-                    error_detail = api_response.text
-                    error_msg = f"Gemini API request failed with status code {api_response.status_code}. Response: {error_detail}"
-                    logger.error(error_msg)
-                    
-                    # Return with extraction success but failed summary
-                    return SummaryResponse(
-                        url=base_url,
-                        document_type=document_type,
-                        success=True,
-                        message=f"Text extraction succeeded but summarization failed: Gemini API Error ({api_response.status_code})",
-                        one_sentence_summary=None,
-                        hundred_word_summary=None
-                    )
-                
-                # Parse response
-                response_data = api_response.json()
-                logger.info("Successfully received response from Gemini API")
-                
-                # Extract text from response
-                try:
-                    summary_text = response_data['candidates'][0]['content']['parts'][0]['text']
-                    
-                    # Extract the 100-word summary
-                    hundred_word_start = summary_text.find("100-WORD SUMMARY")
-                    one_sentence_start = summary_text.find("ONE-SENTENCE SUMMARY")
-                    
-                    hundred_word_summary = summary_text[hundred_word_start:one_sentence_start].strip()
-                    hundred_word_summary = "\n".join(hundred_word_summary.split("\n")[1:]).strip()
-                    
-                    # Extract the one-sentence summary
-                    one_sentence_summary = summary_text[one_sentence_start:].strip()
-                    one_sentence_summary = "\n".join(one_sentence_summary.split("\n")[1:]).strip()
-                    
-                    # Clean summaries
-                    hundred_word_summary = clean_summary_text(hundred_word_summary)
-                    one_sentence_summary = clean_summary_text(one_sentence_summary)
-                    
-                    return SummaryResponse(
-                        url=base_url,
-                        document_type=document_type,
-                        one_sentence_summary=one_sentence_summary,
-                        hundred_word_summary=hundred_word_summary,
-                        success=True,
-                        message="Successfully generated summaries"
-                    )
-                    
-                except (KeyError, IndexError) as e:
-                    logger.error(f"Error parsing API response: {e}")
-                    logger.error(f"Response data: {response_data}")
-                    return SummaryResponse(
-                        url=base_url,
-                        document_type=document_type,
-                        success=True,
-                        message=f"Text extraction succeeded but error parsing Gemini API response: {str(e)}",
-                        one_sentence_summary=None,
-                        hundred_word_summary=None
-                    )
-                    
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP error during API call: {str(e)}")
-            return SummaryResponse(
-                url=base_url,
-                document_type=document_type,
-                success=True,
-                message=f"Text extraction succeeded but summarization failed: HTTP error - {str(e)}",
-                one_sentence_summary=None,
-                hundred_word_summary=None
-            )
-                
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return SummaryResponse(
-            url=request.url or "",
-            document_type=request.document_type or "tos",
-            success=False,
-            message=f"Error: {str(e)}",
-            one_sentence_summary=None,
-            hundred_word_summary=None
-        ) 
+    base_url = (settings.ZAI_BASE_URL or "https://api.z.ai/api/coding/paas/v4").rstrip('/')
+    url = f"{base_url}/chat/completions"
+    payload = {
+        "model": model or settings.ZAI_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that writes concise policy summaries."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
+    try:
+        async with httpx.AsyncClient() as client:
+            logger.info(f"Calling Z.AI model '{payload['model']}' at {base_url}")
+            response = await client.post(url, headers=headers, json=payload, timeout=60.0)
+            if response.status_code != 200:
+                logger.error("Z.AI API request failed: %s", response.text)
+                return None, f"Z.AI API error ({response.status_code})"
+            data = response.json()
+            summary_text = data["choices"][0]["message"]["content"]
+            return summary_text, None
+    except httpx.HTTPError as exc:
+        logger.error("HTTP error during Z.AI request: %s", exc)
+        return None, f"HTTP error - {exc}"
+    except (KeyError, IndexError) as exc:
+        logger.error("Error parsing Z.AI response: %s", exc)
+        return None, "Unexpected Z.AI response structure"
+
+
+def is_likely_bot_verification_text(text: str) -> bool:
 def is_likely_bot_verification_text(text: str) -> bool:
     """
     Checks if the extracted text is likely from a bot verification page rather than actual content.

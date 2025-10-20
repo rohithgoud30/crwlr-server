@@ -19,16 +19,19 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "CRWLR API"
     ENVIRONMENT: str = "production"
     
-    # Firebase settings
-    FIREBASE_PROJECT_ID: Optional[str] = None
-    FIREBASE_SERVICE_ACCOUNT_PATH: Optional[str] = None
-    FIREBASE_CLIENT_EMAIL: Optional[str] = None
-    FIREBASE_PRIVATE_KEY: Optional[str] = None
+    # Database settings
+    NEON_DATABASE_URL: Optional[str] = None
     
     # API Keys - try to get them directly from os.environ first, then from .env
     GEMINI_API_KEY: Optional[str] = None
     API_KEY: Optional[str] = None
     
+    SUMMARY_PROVIDER: str = "google"
+    SUMMARY_MODEL: Optional[str] = None
+    GOOGLE_SUMMARY_MODEL: str = "gemini-1.5-flash-8b-001"
+    ZAI_API_KEY: Optional[str] = None
+    ZAI_BASE_URL: str = "https://api.z.ai/api/coding/paas/v4"
+    ZAI_MODEL: str = "GLM-4.5-Air"
     # BACKEND_CORS_ORIGINS is a comma-separated list of origins
     BACKEND_CORS_ORIGINS: Union[List[str], str] = []
 
@@ -64,22 +67,10 @@ class Settings(BaseSettings):
 # Create settings instance
 settings = Settings()
 
-# Try to load Firebase settings directly from environment
-if not settings.FIREBASE_PROJECT_ID and os.environ.get("FIREBASE_PROJECT_ID"):
-    settings.FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID")
-    logger.info("Loaded FIREBASE_PROJECT_ID from environment variables")
-
-if not settings.FIREBASE_SERVICE_ACCOUNT_PATH and os.environ.get("FIREBASE_SERVICE_ACCOUNT_PATH"):
-    settings.FIREBASE_SERVICE_ACCOUNT_PATH = os.environ.get("FIREBASE_SERVICE_ACCOUNT_PATH")
-    logger.info("Loaded FIREBASE_SERVICE_ACCOUNT_PATH from environment variables")
-
-if not settings.FIREBASE_CLIENT_EMAIL and os.environ.get("FIREBASE_CLIENT_EMAIL"):
-    settings.FIREBASE_CLIENT_EMAIL = os.environ.get("FIREBASE_CLIENT_EMAIL")
-    logger.info("Loaded FIREBASE_CLIENT_EMAIL from environment variables")
-
-if not settings.FIREBASE_PRIVATE_KEY and os.environ.get("FIREBASE_PRIVATE_KEY"):
-    settings.FIREBASE_PRIVATE_KEY = os.environ.get("FIREBASE_PRIVATE_KEY")
-    logger.info("Loaded FIREBASE_PRIVATE_KEY from environment variables")
+# Load Neon database URL directly from environment if not already set
+if not settings.NEON_DATABASE_URL and os.environ.get("NEON_DATABASE_URL"):
+    settings.NEON_DATABASE_URL = os.environ.get("NEON_DATABASE_URL")
+    logger.info("Loaded NEON_DATABASE_URL from environment variables")
 
 # Try to load API keys directly from environment if they're not in settings
 if not settings.GEMINI_API_KEY and os.environ.get("GEMINI_API_KEY"):
@@ -94,4 +85,4 @@ if not settings.API_KEY and os.environ.get("API_KEY"):
 logger.info(f"GEMINI_API_KEY is {'SET' if settings.GEMINI_API_KEY else 'NOT SET'}")
 logger.info(f"API_KEY is {'SET' if settings.API_KEY else 'NOT SET'}")
 logger.info(f"Environment: {settings.ENVIRONMENT}")
-logger.info(f"Firebase Project ID: {settings.FIREBASE_PROJECT_ID if settings.FIREBASE_PROJECT_ID else 'NOT SET'}")
+logger.info(f"Neon database URL: {'SET' if settings.NEON_DATABASE_URL else 'NOT SET'}")

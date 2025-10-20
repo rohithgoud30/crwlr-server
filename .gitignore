@@ -55,7 +55,10 @@ ENV/
 # Project specific
 logs/
 .pytest_cache/
-scripts/
+scripts/*
+!scripts/*.py
+!scripts/*.md
+!scripts/*.sh
 
 # Docker
 Dockerfile

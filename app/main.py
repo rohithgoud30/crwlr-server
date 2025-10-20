@@ -14,12 +14,7 @@ from app.api.v1.endpoints.extract import auth_manager
 
 # Import settings
 from app.core.config import settings
-
-# Import Firebase (new)
-from app.core.firebase import initialize_firebase, db
-
-# Import Typesense
-from app.core.typesense import init_typesense, get_typesense_client
+from app.core.database import async_engine
 
 # Import environment validator
 from app.core.env_checker import validate_environment
@@ -30,7 +25,7 @@ from app.core.env_checker import validate_environment
 #     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 # )
 
-# ---> MODIFIED: More explicit logging configuration for Cloud Run
+# ---> Logging configuration
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # Get the root logger
@@ -55,7 +50,7 @@ logger.info("Logging configured to stream to stdout.")
 # ---> Improved branch name detection without external dependencies
 def get_branch_name():
     """Get the current Git branch name using environment variable or git command"""
-    # First try environment variable (will be set in Cloud Run)
+    # First try environment variable if provided
     branch_from_env = os.environ.get("BRANCH_NAME")
     if branch_from_env and branch_from_env != "unknown":
         logger.info(f"Using branch name from environment: {branch_from_env}")
@@ -94,16 +89,14 @@ app = FastAPI(
 
 # Variables to track initialization status
 environment_valid = False
-firebase_initialized = False
 playwright_initialized = False
-typesense_initialized = False
 startup_errors = []
 
-# ---> ADDED: Startup and Shutdown Events for Playwright and Firebase
+# ---> Startup and Shutdown Events for Playwright
 @app.on_event("startup")
 async def startup_event():
     """Application startup event handler that initializes all required services."""
-    global environment_valid, firebase_initialized, playwright_initialized, typesense_initialized
+    global environment_valid, playwright_initialized
     
     logger.info("Application startup: Beginning initialization sequence...")
     
@@ -112,7 +105,7 @@ async def startup_event():
     try:
         environment_valid = validate_environment()
         if not environment_valid:
-            error_msg = "Environment validation failed - missing critical variables (Firebase/API)"
+            error_msg = "Environment validation failed - missing critical variables (Neon/API)"
             logger.error(error_msg)
             startup_errors.append(error_msg)
             # We will continue with initialization but log warnings
@@ -121,32 +114,8 @@ async def startup_event():
         logger.error(error_msg)
         startup_errors.append(error_msg)
     
-    # STEP 2: Initialize Firebase
-    logger.info("STEP 2: Initializing Firebase...")
-    try:
-        # Only proceed if environment is valid or in dev mode
-        if environment_valid or settings.ENVIRONMENT == "development":
-            # Force initialization in development mode
-            force_init = settings.ENVIRONMENT == "development"
-            initialize_firebase(force_init=force_init)
-            if db:
-                logger.info("Firebase initialization successful.")
-                firebase_initialized = True
-            else:
-                error_msg = "Firebase initialization completed but db is None"
-                logger.error(error_msg)
-                startup_errors.append(error_msg)
-        else:
-            error_msg = "Skipping Firebase initialization due to invalid environment"
-            logger.warning(error_msg)
-            startup_errors.append(error_msg)
-    except Exception as e:
-        error_msg = f"Firebase initialization failed: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        startup_errors.append(error_msg)
-    
-    # STEP 3: Initialize Playwright
-    logger.info("STEP 3: Initializing Playwright...")
+    # STEP 2: Initialize Playwright
+    logger.info("STEP 2: Initializing Playwright...")
     try:
         # Start Playwright with a timeout
         await asyncio.wait_for(auth_manager.startup(), timeout=90.0) # 90 second timeout
@@ -164,28 +133,10 @@ async def startup_event():
         if not auth_manager.startup_failure:
             auth_manager.startup_failure = str(e)
     
-    # STEP 4: Initialize Typesense for search
-    logger.info("STEP 4: Initializing Typesense...")
-    try:
-        typesense_client = init_typesense()
-        if typesense_client:
-            logger.info("Typesense initialization successful.")
-            typesense_initialized = True
-        else:
-            error_msg = "Typesense initialization failed or API key not set"
-            logger.warning(error_msg)
-            startup_errors.append(error_msg)
-    except Exception as e:
-        error_msg = f"Typesense initialization failed: {str(e)}"
-        logger.error(error_msg)
-        startup_errors.append(error_msg)
-    
     # Log summary of startup status
     logger.info("===== STARTUP SUMMARY =====")
     logger.info(f"Environment validation: {'✅ PASSED' if environment_valid else '❌ FAILED'}")
-    logger.info(f"Firebase initialization: {'✅ PASSED' if firebase_initialized else '❌ FAILED'}")
     logger.info(f"Playwright initialization: {'✅ PASSED' if playwright_initialized else '❌ FAILED'}")
-    logger.info(f"Typesense initialization: {'✅ PASSED' if typesense_initialized else '❌ FAILED'}")
     
     if startup_errors:
         logger.warning(f"Startup completed with {len(startup_errors)} errors/warnings")
@@ -218,16 +169,14 @@ async def health_check():
     Simple health check endpoint.
     Returns status of all initialized services.
     """
-    firestore_status = "connected" if db else "disconnected"
-    typesense_status = "connected" if get_typesense_client() else "disconnected"
+    database_status = "connected" if async_engine else "disconnected"
     
     status = {
         "status": "running", 
         "branch": branch_name,
         "environment_check": "passed" if environment_valid else "failed",
-        "firestore": firestore_status,
-        "playwright": "ready" if playwright_initialized else "not_ready",
-        "typesense": typesense_status
+        "database": database_status,
+        "playwright": "ready" if playwright_initialized else "not_ready"
     }
     
     if startup_errors:
@@ -254,17 +203,12 @@ async def debug_status():
             "environment_check": {
                 "status": "passed" if environment_valid else "failed"
             },
-            "firebase": {
-                "status": "initialized" if firebase_initialized else "failed",
-                "db_available": db is not None
+            "database": {
+                "engine_available": async_engine is not None
             },
             "playwright": {
                 "status": "ready" if playwright_initialized else "not_ready",
                 "startup_failure": auth_manager.startup_failure if hasattr(auth_manager, "startup_failure") else None
-            },
-            "typesense": {
-                "status": "initialized" if typesense_initialized else "failed",
-                "client_available": get_typesense_client() is not None
             }
         },
         "startup_errors": startup_errors
