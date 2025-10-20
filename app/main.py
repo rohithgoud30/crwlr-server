@@ -78,7 +78,10 @@ def get_branch_name():
     return "local"
 
 branch_name = get_branch_name()
-app_title = f"{settings.PROJECT_NAME} ({branch_name})"
+if branch_name and branch_name.lower() != "local":
+    app_title = f"{settings.PROJECT_NAME} ({branch_name})"
+else:
+    app_title = settings.PROJECT_NAME
 
 # Create the FastAPI app
 app = FastAPI(
