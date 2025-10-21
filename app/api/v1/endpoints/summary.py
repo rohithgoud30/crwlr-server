@@ -197,8 +197,7 @@ Here is the document content:
 """
 
 
-@router.post("/summary", response_model=SummaryResponse)
-async def generate_summary(request: SummaryRequest) -> SummaryResponse:
+async def generate_summary_response(request: SummaryRequest) -> SummaryResponse:
     try:
         text = request.text
         base_url = request.url or ""
@@ -310,6 +309,11 @@ async def generate_summary(request: SummaryRequest) -> SummaryResponse:
             one_sentence_summary=None,
             hundred_word_summary=None,
         )
+
+
+@router.post("/summary", response_model=SummaryResponse)
+async def generate_summary(request: SummaryRequest) -> SummaryResponse:
+    return await generate_summary_response(request)
 
 
 def is_likely_bot_verification_text(text: str) -> bool:

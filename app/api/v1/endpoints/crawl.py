@@ -15,13 +15,13 @@ from pydantic import BaseModel, Field
 from app.api.v1.endpoints.tos import find_tos, ToSRequest
 from app.api.v1.endpoints.privacy import find_privacy_policy, PrivacyRequest
 from app.api.v1.endpoints.extract import extract_text, extract_with_playwright
-from app.api.v1.endpoints.summary import generate_summary
+from app.api.v1.endpoints.summary import generate_summary_response
 from app.api.v1.endpoints.wordfrequency import analyze_word_freq_endpoint, analyze_text_frequency
 from app.api.v1.endpoints.textmining import analyze_text as analyze_text_mining, perform_text_mining
 from app.api.v1.endpoints.company_info import extract_company_info, extract_company_name_from_domain, get_company_info
 from app.core.config import settings
 
-from app.models.summary import SummaryRequest, SummaryResponse
+from app.models.summary import SummaryRequest
 from app.models.extract import ExtractRequest, ExtractResponse
 from app.models.wordfrequency import WordFrequencyRequest, WordFrequencyResponse, WordFrequency
 from app.models.textmining import TextMiningRequest, TextMiningResponse, TextMiningResults
@@ -1266,7 +1266,7 @@ async def generate_one_sentence_summary(text: str, url: str = None, document_typ
         )
         
         # Call the generate_summary endpoint
-        summary_response = await generate_summary(summary_request, Response())
+        summary_response = await generate_summary_response(summary_request)
         
         if summary_response and summary_response.success:
             if summary_response.one_sentence_summary:
@@ -1310,7 +1310,7 @@ async def generate_hundred_word_summary(text: str, url: str = None, document_typ
         )
         
         # Call the generate_summary endpoint
-        summary_response = await generate_summary(summary_request, Response())
+        summary_response = await generate_summary_response(summary_request)
         
         if summary_response and summary_response.success:
             if summary_response.hundred_word_summary:
@@ -2936,4 +2936,3 @@ async def delete_submission(
             "success": False,
             "message": f"Error deleting submission: {str(e)}"
         }
-
