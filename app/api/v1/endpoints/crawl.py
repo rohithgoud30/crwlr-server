@@ -2808,6 +2808,77 @@ async def retry_submission(
             updated_at=datetime.now()
         )
 
+@router.get("/admin/search-all-submissions", response_model=PaginatedSubmissionsResponse)
+async def admin_search_all_submissions(
+    page: int = Query(1, ge=1, description="Page number (>=1)"),
+    size: int = Query(6, description="Items per page - allowed values: 6, 9, 12, 15"),
+    sort_order: str = Query("desc", description="Sort order - 'asc' or 'desc'"),
+    role: str = Query(..., description="User role - must be 'admin' to access this endpoint"),
+    query: Optional[str] = Query(None, description="Search text for URLs"),
+    user_email: Optional[str] = Query(None, description="Filter by specific user email"),
+    status: Optional[str] = Query(None, description="Filter by submission status"),
+    document_type: Optional[str] = Query(None, description="Filter by document type ('tos' or 'pp')"),
+    api_key: str = Depends(get_api_key),
+):
+    allowed_sizes = [6, 9, 12, 15]
+    if size not in allowed_sizes:
+        size = 6
+
+    if sort_order not in ["asc", "desc"]:
+        sort_order = "desc"
+
+    if role.lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        submissions_data, total_count = await submission_crud.paginate_all_submissions(
+            page=page,
+            size=size,
+            sort_order=sort_order,
+            search_url=query or None,
+            user_email=user_email,
+            status=status,
+            document_type=document_type,
+        )
+
+        submissions = [
+            URLSubmissionResponse(
+                id=item["id"],
+                url=item.get("requested_url"),
+                document_type=item.get("document_type"),
+                status=item.get("status"),
+                document_id=item.get("document_id"),
+                error_message=item.get("error_message"),
+                created_at=item.get("created_at"),
+                updated_at=item.get("updated_at"),
+                user_email=item.get("user_email"),
+            )
+            for item in submissions_data
+        ]
+
+        total_pages = (total_count + size - 1) // size if total_count > 0 else 1
+
+        return PaginatedSubmissionsResponse(
+            items=submissions,
+            total=total_count,
+            page=page,
+            size=size,
+            pages=total_pages,
+            error_status=False,
+            error_message=None,
+        )
+    except Exception as exc:
+        logger.error("Admin submissions search failed: %s", exc)
+        return PaginatedSubmissionsResponse(
+            items=[],
+            total=0,
+            page=page,
+            size=size,
+            pages=1,
+            error_status=True,
+            error_message=f"Failed to retrieve submissions: {exc}",
+        )
+
 @router.get("/search-submissions", response_model=PaginatedSubmissionsResponse)
 async def search_submissions(
     query: str = Query("", description="Search query for URLs (optional, empty to list all)"),

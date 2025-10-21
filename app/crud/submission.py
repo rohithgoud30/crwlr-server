@@ -222,5 +222,56 @@ class SubmissionCRUD(CRUDBase):
 
         return items, total
 
+    async def paginate_all_submissions(
+        self,
+        page: int,
+        size: int,
+        sort_order: str = "desc",
+        search_url: Optional[str] = None,
+        user_email: Optional[str] = None,
+        status: Optional[str] = None,
+        document_type: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        if sort_order not in {"asc", "desc"}:
+            sort_order = "desc"
+
+        offset = max(page - 1, 0) * size
+
+        base_query = select(submissions)
+        count_query = select(func.count()).select_from(submissions)
+
+        if user_email:
+            base_query = base_query.where(submissions.c.user_email == user_email)
+            count_query = count_query.where(submissions.c.user_email == user_email)
+
+        if search_url:
+            pattern = f"%{search_url.lower()}%"
+            condition = func.lower(submissions.c.requested_url).like(pattern)
+            base_query = base_query.where(condition)
+            count_query = count_query.where(condition)
+
+        if status:
+            base_query = base_query.where(submissions.c.status == status)
+            count_query = count_query.where(submissions.c.status == status)
+
+        if document_type:
+            base_query = base_query.where(submissions.c.document_type == document_type)
+            count_query = count_query.where(submissions.c.document_type == document_type)
+
+        order_column = submissions.c.created_at.asc()
+        if sort_order == "desc":
+            order_column = submissions.c.created_at.desc()
+
+        base_query = base_query.order_by(order_column).offset(offset).limit(size)
+
+        async with async_engine.connect() as conn:
+            total_result = await conn.execute(count_query)
+            total = total_result.scalar() or 0
+
+            data_result = await conn.execute(base_query)
+            items = [dict(row._mapping) for row in data_result.fetchall()]
+
+        return items, total
+
 
 submission_crud = SubmissionCRUD()
