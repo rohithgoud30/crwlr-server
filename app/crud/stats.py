@@ -32,6 +32,8 @@ class StatsCRUD:
                         cached.get(field) is not None
                         for field in ("tos_count", "pp_count", "total_count")
                     ):
+                        cached.setdefault("message", "Stats fetched from cache")
+                        cached["success"] = True
                         return cached
                     logger.info(
                         "Cached stats row missing values; recalculating document counts."
@@ -81,6 +83,8 @@ class StatsCRUD:
             "pp_count": pp_count,
             "total_count": total_count,
             "last_updated": now,
+            "success": True,
+            "message": "Stats recomputed and cached",
         }
 
 
