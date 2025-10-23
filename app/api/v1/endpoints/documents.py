@@ -8,7 +8,7 @@ from app.core.auth import get_api_key
 from app.models.database import Document
 from app.crud.document import document_crud
 from app.crud.stats import stats_crud
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -40,12 +40,31 @@ class DocumentSearchResponse(BaseModel):
 
 
 class DocumentSearchRequest(BaseModel):
-    search_text: str  # Changed to required
-    document_type: Optional[Literal["tos", "pp"]] = None
-    page: int = Field(1, ge=1)
-    per_page: int = Field(6, ge=1, le=100)
-    sort_by: str = "relevance"  # Changed default to relevance
-    sort_order: Literal["asc", "desc"] = "desc"
+    """Support both snake_case and camelCase payloads from various clients."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    search_text: str = Field(
+        validation_alias=AliasChoices("search_text", "searchText")
+    )  # Changed to required
+    document_type: Optional[Literal["tos", "pp"]] = Field(
+        default=None, validation_alias=AliasChoices("document_type", "documentType")
+    )
+    page: int = Field(
+        default=1, ge=1, validation_alias=AliasChoices("page", "pageNumber")
+    )
+    per_page: int = Field(
+        default=6,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("per_page", "perPage"),
+    )
+    sort_by: str = Field(
+        default="relevance", validation_alias=AliasChoices("sort_by", "sortBy")
+    )  # Changed default to relevance
+    sort_order: Literal["asc", "desc"] = Field(
+        default="desc", validation_alias=AliasChoices("sort_order", "sortOrder")
+    )
 
 
 @router.post("/documents/search", response_model=DocumentSearchResponse)
@@ -330,5 +349,4 @@ async def recount_stats():
             "message": f"Error during stats recount: {str(e)}",
             "timestamp": datetime.now().isoformat()
         }
-
 
